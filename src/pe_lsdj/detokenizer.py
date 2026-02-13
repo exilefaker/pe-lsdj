@@ -333,7 +333,7 @@ def repack_tables(tokens_dict: dict[str, Array]) -> dict[str, list]:
     # Envelopes: merge volume/fade nibbles back into bytes
     env_bytes = _nibble_merge(
         tokens_dict[TABLE_ENV_VOLUME] - 1,
-        tokens_dict[TABLE_ENV_FADE] - 1,
+        tokens_dict[TABLE_ENV_DURATION] - 1,
     ).ravel().astype(jnp.uint8).tolist()
 
     # Transposes: remove null offset

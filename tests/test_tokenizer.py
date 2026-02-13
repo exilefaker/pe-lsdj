@@ -177,10 +177,10 @@ def test_table_tokenizer_round_trip(raw_bytes):
     raw_data = jnp.array(raw_bytes, dtype=jnp.uint8)
 
     print("Parsing tables...")
-    tokens_step_1 = parse_tables(raw_data)
+    raw_tables_1, traces_1 = parse_tables(raw_data)
 
     print("Compiling tokens back to bytes...")
-    repacked = repack_tables(tokens_step_1)
+    repacked = repack_tables(raw_tables_1)
 
     print("Reassembling raw data...")
     raw_data_2 = raw_data
@@ -190,10 +190,16 @@ def test_table_tokenizer_round_trip(raw_bytes):
         )
 
     print("Parsing recovered bytes...")
-    tokens_step_2 = parse_tables(raw_data_2)
+    raw_tables_2, traces_2 = parse_tables(raw_data_2)
 
-    print("Comparing tokens...")
-    for key in tokens_step_1:
-        diff = tokens_step_1[key] != tokens_step_2[key]
-        assert not jnp.any(diff), f"FAIL: {key} mismatch! Indices: {jnp.where(diff)}"
-        print(f"PASS: {key}")
+    print("Comparing raw table tokens...")
+    for key in raw_tables_1:
+        diff = raw_tables_1[key] != raw_tables_2[key]
+        assert not jnp.any(diff), f"FAIL: {key} (raw) mismatch! Indices: {jnp.where(diff)}"
+        print(f"PASS: {key} (raw)")
+
+    print("Comparing trace tokens...")
+    for key in traces_1:
+        diff = traces_1[key] != traces_2[key]
+        assert not jnp.any(diff), f"FAIL: {key} (trace) mismatch! Indices: {jnp.where(diff)}"
+        print(f"PASS: {key} (trace)")

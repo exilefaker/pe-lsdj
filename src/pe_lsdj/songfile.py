@@ -90,7 +90,14 @@ class SongTokenizer(eqx.Module):
 
         # NOTES: tokens per phrase, to be rearranged
         phrase_notes = parse_notes(raw_data[PHRASE_NOTES_ADDR])
-        
+
+        # GROOVES: ((even step ticks, odd step ticks) per 16 steps)
+        grooves = parse_grooves(raw_data[GROOVES_ADDR])
+
+        # This pulls data from several places in the array
+        # TABLES: (NUM_TABLES, STEPS_PER_TABLE, concatenate_table_feature_tokens_dim)
+        tables_vecs, trace_vecs = parse_tables(raw_data)
+
         instruments_dict = parse_instruments(raw_data[INSTRUMENTS_ADDR])
         # INSTRUMENTS: (NUM_INSTRUMENTS, concatenated_feature_tokens_dim)
         instruments = jnp.column_stack(instruments_dict.values())
@@ -104,10 +111,6 @@ class SongTokenizer(eqx.Module):
         phrase_fx_values = jnp.column_stack(
             phrase_fx_values_dict.values()
         )
-
-        # This pulls data from several places in the array
-        # TABLES: (NUM_TABLES, STEPS_PER_TABLE, concatenate_table_feature_tokens_dim)
-        tables = parse_tables(raw_data)
 
         # ======= Slot tokens into global structure =========
 

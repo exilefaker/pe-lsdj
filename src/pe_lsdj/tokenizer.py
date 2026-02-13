@@ -2,6 +2,7 @@
 Tools to parse specific datatypes from LSDJ into tokens
 (Assumes v3.9.2)
 """
+import numpy as np
 import jax.numpy as jnp
 from jaxtyping import Array
 from pylsdj import NUM_INSTRUMENTS, NUM_TABLES, STEPS_PER_TABLE
@@ -365,7 +366,10 @@ def parse_5bit_IDs(data_bytes: Array) -> Array:
 def parse_3bit_enum(data_bytes: Array) -> Array:
     return (data_bytes + 1) * (data_bytes <= 3)
 
-def parse_fx_values(data_bytes: Array, fx_command_IDs: Array) -> dict[str, Array]:
+def parse_fx_values(
+    data_bytes: Array,
+    fx_command_IDs: Array,
+) -> dict[str, Array]:
     """
     Parse raw (decompressed) bytes representing FX into appropriate
     structures, conditional on FX command IDs.
@@ -436,6 +440,36 @@ def parse_fx_values(data_bytes: Array, fx_command_IDs: Array) -> dict[str, Array
     }
 
     return parsed_fx_values
+
+
+# NOTE: Currently unused. Maybe usable at embedding time? Revisit.
+def replace_table_ids(fx_commands, fx_values, table_traces):
+    """
+    Given FX command and value arrays, replace table ID references (CMD_A)
+    with pre-computed trace embeddings to avoid recursion.
+
+    fx_commands: (N,) - parsed FX command IDs (0-18)
+    fx_values: (N, FX_dim) - parsed FX values (2D flat)
+    table_traces: dict from get_table_traces, values shaped (NUM_TABLES, STEPS_PER_TABLE, ...)
+    """
+    # Column 0 of fx_values is TABLE_FX (table IDs with +1 null offset)
+    table_ids = (fx_values[:, 0] - 1).astype(jnp.int32)
+
+    # Flatten and concatenate all trace fields into (NUM_TABLES, trace_dim)
+    trace_keys = (TABLE_TRANSPOSE, TABLE_FX_1, TABLE_FX_VALUE_1, TABLE_FX_2, TABLE_FX_VALUE_2)
+    full_traces = jnp.concatenate(
+        [table_traces[k].reshape(NUM_TABLES, -1) for k in trace_keys], axis=-1
+    )
+
+    # Look up trace for each step's referenced table ID
+    trace_embeddings = full_traces[table_ids]  # (N, trace_dim)
+
+    # Zero out non-CMD_A steps
+    is_table_cmd = (fx_commands == CMD_A)
+    trace_embeddings = trace_embeddings * is_table_cmd[:, None]
+
+    # Replace column 0 (TABLE_FX ID) with trace embedding, keep remaining columns
+    return jnp.column_stack([trace_embeddings, fx_values[:, 1:]])
 
 
 def parse_softsynths(data: Array) -> dict[str, Array]:
@@ -510,25 +544,213 @@ def parse_softsynths(data: Array) -> dict[str, Array]:
 
 # Parse tables
 
-def parse_tables(data: Array) -> dict[str, Array]:
+def get_resolve_maps(fx_cmd_1, fx_val_1_raw, fx_cmd_2, fx_val_2_raw):
+    """
+    Helper function to build resolution maps for Left (CMD1/Trans) and 
+    Right (CMD2) columns in table ata.
+
+    Used to create "trace" representations of tables, which can be used 
+    inside table definitions to avoid recursion.
+
+    Uses parsed commands (masked, no +1 offset) and raw value bytes
+    (no +1 offset) so values can be used directly as indices.
+
+    fx_cmd_1, fx_cmd_2: (N,) - output of parse_fx_commands
+    fx_val_1_raw, fx_val_2_raw: (N,) - raw FX value bytes from save data
+    
+    Rules:
+    1. 'A' Command: Affects both columns. Priority: CMD1 > CMD2.
+    2. 'H' Command: Affects only its own column.
+    3. 'H' Count: Ignored (Infinite Loop approximation).
+    """
+    flat_dim = len(fx_cmd_1)
+    
+    # Initialize both as identity maps (pointing to themselves)
+    resolve_map_L = np.arange(flat_dim)
+    resolve_map_R = np.arange(flat_dim)
+    
+    for idx in range(flat_dim):
+        cmd1 = int(fx_cmd_1[idx])
+        val1 = int(fx_val_1_raw[idx])
+        
+        cmd2 = int(fx_cmd_2[idx])
+        val2 = int(fx_val_2_raw[idx])
+        
+        table_start = (idx // STEPS_PER_TABLE) * STEPS_PER_TABLE
+        
+        # --- A (table) commands ---
+        target_table_idx = -1
+        
+        if cmd1 == CMD_A:
+            target_table_idx = val1 * STEPS_PER_TABLE
+        elif cmd2 == CMD_A:
+            target_table_idx = val2 * STEPS_PER_TABLE
+            
+        if target_table_idx != -1:
+            # If A exists, it overrides everything.
+            # Both cursors jump to the START of the target table.
+            resolve_map_L[idx] = target_table_idx
+            resolve_map_R[idx] = target_table_idx
+            continue 
+
+        # --- H (hop) commands ---
+        
+        # Left Column Logic
+        if cmd1 == CMD_H:
+            # Mask high nibble (count), keep low nibble (step index)
+            hop_target = val1 & 0x0F 
+            resolve_map_L[idx] = table_start + hop_target
+            
+        # Right Column Logic
+        if cmd2 == CMD_H:
+            hop_target = val2 & 0x0F
+            resolve_map_R[idx] = table_start + hop_target
+            
+    # We must compress both maps to handle chains like:
+    # Table 1 (A->2) -> Table 2 (A->3) -> Data
+    for _ in range(4):
+        resolve_map_L = resolve_map_L[resolve_map_L]
+        resolve_map_R = resolve_map_R[resolve_map_R]
+        
+    return resolve_map_L, resolve_map_R
+
+
+def get_traces(resolve_map_L, resolve_map_R, flat_tables):
+    """
+    Algorithm to construct table "execution trace" representations that
+    eliminate any nested table commands. This allows us to compute meaningful
+    table embeddings without potentially endless recursion.
+
+    For example, given the following:
+
+    Table 1              Table 2
+    =============||=============
+    Env|CMD1|CMD2||Env|CMD1|CMD2
+    -------------||-------------
+    A3 |C03 | -  ||82 |C35 | E88
+    82 | -  |OL  ||71 | -  | E67
+    72 |H00 |OR  ||00 |P12 | E55
+    62 | -  |A02 ||00 |P37 | E23
+    51 | -  | -  ||00 | -  | E11
+         ...           ...
+
+    The encoding for Table 1 would walk through the steps following hop (H)
+    and table (A) commands:
+
+    trace(Table 1) = Env|CMD1|CMD2
+                     -------------
+                     A3 |C03 | -
+                     82 | -  |OL
+                   * 72 |C03 |OR         * Execution trace follows H command
+                     62 |C35 |E88 +        (left column only)
+                     51 | -  |E67
+                         ...             + Execution trace follows A command
+                                           (switch to Table 2)
+
+    - Note that hops for the Transpose column (not shown here) are
+    controlled by CMD1.
+
+    - The Env column runs on its own timer which depends on duration values,
+    so aligning it with the CMD columns is difficult. As a simple heuristic
+    we just use the Env from the first (root) table.
+
+    - Edge case: two A commands on same line: column 1 overrides column 2
+
+    The algorithm works by initializing a "cursor" at the start of each table
+    in parallel, and walking through a pre-computed next-step map.
+
+    Returns:
+
+    Trace representations for all 32 tables, shaped (NUM_TABLES, STEPS_PER_TABLE, ...).
+    """
+    
+    cursor_L = jnp.arange(NUM_TABLES) * STEPS_PER_TABLE
+    cursor_R = jnp.arange(NUM_TABLES) * STEPS_PER_TABLE
+    
+    trace_L = []
+    trace_R = []
+
+    transpose_flat = flat_tables[TABLE_TRANSPOSE]
+    cmd1_flat = flat_tables[TABLE_FX_1]
+    cmd_val1 = flat_tables[TABLE_FX_VALUE_1]
+
+    # data_left columns: [0: transpose, 1: cmd1, 2..2+FX_dim: cmd_val1]
+    data_left = jnp.column_stack([transpose_flat, cmd1_flat, cmd_val1])
+
+    cmd2_flat = flat_tables[TABLE_FX_2]
+    cmd_val2 = flat_tables[TABLE_FX_VALUE_2]
+
+    # data_right columns: [0: cmd2, 1..1+FX_dim: cmd_val2]
+    data_right = jnp.column_stack([cmd2_flat, cmd_val2])
+
+    for _ in range(STEPS_PER_TABLE):
+
+        real_L = jnp.take(resolve_map_L, cursor_L, axis=0)
+        real_R = jnp.take(resolve_map_R, cursor_R, axis=0)
+
+        # Sync A-command jumps: if either column resolved to a
+        # different table, force BOTH to the same target (CMD1 priority)
+        a_jumped_L = (real_L // STEPS_PER_TABLE) != (cursor_L // STEPS_PER_TABLE)
+        a_jumped_R = (real_R // STEPS_PER_TABLE) != (cursor_R // STEPS_PER_TABLE)
+        any_jump = a_jumped_L | a_jumped_R
+        a_target = jnp.where(a_jumped_L, real_L, real_R)
+        real_L = jnp.where(any_jump, a_target, real_L)
+        real_R = jnp.where(any_jump, a_target, real_R)
+
+        trace_L.append(jnp.take(data_left, real_L, axis=0))
+        trace_R.append(jnp.take(data_right, real_R, axis=0))
+
+        # Advance from (potentially synced) resolved positions
+        step_L = real_L % STEPS_PER_TABLE
+        step_R = real_R % STEPS_PER_TABLE
+        table_start_L = real_L - step_L
+        table_start_R = real_R - step_R
+        next_step_L = jnp.where(step_L == 15, 0, step_L + 1)
+        next_step_R = jnp.where(step_R == 15, 0, step_R + 1)
+        cursor_L = table_start_L + next_step_L
+        cursor_R = table_start_R + next_step_R
+
+    # Stack: (STEPS_PER_TABLE, NUM_TABLES, cols) -> (NUM_TABLES, STEPS_PER_TABLE, cols)
+    traces_L = jnp.stack(trace_L).transpose(1, 0, 2)
+    traces_R = jnp.stack(trace_R).transpose(1, 0, 2)
+
+    return {
+        TABLE_ENV_VOLUME: flat_tables[TABLE_ENV_VOLUME].reshape(NUM_TABLES, STEPS_PER_TABLE),
+        TABLE_ENV_DURATION: flat_tables[TABLE_ENV_DURATION].reshape(NUM_TABLES, STEPS_PER_TABLE),
+        TABLE_TRANSPOSE: traces_L[:, :, 0],
+        TABLE_FX_1: traces_L[:, :, 1],
+        TABLE_FX_VALUE_1: traces_L[:, :, 2:],
+        TABLE_FX_2: traces_R[:, :, 0],
+        TABLE_FX_VALUE_2: traces_R[:, :, 1:],
+    }
+
+
+def parse_tables(data: Array) -> tuple[dict[str, Array], dict[str, Array]]:
     """
     Parse raw (decompressed) bytes into tables.
 
-    Field        | Semantics          | Byte
+    Returns (raw_tables, traces):
+    - raw_tables: original table data with A commands intact (for phrase/
+      instrument level embedding via cosine similarity lookup)
+    - traces: resolved table data with A/H commands followed through
+      (for nested table references, avoiding recursion)
+
+    Field        | Semantics          | Bytes
     ====================================================================
-    Envelope     | (volume, fade)     | ...
-    Transpose    | continuous (0-255) | ...
-    FX command 1 | FX command enum    | ...
-    FX value 1   | FX value tokens    | ...
-    FX command 2 ...
-    FX value 2 ...
+    Envelope     | (volume, duration) | 0x1690:0x1890
+    Transpose    | continuous (0-255) | 0x3480:0x3680
+    FX command 1 | FX command enum    | 0x3680:0x3880
+    FX value 1   | FX value tokens    | 0x3880:0x3A80
+    FX command 2 | FX command enum    | 0x3A80:0x3C80
+    FX value 2   | FX value tokens    | 0x3C80:0x3E80
     """
     shape = (NUM_TABLES, STEPS_PER_TABLE)
+    fx_dim = len(FX_VALUE_KEYS)
 
     # Envelopes: 1 byte per step, nibble-split into (volume, fade)
     env_nibbles = _nibble_split(data[TABLE_ENVELOPES_ADDR]) + 1  # (512, 2)
     env_volume = env_nibbles[:, 0].reshape(shape).astype(jnp.uint8)
-    env_fade = env_nibbles[:, 1].reshape(shape).astype(jnp.uint8)
+    env_duration = env_nibbles[:, 1].reshape(shape).astype(jnp.uint8)
 
     # Transposes: continuous 0-255
     transposes = _with_null(data[TABLE_TRANSPOSES_ADDR]).reshape(shape)
@@ -538,24 +760,44 @@ def parse_tables(data: Array) -> dict[str, Array]:
     fx_val_1_dict = parse_fx_values(data[TABLE_FX_VAL_ADDR], fx_cmd_1_flat)
     fx_val_1 = jnp.column_stack(
         [fx_val_1_dict[k] for k in FX_VALUE_KEYS]
-    ).reshape((*shape, FX_VALUES_FEATURE_DIM)).astype(jnp.uint8)
+    ).reshape((*shape, fx_dim)).astype(jnp.uint8)
 
     # FX slot 2
     fx_cmd_2_flat = parse_fx_commands(data[TABLE_FX_2_ADDR])
     fx_val_2_dict = parse_fx_values(data[TABLE_FX_2_VAL_ADDR], fx_cmd_2_flat)
     fx_val_2 = jnp.column_stack(
         [fx_val_2_dict[k] for k in FX_VALUE_KEYS]
-    ).reshape((*shape, FX_VALUES_FEATURE_DIM)).astype(jnp.uint8)
+    ).reshape((*shape, fx_dim)).astype(jnp.uint8)
 
-    return {
+    raw_tables = {
         TABLE_ENV_VOLUME: env_volume,
-        TABLE_ENV_FADE: env_fade,
+        TABLE_ENV_DURATION: env_duration,
         TABLE_TRANSPOSE: transposes,
         TABLE_FX_1: fx_cmd_1_flat.reshape(shape),
         TABLE_FX_VALUE_1: fx_val_1,
         TABLE_FX_2: fx_cmd_2_flat.reshape(shape),
         TABLE_FX_VALUE_2: fx_val_2,
     }
+
+    # Build resolve maps and traces
+    flat_table_data = {
+        TABLE_ENV_VOLUME: env_volume.ravel(),
+        TABLE_ENV_DURATION: env_duration.ravel(),
+        TABLE_TRANSPOSE: transposes.ravel(),
+        TABLE_FX_1: fx_cmd_1_flat.ravel(),
+        TABLE_FX_VALUE_1: fx_val_1.reshape(-1, fx_dim),
+        TABLE_FX_2: fx_cmd_2_flat.ravel(),
+        TABLE_FX_VALUE_2: fx_val_2.reshape(-1, fx_dim),
+    }
+
+    resolve_L, resolve_R = get_resolve_maps(
+        fx_cmd_1_flat, data[TABLE_FX_VAL_ADDR],
+        fx_cmd_2_flat, data[TABLE_FX_2_VAL_ADDR],
+    )
+
+    traces = get_traces(resolve_L, resolve_R, flat_table_data)
+
+    return raw_tables, traces
 
 
 # Parse Grooves

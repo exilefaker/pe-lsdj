@@ -227,7 +227,7 @@ OFFSET_KIT_2 = "Offset kit 2"
 
 # Table tokenizer fields
 TABLE_ENV_VOLUME = "Table env volume"
-TABLE_ENV_FADE = "Table env fade"
+TABLE_ENV_DURATION = "Table env duration"
 TABLE_TRANSPOSE = "Table transpose"
 TABLE_FX_1 = "Table FX 1"
 TABLE_FX_VALUE_1 = "Table FX value 1"
@@ -252,7 +252,9 @@ SOFTSYNTH_END_VERTICAL_SHIFT = "Softsynth end vertical shift"
 # Utilities / misc
 INSTRUMENT_SIZE = 0x10
 SYNTH_SIZE = 0x10
-FX_VALUES_FEATURE_DIM = 17
+GROOVE_SIZE = 0x1F
+TABLE_SIZE = 0xBF
+FX_VALUES_FEATURE_DIM = 17  # len(FX_VALUE_KEYS)
 NUM_CHANNELS = 4
 
 # Canonical column order for stacked FX value arrays.
