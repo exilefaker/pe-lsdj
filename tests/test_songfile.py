@@ -1,22 +1,8 @@
 import numpy as np
 import pytest
-from pe_lsdj.songfile import SongFile
 from pe_lsdj.detokenizer import repack_song, _recover_fx_commands
+from pe_lsdj.songfile import SongFile
 from pe_lsdj.constants import *
-
-
-SONG_FILES = [
-    "data/tohou-final.lsdsng",
-    "data/organelle.lsdsng",
-    "data/orbital-final.lsdsng",
-    "data/equus.lsdsng",
-    "data/crshhh.lsdsng",
-]
-
-
-@pytest.fixture(params=SONG_FILES)
-def song_file(request):
-    return SongFile(request.param)
 
 
 # --- FX command recovery ---

@@ -4,35 +4,11 @@ from pe_lsdj.tokenizer import (
     get_resolve_maps, get_traces,
 )
 from pe_lsdj.detokenizer import repack_instruments, repack_notes, repack_softsynths, repack_fx_values, repack_tables, repack_grooves
-from pe_lsdj.constants import (
-    INSTRUMENTS_ADDR, PHRASE_NOTES_ADDR, PHRASE_NOTES, SOFTSYNTH_PARAMS_ADDR,
-    PHRASE_FX_ADDR, PHRASE_FX_VAL_ADDR, GROOVES_ADDR,
-    TABLE_ENVELOPES_ADDR, TABLE_TRANSPOSES_ADDR,
-    TABLE_FX_ADDR, TABLE_FX_VAL_ADDR, TABLE_FX_2_ADDR, TABLE_FX_2_VAL_ADDR,
-    CMD_A, CMD_H, NUM_TABLES, STEPS_PER_TABLE,
-    TABLE_ENV_VOLUME, TABLE_ENV_DURATION, TABLE_TRANSPOSE,
-    TABLE_FX_1, TABLE_FX_VALUE_1, TABLE_FX_2, TABLE_FX_VALUE_2,
-    FX_VALUE_KEYS,
-)
+from pe_lsdj.constants import *
 import numpy as np
 import jax.numpy as jnp
-import pytest
-from pytest_lazyfixture import lazy_fixture
 
 
-BYTES = [
-    lazy_fixture("tohou_bytes"),
-    lazy_fixture("crshhh_bytes"),
-    lazy_fixture("ofd_bytes"),
-    lazy_fixture("equus_bytes"),
-    lazy_fixture("organelle_bytes"),
-]
-
-
-@pytest.mark.parametrize(
-    "raw_bytes",
-    BYTES
-)
 def test_instrument_tokenizer_round_trip(raw_bytes):
     raw_bytes_in = raw_bytes[INSTRUMENTS_ADDR]
     print("Parsing raw bytes...")
@@ -50,10 +26,6 @@ def test_instrument_tokenizer_round_trip(raw_bytes):
         assert not jnp.any(diff), f"FAIL: {key} mismatch! Indices: {jnp.where(diff)}"
         print(f"PASS: {key}")
 
-@pytest.mark.parametrize(
-    "raw_bytes",
-    BYTES
-)
 def test_notes_tokenizer_round_trip(raw_bytes):
     raw_bytes_in = raw_bytes[PHRASE_NOTES_ADDR]
     print("Parsing raw bytes...")
@@ -71,10 +43,6 @@ def test_notes_tokenizer_round_trip(raw_bytes):
     print(f"PASS!")
 
 
-@pytest.mark.parametrize(
-    "raw_bytes",
-    BYTES
-)
 def test_softsynth_tokenizer_round_trip(raw_bytes):
     raw_bytes_in = raw_bytes[SOFTSYNTH_PARAMS_ADDR]
     print("Parsing raw bytes...")
@@ -93,10 +61,6 @@ def test_softsynth_tokenizer_round_trip(raw_bytes):
         print(f"PASS: {key}")
 
 
-@pytest.mark.parametrize(
-    "raw_bytes",
-    BYTES
-)
 def test_fx_values_tokenizer_round_trip(raw_bytes):
     raw_fx_cmd_bytes = raw_bytes[PHRASE_FX_ADDR]
     raw_fx_val_bytes = raw_bytes[PHRASE_FX_VAL_ADDR]
@@ -120,10 +84,6 @@ def test_fx_values_tokenizer_round_trip(raw_bytes):
         print(f"PASS: {key}")
 
 
-@pytest.mark.parametrize(
-    "raw_bytes",
-    BYTES
-)
 def test_groove_tokenizer_round_trip(raw_bytes):
     raw_bytes_in = jnp.array(raw_bytes[GROOVES_ADDR], dtype=jnp.uint8)
 
@@ -151,10 +111,6 @@ TABLE_REGION_MAP = {
     "fx_val_2": TABLE_FX_2_VAL_ADDR,
 }
 
-@pytest.mark.parametrize(
-    "raw_bytes",
-    BYTES
-)
 def test_table_tokenizer_round_trip(raw_bytes):
     raw_data = jnp.array(raw_bytes, dtype=jnp.uint8)
 
