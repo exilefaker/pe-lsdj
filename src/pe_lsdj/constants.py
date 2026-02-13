@@ -10,6 +10,7 @@ Constants:
 
 # Shapes (import from `pylsdj`)
 from pylsdj import (
+    FRAMES_PER_WAVE,
     NOTES,
     NUM_CHAINS,
     NUM_GROOVES, 
@@ -23,6 +24,7 @@ from pylsdj import (
     STEPS_PER_GROOVE, 
     STEPS_PER_TABLE, 
     STEPS_PER_PHRASE, 
+    WAVES_PER_SYNTH,
     WORD_LENGTH,   
 )
 
@@ -104,12 +106,15 @@ CLOCK_MINS_LEN = 1 # Ignore for now
 TEMPO_ADDR = slice(0x3FB4,0x3FB5)
 # Ignore most of these for now...
 #    1 3FB5-3FB5: tune setting
+TUNE_SETTING_ADDR = slice(0x3FB5,0x3FB6)
 #    1 3FB6-3FB6: total clock, days
 #    1 3FB7-3FB7: total clock, hours
 #    1 3FB8-3FB8: total clock, minutes
 #    1 3FB9-3FB9: total clock, checksum (days+hours+minutes)
 #    1 3FBA-3FBA: key delay
+KEY_DELAY_ADDR = slice(0x3FBA,0x3FBB)
 #    1 3FBB-3FBB: key repeat
+KEY_REPEAT_ADDR = slice(0x3FBB,0x3FBC)
 #    1 3FBC-3FBC: font
 #    1 3FBD-3FBD: sync setting
 #    1 3FBE-3FBE: colorset
@@ -120,6 +125,9 @@ TEMPO_ADDR = slice(0x3FB4,0x3FB5)
 #    1 3FC3-3FC3: prelisten
 #    2 3FC4-3FC5: wave synth overwrite locks
 #   58 3FC6-3FFF: empty
+
+# Summarize these as we mainly want to copy over the defaults
+SETTINGS_ADDR = slice(0x3FB5,0x4000)
 
 # Bank 2:
 # 4080 4000-4FEF: phrases->fx

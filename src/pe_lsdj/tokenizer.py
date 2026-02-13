@@ -5,20 +5,7 @@ Tools to parse specific datatypes from LSDJ into tokens
 import numpy as np
 import jax.numpy as jnp
 from jaxtyping import Array
-from pylsdj import NUM_INSTRUMENTS, NUM_TABLES, STEPS_PER_TABLE
 from pe_lsdj.constants import *
-
-# NOTES
-
-# First, generate "palette" fields via dedicated embedders:
-#   - Tables (32 of them)    [ [concat features -> proj per step] -> proj per table ]
-#   - Instruments (64 of them) [concat features -> proj per instrument]
-#   - Softsynths (16 of them)  [concat features -> proj per synth]
-#   - Grooves (32)
-
-# Then, use transformer to generate main sequence
-# use embeddings in place of the IDs for the above palette fields
-# Concatenate; project to global emb_dim
 
 
 def parse_notes(data_bytes: Array) -> Array:
@@ -71,7 +58,7 @@ def parse_envelopes(data_bytes: Array) -> Array:
     ).astype(jnp.uint8) + 1
 
 
-def _nibble_split(bytes: list[int]) -> Array:
+def _nibble_split(bytes: Array) -> Array:
     return jnp.column_stack(jnp.divmod(bytes, 16))
 
 def _get_bit(bytes: list[int], bit_no: int) -> Array:
@@ -123,8 +110,6 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     Keep attack 2  | Boolean                | byte 9 bit 7    | [KIT]
     Kit 2 ID       | 6-bit int              | byte 9 bits 5-0 | [KIT]
     --------------------------------------------------------------------
-    Wave length    | 4-bit int (hex)        | byte 10 bits 7-4| [WAV]
-    Speed          | 4-bit int (hex)        | byte 10 bits 3-0| [WAV]
     Distortion type|[clip,shape,shape2,wrap]| byte 10 (D0-D3) | [KIT]
     --------------------------------------------------------------------
     Length kit 2   | number (0 = auto)      | byte 11         | [KIT]
@@ -132,6 +117,10 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     Offset kit 1   | number                 | byte 12         | [KIT]
     --------------------------------------------------------------------
     Offset kit 2   | number                 | byte 13         | [KIT]
+    --------------------------------------------------------------------
+    Wave length    | 4-bit int (hex)        | byte 14 bits 7-4| [WAV]
+    Speed          | 4-bit int (hex)        | byte 14 bits 3-0| [WAV]
+
     """
 
     raw_instruments = data_bytes.reshape(NUM_INSTRUMENTS, INSTRUMENT_SIZE)
@@ -147,8 +136,8 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     ).astype(jnp.uint8)
 
     volumes = (
-        ((byte1 >> 5) & 0x03) + 1
-        * (type_IDs == WAV) | (type_IDs == KIT)
+        (((byte1 >> 5) & 0x03) + 1)
+        * ((type_IDs == WAV) | (type_IDs == KIT))
     ).astype(jnp.uint8)
 
     # Byte 2
@@ -201,8 +190,8 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
 
     # Byte 5
     byte5 = raw_instruments[:,5]
-    table_automates = _get_bit(byte5, 3) + 1
-    automate_2s = _get_bit(byte5, 4) + 1
+    table_automates = _get_bit(byte5, 4) + 1
+    automate_2s = _get_bit(byte5, 3) + 1
 
     vibrato_types = (
         (((byte5 >> 1) & 0x03) + 1)
@@ -215,12 +204,12 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     ).astype(jnp.uint8)
 
     loop_kit_1 = (
-        (_get_bit(byte5, 5) + 1)
+        (_get_bit(byte5, 6) + 1)
         * (type_IDs == KIT)
     ).astype(jnp.uint8)
 
     loop_kit_2 = (
-        (_get_bit(byte5, 6) + 1)
+        (_get_bit(byte5, 5) + 1)
         * (type_IDs == KIT)
     ).astype(jnp.uint8)
 
@@ -232,7 +221,7 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     # Byte 7
     byte7 = raw_instruments[:,7]
     waves = (
-        (_get_bit(byte5, 6) + 1)
+        (((byte7 >> 6) & 0x03) + 1)
         * (type_IDs == PU)
     ).astype(jnp.uint8)
 
@@ -263,20 +252,22 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     ).astype(jnp.uint8)
 
     kit_2_IDs = (
-        ((byte9 & 0x40) + 1)
+        ((byte9 & 0x3F) + 1)
         * (type_IDs == KIT)
     ).astype(jnp.uint8)
 
-    # Byte 10
+    # Byte 10 (KIT only: distortion type)
     byte10 = raw_instruments[:,10]
-    wave_lengths_and_speeds = (
-        (_nibble_split(byte10) + 1)
-        * ((type_IDs == WAV)[:,None])
-    ).astype(jnp.uint8)
-
     distortion_types = (
         ((byte10 - 0xD0) + 1)
         * ((type_IDs == KIT) & (byte10 >= 0xD0) & (byte10 <= 0xD3))
+    ).astype(jnp.uint8)
+
+    # Byte 14 (WAV only: steps / speed)
+    byte14 = raw_instruments[:,14]
+    wave_lengths_and_speeds = (
+        (_nibble_split(byte14) + 1)
+        * ((type_IDs == WAV)[:,None])
     ).astype(jnp.uint8)
 
     # Bytes 11-13
@@ -454,35 +445,7 @@ def parse_fx_values(
     return parsed_fx_values
 
 
-# NOTE: Currently unused. Maybe usable at embedding time? Revisit.
-def replace_table_ids(fx_commands, fx_values, table_traces):
-    """
-    Given FX command and value arrays, replace table ID references (CMD_A)
-    with pre-computed trace embeddings to avoid recursion.
-
-    fx_commands: (N,) - parsed FX command IDs (0-18)
-    fx_values: (N, FX_dim) - parsed FX values (2D flat)
-    table_traces: dict from get_table_traces, values shaped (NUM_TABLES, STEPS_PER_TABLE, ...)
-    """
-    # Column 0 of fx_values is TABLE_FX (table IDs with +1 null offset)
-    table_ids = (fx_values[:, 0] - 1).astype(jnp.int32)
-
-    # Flatten and concatenate all trace fields into (NUM_TABLES, trace_dim)
-    trace_keys = (TABLE_TRANSPOSE, TABLE_FX_1, TABLE_FX_VALUE_1, TABLE_FX_2, TABLE_FX_VALUE_2)
-    full_traces = jnp.concatenate(
-        [table_traces[k].reshape(NUM_TABLES, -1) for k in trace_keys], axis=-1
-    )
-
-    # Look up trace for each step's referenced table ID
-    trace_embeddings = full_traces[table_ids]  # (N, trace_dim)
-
-    # Zero out non-CMD_A steps
-    is_table_cmd = (fx_commands == CMD_A)
-    trace_embeddings = trace_embeddings * is_table_cmd[:, None]
-
-    # Replace column 0 (TABLE_FX ID) with trace embedding, keep remaining columns
-    return jnp.column_stack([trace_embeddings, fx_values[:, 1:]])
-
+# Synths
 
 def parse_softsynths(data: Array) -> dict[str, Array]:
     """
@@ -492,7 +455,7 @@ def parse_softsynths(data: Array) -> dict[str, Array]:
     Field              | Semantics                          | Byte
     ====================================================================
     Waveform           | [sawtooth, square, sine]           | 0
-    Filter type        | [lowpass, highpass, bandpass, all]  | 1
+    Filter type        | [lowpass, highpass, bandpass, all] | 1
     Filter resonance   | continuous (0-255)                 | 2
     Distortion         | [clip, wrap]                       | 3
     Phase type         | [normal, resync, resync2]          | 4
@@ -552,6 +515,14 @@ def parse_softsynths(data: Array) -> dict[str, Array]:
         SOFTSYNTH_END_PHASE_AMOUNT: end_phase_amounts,
         SOFTSYNTH_END_VERTICAL_SHIFT: end_vertical_shifts,
     }
+
+
+def parse_waveframes(data: Array) -> Array:
+    return _nibble_split(data).reshape((
+        NUM_SYNTHS,
+        WAVES_PER_SYNTH,
+        FRAMES_PER_WAVE
+    ))
 
 
 # Parse tables
@@ -810,6 +781,36 @@ def parse_tables(data: Array) -> tuple[dict[str, Array], dict[str, Array]]:
     traces = get_traces(resolve_L, resolve_R, flat_table_data)
 
     return raw_tables, traces
+
+
+# NOTE: Currently unused. Maybe usable at embedding time? Revisit.
+def replace_table_ids(fx_commands, fx_values, table_traces):
+    """
+    Given FX command and value arrays, replace table ID references (CMD_A)
+    with pre-computed trace embeddings to avoid recursion.
+
+    fx_commands: (N,) - parsed FX command IDs (0-18)
+    fx_values: (N, FX_dim) - parsed FX values (2D flat)
+    table_traces: dict from get_table_traces, values shaped (NUM_TABLES, STEPS_PER_TABLE, ...)
+    """
+    # Column 0 of fx_values is TABLE_FX (table IDs with +1 null offset)
+    table_ids = (fx_values[:, 0] - 1).astype(jnp.int32)
+
+    # Flatten and concatenate all trace fields into (NUM_TABLES, trace_dim)
+    trace_keys = (TABLE_TRANSPOSE, TABLE_FX_1, TABLE_FX_VALUE_1, TABLE_FX_2, TABLE_FX_VALUE_2)
+    full_traces = jnp.concatenate(
+        [table_traces[k].reshape(NUM_TABLES, -1) for k in trace_keys], axis=-1
+    )
+
+    # Look up trace for each step's referenced table ID
+    trace_embeddings = full_traces[table_ids]  # (N, trace_dim)
+
+    # Zero out non-CMD_A steps
+    is_table_cmd = (fx_commands == CMD_A)
+    trace_embeddings = trace_embeddings * is_table_cmd[:, None]
+
+    # Replace column 0 (TABLE_FX ID) with trace embedding, keep remaining columns
+    return jnp.column_stack([trace_embeddings, fx_values[:, 1:]])
 
 
 # Parse Grooves

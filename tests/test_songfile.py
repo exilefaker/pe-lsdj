@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from pe_lsdj.detokenizer import repack_song, _recover_fx_commands
+from pe_lsdj.detokenizer import _recover_fx_commands
 from pe_lsdj.songfile import SongFile
 from pe_lsdj.constants import *
 
@@ -42,7 +42,7 @@ def test_recover_fx_commands_non_continuous():
 
 def test_repack_song_tokens_round_trip(song_file):
     """song_tokens should survive the repack → reload round-trip."""
-    raw_bytes = repack_song(song_file)
+    raw_bytes = song_file.repack()
     sf2 = SongFile(raw_bytes=raw_bytes, name=song_file.name)
     np.testing.assert_array_equal(
         np.array(song_file.song_tokens),
@@ -52,7 +52,7 @@ def test_repack_song_tokens_round_trip(song_file):
 
 def test_repack_song_grooves_round_trip(song_file):
     """Grooves should survive the round-trip."""
-    raw_bytes = repack_song(song_file)
+    raw_bytes = song_file.repack()
     sf2 = SongFile(raw_bytes=raw_bytes, name=song_file.name)
     np.testing.assert_array_equal(
         np.array(song_file.grooves),
@@ -62,7 +62,7 @@ def test_repack_song_grooves_round_trip(song_file):
 
 def test_repack_song_instruments_round_trip(song_file):
     """Instrument tensors should survive the round-trip."""
-    raw_bytes = repack_song(song_file)
+    raw_bytes = song_file.repack()
     sf2 = SongFile(raw_bytes=raw_bytes, name=song_file.name)
     for key in song_file.instruments:
         np.testing.assert_array_equal(
@@ -74,7 +74,7 @@ def test_repack_song_instruments_round_trip(song_file):
 
 def test_repack_song_softsynths_round_trip(song_file):
     """Softsynth tensors should survive the round-trip."""
-    raw_bytes = repack_song(song_file)
+    raw_bytes = song_file.repack()
     sf2 = SongFile(raw_bytes=raw_bytes, name=song_file.name)
     for key in song_file.softsynths:
         np.testing.assert_array_equal(
@@ -86,7 +86,7 @@ def test_repack_song_softsynths_round_trip(song_file):
 
 def test_repack_song_tables_round_trip(song_file):
     """Table tensors should survive the round-trip."""
-    raw_bytes = repack_song(song_file)
+    raw_bytes = song_file.repack()
     sf2 = SongFile(raw_bytes=raw_bytes, name=song_file.name)
     for key in song_file.tables:
         np.testing.assert_array_equal(
@@ -98,6 +98,6 @@ def test_repack_song_tables_round_trip(song_file):
 
 def test_repack_song_tempo_round_trip(song_file):
     """Tempo should survive the round-trip."""
-    raw_bytes = repack_song(song_file)
+    raw_bytes = song_file.repack()
     sf2 = SongFile(raw_bytes=raw_bytes, name=song_file.name)
     assert int(song_file.tempo) == int(sf2.tempo)

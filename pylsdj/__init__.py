@@ -27,6 +27,7 @@ from . import utils
 
 # Alex: Add constants
 from .bread_spec import (
+    FRAMES_PER_WAVE,
     NOTES,
     NUM_CHAINS,
     NUM_GROOVES, 
@@ -40,5 +41,6 @@ from .bread_spec import (
     STEPS_PER_GROOVE, 
     STEPS_PER_TABLE, 
     STEPS_PER_PHRASE, 
+    WAVES_PER_SYNTH,
     WORD_LENGTH,    
 )

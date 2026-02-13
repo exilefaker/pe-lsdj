@@ -1,9 +1,9 @@
 from pe_lsdj.tokenizer import (
     parse_instruments, parse_notes, parse_softsynths,
     parse_fx_commands, parse_fx_values, parse_tables, parse_grooves,
-    get_resolve_maps, get_traces,
+    parse_waveframes, get_resolve_maps, get_traces,
 )
-from pe_lsdj.detokenizer import repack_instruments, repack_notes, repack_softsynths, repack_fx_values, repack_tables, repack_grooves
+from pe_lsdj.detokenizer import repack_instruments, repack_notes, repack_softsynths, repack_fx_values, repack_tables, repack_grooves, repack_waveframes
 from pe_lsdj.constants import *
 import numpy as np
 import jax.numpy as jnp
@@ -59,6 +59,24 @@ def test_softsynth_tokenizer_round_trip(raw_bytes):
         diff = tokens_step_1[key] != tokens_step_2[key]
         assert not jnp.any(diff), f"FAIL: {key} mismatch! Indices: {jnp.where(diff)}"
         print(f"PASS: {key}")
+
+
+def test_waveframe_tokenizer_round_trip(raw_bytes):
+    raw_bytes_in = jnp.array(raw_bytes[WAVE_FRAMES_ADDR], dtype=jnp.uint8)
+
+    print("Parsing waveframes...")
+    tokens_step_1 = parse_waveframes(raw_bytes_in)
+
+    print("Compiling tokens back to bytes...")
+    repacked_bytes = repack_waveframes(tokens_step_1)
+
+    print("Parsing recovered bytes...")
+    tokens_step_2 = parse_waveframes(jnp.array(repacked_bytes, dtype=jnp.uint8))
+
+    print("Comparing tokens...")
+    diff = tokens_step_1 != tokens_step_2
+    assert not jnp.any(diff), f"FAIL on indices: {jnp.where(diff)}"
+    print("PASS!")
 
 
 def test_fx_values_tokenizer_round_trip(raw_bytes):

@@ -1,5 +1,8 @@
 import equinox as eqx
 import jax.numpy as jnp
+import bread
+from typing import NamedTuple
+from pylsdj.blockutils import BlockWriter, BlockFactory
 from jaxtyping import Array
 from pe_lsdj.tokenizer import (
     _reduced_fx_cmd,
@@ -10,8 +13,10 @@ from pe_lsdj.tokenizer import (
     parse_fx_values,
     parse_softsynths,
     parse_tables,
+    parse_waveframes,
 )
-from pylsdj import load_lsdsng
+from pe_lsdj.detokenizer import repack_song
+from pylsdj import load_lsdsng, filepack, bread_spec as spec
 from pe_lsdj.constants import *
 
 
@@ -55,17 +60,27 @@ def _with_sentinel(arr):
     ])
 
 
+class Settings(NamedTuple):
+    """
+    Placeholder for more comprehensive storage of LSDJ project settings.
+    For now, we can use this to treat these values as pass-throughs.
+    """
+    settings_bytes: Array
+
+
 class SongFile(eqx.Module):
     name: str
     tempo: jnp.int32
-    song_tokens: Array
+    song_tokens: Array # Song structure
+    settings: Settings
 
-    # Entity tensors (stored separately, model looks up by ID)
+    # Entity tensors (inlined during generation)
     instruments: dict
     tables: dict
     traces: dict
-    grooves: Array
     softsynths: dict
+    grooves: Array
+    waveframes: Array
 
     def __init__(self, filename: str = None, *, raw_bytes=None, name=""):
         if raw_bytes is not None:
@@ -96,6 +111,7 @@ class SongFile(eqx.Module):
         self.softsynths = parse_softsynths(raw_data[SOFTSYNTH_PARAMS_ADDR])
         self.instruments = parse_instruments(raw_data[INSTRUMENTS_ADDR])
         self.tables, self.traces = parse_tables(raw_data)
+        self.waveframes = parse_waveframes(raw_data[WAVE_FRAMES_ADDR])
 
         # ===== Extract active song structure =====
 
@@ -203,3 +219,66 @@ class SongFile(eqx.Module):
             ],
             axis=-1
         )
+
+        # Save settings, mainly to copy over defaults
+        self.settings = Settings(
+            raw_bytes[SETTINGS_ADDR]
+        )
+    
+    def repack(self):
+        return repack_song(
+            self.song_tokens,
+            self.instruments,
+            self.tables,
+            self.grooves,
+            self.softsynths,
+            self.waveframes,
+            self.tempo,
+            self.settings.settings_bytes,
+        )
+
+    def to_lsdsng(self, output_filename=None, name="", version=25):
+        """
+        Compresses raw memory bytes and writes an .lsdsng file directly.
+        
+        Args:
+            output_filename (str): Where to save the result.
+            name (str): Name to embed in the file header (max 8 chars usually).
+            version (int): LSDj version byte (e.g. 12 for recent versions).
+        """
+        
+        # 1. Setup the Preamble (Metadata)
+        # We use a dummy buffer just to initialize the bread structure
+        preamble_dummy = bytearray([0] * 9) 
+        preamble = bread.parse(preamble_dummy, spec.lsdsng_preamble)
+        
+        # Populate metadata
+        preamble.name = name or self.name or "PROJECT"
+        preamble.version = version
+        
+        # Serialize Preamble
+        preamble_data = bread.write(preamble)
+
+        # 2. Compress the Raw Data (In-Memory)
+        # This replaces 'self.get_raw_data()'
+        # filepack.compress takes bytes and returns compressed bytes
+        compressed_data = filepack.compress(self.repack())
+
+        # 3. Block Chunking
+        # lsdsng format wraps the compressed data in blocks
+        writer = BlockWriter()
+        factory = BlockFactory()
+        writer.write(compressed_data, factory)
+
+        # 4. Write to Disk
+        output_filename = output_filename or f"{name}.lsdsng"
+        with open(output_filename, 'wb') as fp:
+            # A. Write Header
+            fp.write(preamble_data)
+            
+            # B. Write Blocks
+            # (The factory stores the chunks in memory)
+            for key in sorted(factory.blocks.keys()):
+                fp.write(bytearray(factory.blocks[key].data))
+                
+        print(f"Save to {output_filename} complete.")

@@ -8,12 +8,11 @@ from pe_lsdj.constants import *
 def _nibble_merge(high: Array, low: Array) -> Array:
     return ((high & 0x0F) << 4) | (low & 0x0F)
 
-# TODO: Do we want all these values to be in tokens_dict or are some
-# just middle men?
+# TODO: Do we want to preserve the `tokens_dict` thing?
 def repack_notes(tokens_dict: dict[str, Array]) -> Array:
     return (tokens_dict[PHRASE_NOTES] - 1).ravel().tolist()
 
-def repack_grooves(groove_tokens: Array) -> list:
+def repack_grooves(groove_tokens: Array) -> list[int]:
     """Reverse of parse_grooves. Input shape: (NUM_GROOVES, STEPS_PER_GROOVE, 2)"""
     flat = groove_tokens.reshape(-1, 2)
     return _nibble_merge(flat[:, 0] - 1, flat[:, 1] - 1).astype(jnp.uint8).ravel().tolist()
@@ -85,12 +84,12 @@ def repack_instruments(tokens_dict: dict[str, Array]) -> Array:
     ).astype(jnp.uint8)
 
     # Byte 5
-    table_automate_bit = ((tokens_dict[TABLE_AUTOMATE] - 1) & 0x01) << 3
-    automate_2_bit = ((tokens_dict[AUTOMATE_2] - 1) & 0x01) << 4
+    table_automate_bit = ((tokens_dict[TABLE_AUTOMATE] - 1) & 0x01) << 4
+    automate_2_bit = ((tokens_dict[AUTOMATE_2] - 1) & 0x01) << 3
     vibrato_type_bits = ((tokens_dict[VIBRATO_TYPE] - 1) & 0x03) << 1
     vibrato_direction_bits = (tokens_dict[VIBRATO_DIRECTION] - 1) & 0x01
-    loop_kit_bit1 = ((tokens_dict[LOOP_KIT_1] - 1) & 0x01) << 5
-    loop_kit_bit2 = ((tokens_dict[LOOP_KIT_2] - 1) & 0x01) << 6
+    loop_kit_bit1 = ((tokens_dict[LOOP_KIT_1] - 1) & 0x01) << 6
+    loop_kit_bit2 = ((tokens_dict[LOOP_KIT_2] - 1) & 0x01) << 5
 
     pu_wav_kit_bits = vibrato_type_bits | vibrato_direction_bits
     kit_bits = loop_kit_bit1 | loop_kit_bit2
@@ -142,19 +141,20 @@ def repack_instruments(tokens_dict: dict[str, Array]) -> Array:
 
     repacked_bytes = repacked_bytes.at[:,9].set(byte9)
 
-    # Byte 10
+    # Byte 10 (KIT only: distortion type)
+    distortion_type_bits = (tokens_dict[DISTORTION_TYPE] - 1) + 0xD0
+    byte10 = (
+        distortion_type_bits * (type_IDs == KIT)
+    ).astype(jnp.uint8)
+    repacked_bytes = repacked_bytes.at[:,10].set(byte10)
 
+    # Byte 14 (WAV only: steps / speed)
     wave_length_bits = ((tokens_dict[WAVE_LENGTH] - 1) & 0x0F) << 4
     speed_bits = (tokens_dict[SPEED] - 1) & 0x0F
-    distortion_type_bits = (tokens_dict[DISTORTION_TYPE] - 1) + 0xD0
-
-    byte10 = (
-        wave_length_bits * (type_IDs == WAV)
-        | speed_bits * (type_IDs == WAV)
-        | distortion_type_bits * (type_IDs == KIT)
+    byte14 = (
+        (wave_length_bits | speed_bits) * (type_IDs == WAV)
     ).astype(jnp.uint8)
-
-    repacked_bytes = repacked_bytes.at[:,10].set(byte10)
+    repacked_bytes = repacked_bytes.at[:,14].set(byte14)
 
     # Byte 11
     byte11 = (
@@ -243,6 +243,11 @@ def repack_softsynths(tokens_dict: dict[str, Array]) -> Array:
     # Bytes 13-15: padding (zeros, already initialized)
 
     return repacked_bytes.ravel().tolist()
+
+
+def repack_waveframes(waveframe_tokens: Array) -> list[int]:
+    flat = waveframe_tokens.reshape(-1, 2)
+    return _nibble_merge(flat[:, 0], flat[:, 1]).astype(jnp.uint8).ravel().tolist()
 
 
 def repack_fx_values(tokens_dict: dict[str, Array], fx_command_IDs: Array) -> list:
@@ -420,14 +425,23 @@ def _recover_fx_commands(reduced_fx, fx_vals):
 
 # --- Song-level reconstruction ---
 
-def repack_song(sf) -> list[int]:
-    """Reconstruct raw LSDJ bytes (0x8000) from a SongFile.
+def repack_song(
+    song_tokens: Array,
+    instrument_tokens: Array,
+    table_tokens: Array,
+    groove_tokens: Array,
+    softsynth_tokens: Array,
+    waveframe_tokens: Array,
+    tempo_token: Array | int,
+    settings: Array,    
+) -> list[int]:
+    """Reconstruct raw LSDJ bytes (0x8000) from tokens.
 
     Reverses the full tokenize pipeline: splits song_tokens back into
     phrase/chain/song arrays, deduplicates phrases and chains, repacks
     entities, and assembles the 32KB byte array.
     """
-    tokens = np.array(sf.song_tokens, dtype=np.uint8)
+    tokens = np.array(song_tokens, dtype=np.uint8)
     S = tokens.shape[0]
     num_phrase_blocks = S // STEPS_PER_PHRASE
 
@@ -545,16 +559,19 @@ def repack_song(sf) -> list[int]:
     notes_bytes = repack_notes({PHRASE_NOTES: jnp.array(phrase_notes_out)})
 
     # Instruments (from SongFile entity tensors)
-    instr_bytes = repack_instruments(sf.instruments)
+    instr_bytes = repack_instruments(instrument_tokens)
 
     # Grooves
-    groove_bytes = repack_grooves(sf.grooves)
+    groove_bytes = repack_grooves(groove_tokens)
 
     # Softsynths
-    synth_bytes = repack_softsynths(sf.softsynths)
+    synth_bytes = repack_softsynths(softsynth_tokens)
+
+    # Wave Frames
+    waveframe_bytes = repack_waveframes(waveframe_tokens)
 
     # Tables
-    table_region = repack_tables(sf.tables)
+    table_region = repack_tables(table_tokens)
 
     # Phrase FX: need flat arrays for repack_fx_values
     fx_cmd_flat = jnp.array(phrase_fx_cmd_out.ravel())
@@ -600,7 +617,7 @@ def repack_song(sf) -> list[int]:
     table_alloc = np.zeros(NUM_TABLES, dtype=np.uint8)
     for iid in used_instr:
         if 0 <= iid < NUM_INSTRUMENTS:
-            tbl_id = int(sf.instruments[TABLE][iid]) - 1
+            tbl_id = int(instrument_tokens[TABLE][iid]) - 1
             if 0 <= tbl_id < NUM_TABLES:
                 table_alloc[tbl_id] = 1
 
@@ -628,6 +645,8 @@ def repack_song(sf) -> list[int]:
     raw[TABLE_FX_2_VAL_ADDR] = np.array(table_region["fx_val_2"], dtype=np.uint8)
     # Softsynth params
     raw[SOFTSYNTH_PARAMS_ADDR] = np.array(synth_bytes, dtype=np.uint8)
+    # Wave Frames
+    raw[WAVE_FRAMES_ADDR] = np.array(waveframe_bytes, dtype=np.uint8)
     # Phrase FX commands
     raw[PHRASE_FX_ADDR] = np.array(fx_cmd_bytes, dtype=np.uint8)
     # Phrase FX values
@@ -647,9 +666,12 @@ def repack_song(sf) -> list[int]:
     raw[MEM_INIT_FLAG3_ADDR] = [ord('r'), ord('b')]
 
     # Tempo
-    raw[TEMPO_ADDR] = [int(sf.tempo)]
+    raw[TEMPO_ADDR] = [int(tempo_token)]
 
     # Bookmarks and other regions: zero out (not EMPTY)
     raw[BOOKMARKS_ADDR] = 0
+
+    # Repack (default) settings
+    raw[SETTINGS_ADDR] = settings
 
     return raw.tolist()
