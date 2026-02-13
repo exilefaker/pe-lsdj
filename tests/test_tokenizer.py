@@ -20,15 +20,18 @@ import pytest
 from pytest_lazyfixture import lazy_fixture
 
 
+BYTES = [
+    lazy_fixture("tohou_bytes"),
+    lazy_fixture("crshhh_bytes"),
+    lazy_fixture("ofd_bytes"),
+    lazy_fixture("equus_bytes"),
+    lazy_fixture("organelle_bytes"),
+]
+
+
 @pytest.mark.parametrize(
     "raw_bytes",
-    [
-        lazy_fixture("tohou_bytes"),
-        lazy_fixture("crshhh_bytes"),
-        lazy_fixture("ofd_bytes"),
-        lazy_fixture("equus_bytes"),
-        lazy_fixture("organelle_bytes"),
-    ]
+    BYTES
 )
 def test_instrument_tokenizer_round_trip(raw_bytes):
     raw_bytes_in = raw_bytes[INSTRUMENTS_ADDR]
@@ -49,13 +52,7 @@ def test_instrument_tokenizer_round_trip(raw_bytes):
 
 @pytest.mark.parametrize(
     "raw_bytes",
-    [
-        lazy_fixture("tohou_bytes"),
-        lazy_fixture("crshhh_bytes"),
-        lazy_fixture("ofd_bytes"),
-        lazy_fixture("equus_bytes"),
-        lazy_fixture("organelle_bytes"),
-    ]
+    BYTES
 )
 def test_notes_tokenizer_round_trip(raw_bytes):
     raw_bytes_in = raw_bytes[PHRASE_NOTES_ADDR]
@@ -76,13 +73,7 @@ def test_notes_tokenizer_round_trip(raw_bytes):
 
 @pytest.mark.parametrize(
     "raw_bytes",
-    [
-        lazy_fixture("tohou_bytes"),
-        lazy_fixture("crshhh_bytes"),
-        lazy_fixture("ofd_bytes"),
-        lazy_fixture("equus_bytes"),
-        lazy_fixture("organelle_bytes"),
-    ]
+    BYTES
 )
 def test_softsynth_tokenizer_round_trip(raw_bytes):
     raw_bytes_in = raw_bytes[SOFTSYNTH_PARAMS_ADDR]
@@ -104,13 +95,7 @@ def test_softsynth_tokenizer_round_trip(raw_bytes):
 
 @pytest.mark.parametrize(
     "raw_bytes",
-    [
-        lazy_fixture("tohou_bytes"),
-        lazy_fixture("crshhh_bytes"),
-        lazy_fixture("ofd_bytes"),
-        lazy_fixture("equus_bytes"),
-        lazy_fixture("organelle_bytes"),
-    ]
+    BYTES
 )
 def test_fx_values_tokenizer_round_trip(raw_bytes):
     raw_fx_cmd_bytes = raw_bytes[PHRASE_FX_ADDR]
@@ -137,13 +122,7 @@ def test_fx_values_tokenizer_round_trip(raw_bytes):
 
 @pytest.mark.parametrize(
     "raw_bytes",
-    [
-        lazy_fixture("tohou_bytes"),
-        lazy_fixture("crshhh_bytes"),
-        lazy_fixture("ofd_bytes"),
-        lazy_fixture("equus_bytes"),
-        lazy_fixture("organelle_bytes"),
-    ]
+    BYTES
 )
 def test_groove_tokenizer_round_trip(raw_bytes):
     raw_bytes_in = jnp.array(raw_bytes[GROOVES_ADDR], dtype=jnp.uint8)
@@ -174,13 +153,7 @@ TABLE_REGION_MAP = {
 
 @pytest.mark.parametrize(
     "raw_bytes",
-    [
-        lazy_fixture("tohou_bytes"),
-        lazy_fixture("crshhh_bytes"),
-        lazy_fixture("ofd_bytes"),
-        lazy_fixture("equus_bytes"),
-        lazy_fixture("organelle_bytes"),
-    ]
+    BYTES
 )
 def test_table_tokenizer_round_trip(raw_bytes):
     raw_data = jnp.array(raw_bytes, dtype=jnp.uint8)
@@ -212,7 +185,11 @@ def test_table_tokenizer_round_trip(raw_bytes):
         diff = traces_1[key] != traces_2[key]
         assert not jnp.any(diff), f"FAIL: {key} (trace) mismatch! Indices: {jnp.where(diff)}"
         print(f"PASS: {key} (trace)")
-
+    
+    print("Trace and table tokens should be the same shape")
+    for key in raw_tables_2:
+        diff = raw_tables_2[key].shape != traces_2[key].shape
+        assert not diff, f"FAIL: Trace and table representations for {key} differ in shape!"
 
 # ===== Synthetic table execution trace edge-case tests =====
 
