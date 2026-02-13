@@ -225,6 +225,15 @@ LENGTH_KIT_2 = "Length kit 2"
 OFFSET_KIT_1 = "Offset kit 1"
 OFFSET_KIT_2 = "Offset kit 2"
 
+# Table tokenizer fields
+TABLE_ENV_VOLUME = "Table env volume"
+TABLE_ENV_FADE = "Table env fade"
+TABLE_TRANSPOSE = "Table transpose"
+TABLE_FX_1 = "Table FX 1"
+TABLE_FX_VALUE_1 = "Table FX value 1"
+TABLE_FX_2 = "Table FX 2"
+TABLE_FX_VALUE_2 = "Table FX value 2"
+
 # Softsynth fields
 SOFTSYNTH_WAVEFORM = "Softsynth waveform"
 SOFTSYNTH_FILTER_TYPE = "Softsynth filter type"
@@ -245,3 +254,13 @@ INSTRUMENT_SIZE = 0x10
 SYNTH_SIZE = 0x10
 FX_VALUES_FEATURE_DIM = 17
 NUM_CHANNELS = 4
+
+# Canonical column order for stacked FX value arrays.
+# Must match the dict key order in parse_fx_values.
+FX_VALUE_KEYS = (
+    TABLE_FX, GROOVE_FX, HOP_FX, PAN_FX,
+    CHORD_FX_1, CHORD_FX_2, ENV_FX_VOL, ENV_FX_FADE,
+    RETRIG_FX_FADE, RETRIG_FX_RATE, VIBRATO_FX_SPEED, VIBRATO_FX_DEPTH,
+    VOLUME_FX, WAVE_FX, RANDOM_FX_L, RANDOM_FX_R,
+    CONTINUOUS_FX,
+)

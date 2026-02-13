@@ -4,6 +4,9 @@ from pe_lsdj.constants import *
 
 # ----------- De-tokenizers (map back to raw bytes) -------------
 
+def _nibble_merge(high: Array, low: Array) -> Array:
+    return ((high & 0x0F) << 4) | (low & 0x0F)
+
 # TODO: Do we want all these values to be in tokens_dict or are some
 # just middle men?
 def repack_notes(tokens_dict: dict[str, Array]) -> Array:
@@ -237,3 +240,129 @@ def repack_softsynths(tokens_dict: dict[str, Array]) -> Array:
     # Bytes 13-15: padding (zeros, already initialized)
 
     return repacked_bytes.ravel().tolist()
+
+
+def repack_fx_values(tokens_dict: dict[str, Array], fx_command_IDs: Array) -> list:
+    """
+    Reverse of parse_fx_values: reconstruct raw FX value bytes from tokens,
+    conditional on FX command IDs (0-18, where 0 = NULL).
+    """
+    # Nibble-pair commands: recombine high and low nibbles
+    chord_byte = _nibble_merge(
+        tokens_dict[CHORD_FX_1] - 1, tokens_dict[CHORD_FX_2] - 1
+    )
+    env_byte = _nibble_merge(
+        tokens_dict[ENV_FX_VOL] - 1, tokens_dict[ENV_FX_FADE] - 1
+    )
+    retrig_byte = _nibble_merge(
+        tokens_dict[RETRIG_FX_FADE] - 1, tokens_dict[RETRIG_FX_RATE] - 1
+    )
+    vibrato_byte = _nibble_merge(
+        tokens_dict[VIBRATO_FX_SPEED] - 1, tokens_dict[VIBRATO_FX_DEPTH] - 1
+    )
+    random_byte = _nibble_merge(
+        tokens_dict[RANDOM_FX_L] - 1, tokens_dict[RANDOM_FX_R] - 1
+    )
+
+    # ID/enum/byte commands: subtract the null offset
+    table_byte = tokens_dict[TABLE_FX] - 1
+    groove_byte = tokens_dict[GROOVE_FX] - 1
+    hop_byte = tokens_dict[HOP_FX] - 1
+    pan_byte = tokens_dict[PAN_FX] - 1
+    volume_byte = tokens_dict[VOLUME_FX] - 1
+    wave_byte = tokens_dict[WAVE_FX] - 1
+    continuous_byte = tokens_dict[CONTINUOUS_FX] - 1
+
+    is_continuous = (
+        (fx_command_IDs == CMD_D)
+        | (fx_command_IDs == CMD_F)
+        | (fx_command_IDs == CMD_K)
+        | (fx_command_IDs == CMD_L)
+        | (fx_command_IDs == CMD_P)
+        | (fx_command_IDs == CMD_S)
+        | (fx_command_IDs == CMD_T)
+    )
+
+    data_bytes = jnp.select(
+        [
+            fx_command_IDs == CMD_A,
+            fx_command_IDs == CMD_C,
+            fx_command_IDs == CMD_E,
+            fx_command_IDs == CMD_G,
+            fx_command_IDs == CMD_H,
+            fx_command_IDs == CMD_M,
+            fx_command_IDs == CMD_O,
+            fx_command_IDs == CMD_R,
+            fx_command_IDs == CMD_V,
+            fx_command_IDs == CMD_W,
+            fx_command_IDs == CMD_Z,
+            is_continuous,
+        ],
+        [
+            table_byte,
+            chord_byte,
+            env_byte,
+            groove_byte,
+            hop_byte,
+            volume_byte,
+            pan_byte,
+            retrig_byte,
+            vibrato_byte,
+            wave_byte,
+            random_byte,
+            continuous_byte,
+        ],
+        default=0,
+    ).astype(jnp.uint8)
+
+    return data_bytes.tolist()
+
+
+def repack_tables(tokens_dict: dict[str, Array]) -> dict[str, list]:
+    """
+    Reverse of parse_tables. Returns dict of byte lists, one per memory region:
+        "envelopes"  → TABLE_ENVELOPES_ADDR
+        "transposes" → TABLE_TRANSPOSES_ADDR
+        "fx_cmd_1"   → TABLE_FX_ADDR
+        "fx_val_1"   → TABLE_FX_VAL_ADDR
+        "fx_cmd_2"   → TABLE_FX_2_ADDR
+        "fx_val_2"   → TABLE_FX_2_VAL_ADDR
+    """
+    # Envelopes: merge volume/fade nibbles back into bytes
+    env_bytes = _nibble_merge(
+        tokens_dict[TABLE_ENV_VOLUME] - 1,
+        tokens_dict[TABLE_ENV_FADE] - 1,
+    ).ravel().astype(jnp.uint8).tolist()
+
+    # Transposes: remove null offset
+    transpose_bytes = (
+        tokens_dict[TABLE_TRANSPOSE] - 1
+    ).ravel().astype(jnp.uint8).tolist()
+
+    # FX commands: parse_fx_commands doesn't add +1, raw 0-18 values
+    fx_cmd_1 = tokens_dict[TABLE_FX_1].ravel()
+    fx_cmd_2 = tokens_dict[TABLE_FX_2].ravel()
+
+    # FX values: unstack (32, 16, 17) → dict of (512,), then repack
+    fx_val_1_flat = tokens_dict[TABLE_FX_VALUE_1].reshape(
+        -1, FX_VALUES_FEATURE_DIM
+    )
+    fx_val_1_dict = {
+        k: fx_val_1_flat[:, i] for i, k in enumerate(FX_VALUE_KEYS)
+    }
+
+    fx_val_2_flat = tokens_dict[TABLE_FX_VALUE_2].reshape(
+        -1, FX_VALUES_FEATURE_DIM
+    )
+    fx_val_2_dict = {
+        k: fx_val_2_flat[:, i] for i, k in enumerate(FX_VALUE_KEYS)
+    }
+
+    return {
+        "envelopes": env_bytes,
+        "transposes": transpose_bytes,
+        "fx_cmd_1": fx_cmd_1.astype(jnp.uint8).tolist(),
+        "fx_val_1": repack_fx_values(fx_val_1_dict, fx_cmd_1),
+        "fx_cmd_2": fx_cmd_2.astype(jnp.uint8).tolist(),
+        "fx_val_2": repack_fx_values(fx_val_2_dict, fx_cmd_2),
+    }

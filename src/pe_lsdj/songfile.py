@@ -3,11 +3,12 @@ import jax.numpy as jnp
 from jaxtyping import Array
 from pe_lsdj.tokenizer import (
     parse_grooves,
-    parse_envelopes, 
+    parse_envelopes,
     parse_instruments,
     parse_notes,
     parse_fx_commands,
     parse_fx_values,
+    parse_tables,
 )
 from pylsdj import load_lsdsng
 from pe_lsdj.constants import *
@@ -87,24 +88,26 @@ class SongTokenizer(eqx.Module):
 
         # =========== Parse tokens from raw data ===========
 
-        # Note tokens per phrase, to be rearranged
+        # NOTES: tokens per phrase, to be rearranged
         phrase_notes = parse_notes(raw_data[PHRASE_NOTES_ADDR])
         
-        # (NUM_INSTRUMENTS, concatenated_feature_tokens_dim)
         instruments_dict = parse_instruments(raw_data[INSTRUMENTS_ADDR])
+        # INSTRUMENTS: (NUM_INSTRUMENTS, concatenated_feature_tokens_dim)
         instruments = jnp.column_stack(instruments_dict.values())
 
         phrase_fx = parse_fx_commands(raw_data[PHRASE_FX_ADDR])
-        # (NUM_PHRASES, concatenated_FX_val_features_dim)
         phrase_fx_values_dict = parse_fx_values(
             raw_data[PHRASE_FX_VAL_ADDR], 
             phrase_fx
         )
+        # PHRASE FX VALUES: (NUM_PHRASES, concatenated_FX_val_features_dim)
         phrase_fx_values = jnp.column_stack(
             phrase_fx_values_dict.values()
         )
-        print("phrase fx", phrase_fx.shape)
-        print("phrase fx values", phrase_fx_values.shape)
+
+        # This pulls data from several places in the array
+        tables_dict = parse_tables(raw_data)
+        # TABLES: (NUM_TABLES, STEPS_PER_TABLE, concatenate_table_feature_tokens_dim)
 
         # ======= Slot tokens into global structure =========
 

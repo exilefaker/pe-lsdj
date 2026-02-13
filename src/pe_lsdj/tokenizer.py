@@ -39,12 +39,6 @@ def parse_fx_commands(data_bytes: Array) -> Array:
     return (data_bytes * ~(data_bytes > 18)).astype(jnp.uint8) 
 
 
-def parse_fx_value_IDs(data_bytes: Array) -> Array:
-    return data_bytes.reshape(
-        (NUM_PHRASES, STEPS_PER_PHRASE)
-    ).astype(jnp.uint8)
-
-
 def parse_envelopes(data_bytes: Array) -> Array:
     """
     Parse LSDJ envelope bytes (represented as a list of ints)
@@ -369,10 +363,6 @@ def parse_phrase_alloc_table(data: list[int]):
 
 # Parse FX command values
 
-def parse_tables(data_bytes: Array) -> Array:
-    # TODO
-    return data_bytes
-
 def parse_5bit_IDs(data_bytes: Array) -> Array:
     # Add NULL token and use for invalid entries
     with_null = data_bytes + 1
@@ -521,4 +511,54 @@ def parse_softsynths(data: Array) -> dict[str, Array]:
         SOFTSYNTH_END_FILTER_CUTOFF: end_filter_cutoffs,
         SOFTSYNTH_END_PHASE_AMOUNT: end_phase_amounts,
         SOFTSYNTH_END_VERTICAL_SHIFT: end_vertical_shifts,
+    }
+
+
+# Parse tables
+
+def parse_tables(data: Array) -> dict[str, Array]:
+    """
+    Parse raw (decompressed) bytes into tables.
+
+    Field        | Semantics          | Byte
+    ====================================================================
+    Envelope     | (volume, fade)     | ...
+    Transpose    | continuous (0-255) | ...
+    FX command 1 | FX command enum    | ...
+    FX value 1   | FX value tokens    | ...
+    FX command 2 ...
+    FX value 2 ...
+    """
+    shape = (NUM_TABLES, STEPS_PER_TABLE)
+
+    # Envelopes: 1 byte per step, nibble-split into (volume, fade)
+    env_nibbles = _nibble_split(data[TABLE_ENVELOPES_ADDR]) + 1  # (512, 2)
+    env_volume = env_nibbles[:, 0].reshape(shape).astype(jnp.uint8)
+    env_fade = env_nibbles[:, 1].reshape(shape).astype(jnp.uint8)
+
+    # Transposes: continuous 0-255
+    transposes = _with_null(data[TABLE_TRANSPOSES_ADDR]).reshape(shape)
+
+    # FX slot 1
+    fx_cmd_1_flat = parse_fx_commands(data[TABLE_FX_ADDR])
+    fx_val_1_dict = parse_fx_values(data[TABLE_FX_VAL_ADDR], fx_cmd_1_flat)
+    fx_val_1 = jnp.column_stack(
+        [fx_val_1_dict[k] for k in FX_VALUE_KEYS]
+    ).reshape((*shape, FX_VALUES_FEATURE_DIM)).astype(jnp.uint8)
+
+    # FX slot 2
+    fx_cmd_2_flat = parse_fx_commands(data[TABLE_FX_2_ADDR])
+    fx_val_2_dict = parse_fx_values(data[TABLE_FX_2_VAL_ADDR], fx_cmd_2_flat)
+    fx_val_2 = jnp.column_stack(
+        [fx_val_2_dict[k] for k in FX_VALUE_KEYS]
+    ).reshape((*shape, FX_VALUES_FEATURE_DIM)).astype(jnp.uint8)
+
+    return {
+        TABLE_ENV_VOLUME: env_volume,
+        TABLE_ENV_FADE: env_fade,
+        TABLE_TRANSPOSE: transposes,
+        TABLE_FX_1: fx_cmd_1_flat.reshape(shape),
+        TABLE_FX_VALUE_1: fx_val_1,
+        TABLE_FX_2: fx_cmd_2_flat.reshape(shape),
+        TABLE_FX_VALUE_2: fx_val_2,
     }
