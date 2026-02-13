@@ -1,8 +1,8 @@
-from pe_lsdj.tokenizer import parse_instruments, parse_notes, parse_softsynths, parse_fx_commands, parse_fx_values, parse_tables
-from pe_lsdj.detokenizer import repack_instruments, repack_notes, repack_softsynths, repack_fx_values, repack_tables
+from pe_lsdj.tokenizer import parse_instruments, parse_notes, parse_softsynths, parse_fx_commands, parse_fx_values, parse_tables, parse_grooves
+from pe_lsdj.detokenizer import repack_instruments, repack_notes, repack_softsynths, repack_fx_values, repack_tables, repack_grooves
 from pe_lsdj.constants import (
     INSTRUMENTS_ADDR, PHRASE_NOTES_ADDR, PHRASE_NOTES, SOFTSYNTH_PARAMS_ADDR,
-    PHRASE_FX_ADDR, PHRASE_FX_VAL_ADDR,
+    PHRASE_FX_ADDR, PHRASE_FX_VAL_ADDR, GROOVES_ADDR,
     TABLE_ENVELOPES_ADDR, TABLE_TRANSPOSES_ADDR,
     TABLE_FX_ADDR, TABLE_FX_VAL_ADDR, TABLE_FX_2_ADDR, TABLE_FX_2_VAL_ADDR,
 )
@@ -124,6 +124,34 @@ def test_fx_values_tokenizer_round_trip(raw_bytes):
         diff = tokens_step_1[key] != tokens_step_2[key]
         assert not jnp.any(diff), f"FAIL: {key} mismatch! Indices: {jnp.where(diff)}"
         print(f"PASS: {key}")
+
+
+@pytest.mark.parametrize(
+    "raw_bytes",
+    [
+        lazy_fixture("tohou_bytes"),
+        lazy_fixture("crshhh_bytes"),
+        lazy_fixture("ofd_bytes"),
+        lazy_fixture("equus_bytes"),
+        lazy_fixture("organelle_bytes"),
+    ]
+)
+def test_groove_tokenizer_round_trip(raw_bytes):
+    raw_bytes_in = jnp.array(raw_bytes[GROOVES_ADDR], dtype=jnp.uint8)
+
+    print("Parsing grooves...")
+    tokens_step_1 = parse_grooves(raw_bytes_in)
+
+    print("Compiling tokens back to bytes...")
+    repacked_bytes = repack_grooves(tokens_step_1)
+
+    print("Parsing recovered bytes...")
+    tokens_step_2 = parse_grooves(jnp.array(repacked_bytes, dtype=jnp.uint8))
+
+    print("Comparing tokens...")
+    diff = tokens_step_1 != tokens_step_2
+    assert not jnp.any(diff), f"FAIL on indices: {jnp.where(diff)}"
+    print("PASS!")
 
 
 TABLE_REGION_MAP = {

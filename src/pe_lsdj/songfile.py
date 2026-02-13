@@ -37,6 +37,22 @@ class SongTokenizer(eqx.Module):
         Parse the (decompressed) raw bytes of a LSDJ v3.9.2 track
         into embedding indices (tokens)
 
+        Map (song_chains, chain_phrases), 
+        (
+          phrase_notes, 
+          phrase_instruments, 
+          phrase_fx, 
+          phrase_fx_val, 
+          chain_transpose
+        ) ->
+        NUM_SONG_STEPS x (
+            song_notes, 
+            song_instruments, 
+            song_fx, 
+            song_fx_val, 
+            chain_transpose
+        )
+
         For each input stream:
             batch_dim = (channels * song_steps) [flattened]
             embedding_dim = (batch dim, feature_dim)
@@ -47,22 +63,6 @@ class SongTokenizer(eqx.Module):
 
         self.name = pylsdj_project.name
         
-        # Map (song_chains, chain_phrases), 
-        # (
-        #   phrase_notes, 
-        #   phrase_instruments, 
-        #   phrase_fx, 
-        #   phrase_fx_val, 
-        #   chain_transpose
-        # ) ->
-        # NUM_SONG_STEPS x (
-        #     song_notes, 
-        #     song_instruments, 
-        #     song_fx, 
-        #     song_fx_val, 
-        #     chain_transpose
-        # )
-
         # ===== Create 2D (flat_sequence x feature_dim) representation =====
 
         # Don't tokenize these, as they're intermediate steps
@@ -106,8 +106,8 @@ class SongTokenizer(eqx.Module):
         )
 
         # This pulls data from several places in the array
-        tables_dict = parse_tables(raw_data)
         # TABLES: (NUM_TABLES, STEPS_PER_TABLE, concatenate_table_feature_tokens_dim)
+        tables = parse_tables(raw_data)
 
         # ======= Slot tokens into global structure =========
 

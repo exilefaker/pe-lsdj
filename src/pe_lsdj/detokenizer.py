@@ -12,8 +12,10 @@ def _nibble_merge(high: Array, low: Array) -> Array:
 def repack_notes(tokens_dict: dict[str, Array]) -> Array:
     return (tokens_dict[PHRASE_NOTES] - 1).ravel().tolist()
 
-def repack_grooves(tokens_dict: dict[str, Array]) -> Array:
-    return (tokens_dict[GROOVES] - 1).ravel().tolist()
+def repack_grooves(groove_tokens: Array) -> list:
+    """Reverse of parse_grooves. Input shape: (NUM_GROOVES, STEPS_PER_GROOVE, 2)"""
+    flat = groove_tokens.reshape(-1, 2)
+    return _nibble_merge(flat[:, 0] - 1, flat[:, 1] - 1).astype(jnp.uint8).ravel().tolist()
 
 def repack_instruments(tokens_dict: dict[str, Array]) -> Array:
     repacked_bytes = jnp.zeros((NUM_INSTRUMENTS, 16), dtype=jnp.uint8)

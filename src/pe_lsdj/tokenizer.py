@@ -28,12 +28,6 @@ def parse_notes(data_bytes: Array) -> Array:
     return raw_data * ~(raw_data > 158) # Set invalid notes to NULL
 
 
-def parse_grooves(data_bytes: Array) -> Array:
-    return data_bytes.reshape(
-        (NUM_GROOVES, STEPS_PER_GROOVE)
-    ).astype(jnp.uint8) + 1
-
-
 def parse_fx_commands(data_bytes: Array) -> Array:
     # Set invalid FX commands to NULL
     return (data_bytes * ~(data_bytes > 18)).astype(jnp.uint8) 
@@ -562,3 +556,17 @@ def parse_tables(data: Array) -> dict[str, Array]:
         TABLE_FX_2: fx_cmd_2_flat.reshape(shape),
         TABLE_FX_VALUE_2: fx_val_2,
     }
+
+
+# Parse Grooves
+
+def parse_grooves(data: Array) -> Array:
+    """
+    Parse raw (decompressed) bytes into a Groove representation.
+    The representation for one Groove is:
+        (even_step_ticks, odd_step_ticks) * NUM_GROOVE_STEPS
+
+    Output: (NUM_GROOVES, STEPS_PER_GROOVE, 2)
+    """
+    nibbles = _nibble_split(data.ravel()) + 1  # (NUM_GROOVES * STEPS_PER_GROOVE, 2)
+    return nibbles.reshape(NUM_GROOVES, STEPS_PER_GROOVE, 2).astype(jnp.uint8)
