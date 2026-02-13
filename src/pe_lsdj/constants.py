@@ -255,6 +255,13 @@ SYNTH_SIZE = 0x10
 GROOVE_SIZE = 0x1F
 TABLE_SIZE = 0xBF
 FX_VALUES_FEATURE_DIM = 17  # len(FX_VALUE_KEYS)
+
+EMPTY = 255
+
+# Reduced FX command enum: only disambiguates continuous commands
+# (D/F/K/L/P/S/T share one FX value column). 0 = non-continuous.
+CONTINUOUS_CMDS = (CMD_D, CMD_F, CMD_K, CMD_L, CMD_P, CMD_S, CMD_T)
+REDUCED_FX_DIM = len(CONTINUOUS_CMDS) + 1  # 8
 NUM_CHANNELS = 4
 
 # Canonical column order for stacked FX value arrays.

@@ -1,3 +1,4 @@
+import numpy as np
 import jax.numpy as jnp
 from jaxtyping import Array
 from pe_lsdj.constants import *
@@ -368,3 +369,287 @@ def repack_tables(tokens_dict: dict[str, Array]) -> dict[str, list]:
         "fx_cmd_2": fx_cmd_2.astype(jnp.uint8).tolist(),
         "fx_val_2": repack_fx_values(fx_val_2_dict, fx_cmd_2),
     }
+
+
+# --- FX command recovery (reduced → full enum) ---
+
+# Map from FX_VALUE_KEYS column index to full CMD enum.
+# Paired columns (chord, env, retrig, vibrato, random) map to the same CMD.
+_FX_COL_TO_CMD = {
+    0: CMD_A,   # TABLE_FX
+    1: CMD_G,   # GROOVE_FX
+    2: CMD_H,   # HOP_FX
+    3: CMD_O,   # PAN_FX
+    4: CMD_C,   # CHORD_FX_1
+    5: CMD_C,   # CHORD_FX_2
+    6: CMD_E,   # ENV_FX_VOL
+    7: CMD_E,   # ENV_FX_FADE
+    8: CMD_R,   # RETRIG_FX_FADE
+    9: CMD_R,   # RETRIG_FX_RATE
+    10: CMD_V,  # VIBRATO_FX_SPEED
+    11: CMD_V,  # VIBRATO_FX_DEPTH
+    12: CMD_M,  # VOLUME_FX
+    13: CMD_W,  # WAVE_FX
+    14: CMD_Z,  # RANDOM_FX_L
+    15: CMD_Z,  # RANDOM_FX_R
+    # 16: CONTINUOUS_FX — handled by reduced_fx
+}
+
+
+def _recover_fx_commands(reduced_fx, fx_vals):
+    """Recover full FX command enum (0-18) from reduced enum + sparse FX values.
+
+    reduced_fx: (...) array, 0=non-continuous, 1-7=CONTINUOUS_CMDS index
+    fx_vals: (..., 17) array, sparse FX value columns (FX_VALUE_KEYS order)
+    Returns: (...) array of full CMD_* values (uint8)
+    """
+    result = np.zeros(reduced_fx.shape, dtype=np.uint8)
+
+    # Continuous commands: reduced_fx encodes which one
+    for i, cmd in enumerate(CONTINUOUS_CMDS):
+        result = np.where(reduced_fx == i + 1, cmd, result)
+
+    # Non-continuous commands: infer from which FX value column is non-zero
+    is_non_continuous = (reduced_fx == 0)
+    for col, cmd in _FX_COL_TO_CMD.items():
+        col_active = fx_vals[..., col] != 0
+        result = np.where(is_non_continuous & col_active, cmd, result)
+
+    return result.astype(np.uint8)
+
+
+# --- Song-level reconstruction ---
+
+def repack_song(sf) -> list[int]:
+    """Reconstruct raw LSDJ bytes (0x8000) from a SongFile.
+
+    Reverses the full tokenize pipeline: splits song_tokens back into
+    phrase/chain/song arrays, deduplicates phrases and chains, repacks
+    entities, and assembles the 32KB byte array.
+    """
+    tokens = np.array(sf.song_tokens, dtype=np.uint8)
+    S = tokens.shape[0]
+    num_phrase_blocks = S // STEPS_PER_PHRASE
+
+    # 1. Split song_tokens columns
+    notes = tokens[:, :, 0]
+    instr_ids = tokens[:, :, 1]
+    reduced_fx = tokens[:, :, 2]
+    fx_vals = tokens[:, :, 3:20]
+    transposes = tokens[:, :, 20]
+
+    # 2. Recover full FX commands
+    full_fx = _recover_fx_commands(reduced_fx, fx_vals)
+
+    # 3. Reverse step_format: (S, C) → (P, 16, C)
+    notes_by_phrase = notes.reshape(num_phrase_blocks, STEPS_PER_PHRASE, NUM_CHANNELS)
+    instr_by_phrase = instr_ids.reshape(num_phrase_blocks, STEPS_PER_PHRASE, NUM_CHANNELS)
+    fx_cmd_by_phrase = full_fx.reshape(num_phrase_blocks, STEPS_PER_PHRASE, NUM_CHANNELS)
+    fx_val_by_phrase = fx_vals.reshape(
+        num_phrase_blocks, STEPS_PER_PHRASE, NUM_CHANNELS, FX_VALUES_FEATURE_DIM
+    )
+    tr_by_phrase = transposes.reshape(num_phrase_blocks, STEPS_PER_PHRASE, NUM_CHANNELS)
+
+    # 4. Deduplicate phrases → allocate phrase IDs
+    # Full-size output arrays (255 phrases max, indexed 0-254)
+    phrase_notes_out = np.full((NUM_PHRASES, STEPS_PER_PHRASE), EMPTY, dtype=np.uint8)
+    phrase_instr_out = np.full((NUM_PHRASES, STEPS_PER_PHRASE), EMPTY, dtype=np.uint8)
+    phrase_fx_cmd_out = np.zeros((NUM_PHRASES, STEPS_PER_PHRASE), dtype=np.uint8)
+    phrase_fx_val_out = np.zeros(
+        (NUM_PHRASES, STEPS_PER_PHRASE, FX_VALUES_FEATURE_DIM), dtype=np.uint8
+    )
+
+    next_phrase_id = 0
+    # phrase_map: fingerprint → phrase_id
+    phrase_map = {}
+    # Per-channel list of (phrase_id, transpose) in song order
+    phrase_ids_per_channel = [[] for _ in range(NUM_CHANNELS)]
+
+    for ch in range(NUM_CHANNELS):
+        for p in range(num_phrase_blocks):
+            p_notes = notes_by_phrase[p, :, ch]
+            p_instr = instr_by_phrase[p, :, ch]
+            p_fx_cmd = fx_cmd_by_phrase[p, :, ch]
+            p_fx_val = fx_val_by_phrase[p, :, ch, :]
+
+            # Skip empty phrase blocks (all notes are 0 = NULL)
+            if np.all(p_notes == 0) and np.all(p_fx_cmd == 0):
+                continue
+
+            # Fingerprint: tuple of all phrase data
+            fp = (
+                p_notes.tobytes() + p_instr.tobytes()
+                + p_fx_cmd.tobytes() + p_fx_val.tobytes()
+            )
+
+            if fp in phrase_map:
+                pid = phrase_map[fp]
+            else:
+                pid = next_phrase_id
+                phrase_map[fp] = pid
+                next_phrase_id += 1
+                phrase_notes_out[pid] = p_notes
+                phrase_instr_out[pid] = p_instr
+                phrase_fx_cmd_out[pid] = p_fx_cmd
+                phrase_fx_val_out[pid] = p_fx_val
+
+            # Transpose is constant across the 16 steps; take first
+            tr = int(tr_by_phrase[p, 0, ch])
+            phrase_ids_per_channel[ch].append((pid, tr))
+
+    # 5. Group phrases into chains + extract transposes
+    chain_phrases_out = np.full(
+        (NUM_CHAINS, PHRASES_PER_CHAIN), EMPTY, dtype=np.uint8
+    )
+    chain_transposes_out = np.zeros(
+        (NUM_CHAINS, PHRASES_PER_CHAIN), dtype=np.uint8
+    )
+
+    next_chain_id = 0
+    chain_map = {}
+    song_chain_ids_per_channel = [[] for _ in range(NUM_CHANNELS)]
+
+    for ch in range(NUM_CHANNELS):
+        entries = phrase_ids_per_channel[ch]
+        # Split into chunks of PHRASES_PER_CHAIN
+        for i in range(0, len(entries), PHRASES_PER_CHAIN):
+            chunk = entries[i:i + PHRASES_PER_CHAIN]
+            pids = [e[0] for e in chunk]
+            trs = [e[1] for e in chunk]
+
+            # Fingerprint for chain dedup
+            fp = (tuple(pids), tuple(trs))
+            if fp in chain_map:
+                cid = chain_map[fp]
+            else:
+                cid = next_chain_id
+                chain_map[fp] = cid
+                next_chain_id += 1
+                for j, (pid, tr) in enumerate(chunk):
+                    chain_phrases_out[cid, j] = pid
+                    chain_transposes_out[cid, j] = tr
+
+            song_chain_ids_per_channel[ch].append(cid)
+
+    # 6. Build song_chains array
+    song_chains_out = np.full(
+        (NUM_SONG_CHAINS, NUM_CHANNELS), EMPTY, dtype=np.uint8
+    )
+    for ch in range(NUM_CHANNELS):
+        for i, cid in enumerate(song_chain_ids_per_channel[ch]):
+            song_chains_out[i, ch] = cid
+
+    # 7. Repack entities using existing functions
+    # Notes: repack_notes expects {PHRASE_NOTES: (255, 16)} with +1 offset
+    # phrase_notes_out already has +1 offset from song_tokens
+    notes_bytes = repack_notes({PHRASE_NOTES: jnp.array(phrase_notes_out)})
+
+    # Instruments (from SongFile entity tensors)
+    instr_bytes = repack_instruments(sf.instruments)
+
+    # Grooves
+    groove_bytes = repack_grooves(sf.grooves)
+
+    # Softsynths
+    synth_bytes = repack_softsynths(sf.softsynths)
+
+    # Tables
+    table_region = repack_tables(sf.tables)
+
+    # Phrase FX: need flat arrays for repack_fx_values
+    fx_cmd_flat = jnp.array(phrase_fx_cmd_out.ravel())
+    fx_val_flat = phrase_fx_val_out.reshape(-1, FX_VALUES_FEATURE_DIM)
+    fx_val_dict = {
+        k: jnp.array(fx_val_flat[:, i]) for i, k in enumerate(FX_VALUE_KEYS)
+    }
+    fx_val_bytes = repack_fx_values(fx_val_dict, fx_cmd_flat)
+
+    # Phrase FX commands: repack to raw bytes
+    fx_cmd_bytes = fx_cmd_flat.astype(jnp.uint8).tolist()
+
+    # Phrase instruments: raw byte values (no +1 offset in song_tokens)
+    phrase_instr_bytes = phrase_instr_out.ravel().tolist()
+
+    # 8. Set allocation tables
+    phrase_alloc = np.zeros(32, dtype=np.uint8)
+    for pid in range(min(next_phrase_id, NUM_PHRASES)):
+        byte_idx = pid // 8
+        bit_idx = pid % 8
+        phrase_alloc[byte_idx] |= (1 << bit_idx)
+
+    chain_alloc = np.zeros(16, dtype=np.uint8)
+    for cid in range(min(next_chain_id, NUM_CHAINS)):
+        byte_idx = cid // 8
+        bit_idx = cid % 8
+        chain_alloc[byte_idx] |= (1 << bit_idx)
+
+    # Instrument alloc: byte per instrument, 1 if used
+    used_instr = set()
+    for ch in range(NUM_CHANNELS):
+        for p in range(num_phrase_blocks):
+            for s in range(STEPS_PER_PHRASE):
+                iid = int(instr_by_phrase[p, s, ch])
+                if iid > 0:  # non-NULL (has +1 offset)
+                    used_instr.add(iid - 1)
+    instr_alloc = np.zeros(NUM_INSTRUMENTS, dtype=np.uint8)
+    for iid in used_instr:
+        if 0 <= iid < NUM_INSTRUMENTS:
+            instr_alloc[iid] = 1
+
+    # Table alloc: byte per table, 1 if used
+    table_alloc = np.zeros(NUM_TABLES, dtype=np.uint8)
+    for iid in used_instr:
+        if 0 <= iid < NUM_INSTRUMENTS:
+            tbl_id = int(sf.instruments[TABLE][iid]) - 1
+            if 0 <= tbl_id < NUM_TABLES:
+                table_alloc[tbl_id] = 1
+
+    # 9. Assemble raw_data (0x8000 bytes)
+    raw = np.full(0x8000, EMPTY, dtype=np.uint8)
+
+    # Phrase notes
+    raw[PHRASE_NOTES_ADDR] = np.array(notes_bytes, dtype=np.uint8)
+    # Grooves
+    raw[GROOVES_ADDR] = np.array(groove_bytes, dtype=np.uint8)
+    # Song chains
+    raw[SONG_CHAINS_ADDR] = song_chains_out.ravel()
+    # Chain phrases
+    raw[CHAIN_PHRASES_ADDR] = chain_phrases_out.ravel()
+    # Chain transposes
+    raw[CHAIN_TRANSPOSES_ADDR] = chain_transposes_out.ravel()
+    # Instruments
+    raw[INSTRUMENTS_ADDR] = np.array(instr_bytes, dtype=np.uint8)
+    # Tables
+    raw[TABLE_ENVELOPES_ADDR] = np.array(table_region["envelopes"], dtype=np.uint8)
+    raw[TABLE_TRANSPOSES_ADDR] = np.array(table_region["transposes"], dtype=np.uint8)
+    raw[TABLE_FX_ADDR] = np.array(table_region["fx_cmd_1"], dtype=np.uint8)
+    raw[TABLE_FX_VAL_ADDR] = np.array(table_region["fx_val_1"], dtype=np.uint8)
+    raw[TABLE_FX_2_ADDR] = np.array(table_region["fx_cmd_2"], dtype=np.uint8)
+    raw[TABLE_FX_2_VAL_ADDR] = np.array(table_region["fx_val_2"], dtype=np.uint8)
+    # Softsynth params
+    raw[SOFTSYNTH_PARAMS_ADDR] = np.array(synth_bytes, dtype=np.uint8)
+    # Phrase FX commands
+    raw[PHRASE_FX_ADDR] = np.array(fx_cmd_bytes, dtype=np.uint8)
+    # Phrase FX values
+    raw[PHRASE_FX_VAL_ADDR] = np.array(fx_val_bytes, dtype=np.uint8)
+    # Phrase instruments
+    raw[PHRASE_INSTR_ADDR] = np.array(phrase_instr_bytes, dtype=np.uint8)
+
+    # Allocation tables
+    raw[PHRASE_ALLOC_TABLE_ADDR] = phrase_alloc
+    raw[CHAIN_ALLOC_TABLE_ADDR] = chain_alloc
+    raw[INSTR_ALLOC_TABLE_ADDR] = instr_alloc
+    raw[TABLE_ALLOC_TABLE_ADDR] = table_alloc
+
+    # Mem init flags
+    raw[MEM_INIT_FLAG_ADDR] = [ord('r'), ord('b')]
+    raw[MEM_INIT_FLAG2_ADDR] = [ord('r'), ord('b')]
+    raw[MEM_INIT_FLAG3_ADDR] = [ord('r'), ord('b')]
+
+    # Tempo
+    raw[TEMPO_ADDR] = [int(sf.tempo)]
+
+    # Bookmarks and other regions: zero out (not EMPTY)
+    raw[BOOKMARKS_ADDR] = 0
+
+    return raw.tolist()

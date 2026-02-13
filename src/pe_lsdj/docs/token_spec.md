@@ -60,7 +60,7 @@ type-conditional (zeroed for irrelevant instrument types).
 | Field            | Dims | Vocab | Used by     | Parse              |
 |------------------|------|-------|-------------|--------------------|
 | Type ID          | 1    | 5     | All         | enum [0-3] + 1     |
-| Table            | 1584 | —     | All         | inlined raw table  |
+| Table            | 1616 | —     | All         | inlined raw table  |
 | Table on/off     | 1    | 3     | All         | bit + 1            |
 | Table automate   | 1    | 3     | All         | bit + 1            |
 | Automate 2       | 1    | 3     | All         | bit + 1            |
@@ -95,17 +95,17 @@ type-conditional (zeroed for irrelevant instrument types).
 | Pitch            | 1    | 257   | KIT         | byte + 1           |
 | Distortion type  | 1    | 5     | KIT         | enum [0-3] + 1     |
 
-**Total after inlining**: (64, 1630) = 33 scalar fields + 1584 raw table + 13 softsynth.
+**Total after inlining**: (64, 1662) = 33 scalar fields + 1616 raw table + 13 softsynth.
 
 The `Table` field (originally a scalar 5-bit ID) is replaced with the
-full groove-inlined raw table vector. Raw tables preserve A-command
-patterns so the model can learn table composition.
+full groove-inlined raw table vector (1616 dims). Raw tables preserve
+A-command patterns so the model can learn table composition.
 
 The `Softsynth` field (originally a scalar 4-bit ID) is replaced with
 the full softsynth parameter vector (13 fields). WAV-only; zeroed for
 other instrument types.
 
-### Tables (32 tables × 16 steps)
+### Tables (32 tables x 16 steps)
 
 Two representations, both fully inlined (no entity IDs remain):
 
@@ -114,9 +114,11 @@ Two representations, both fully inlined (no entity IDs remain):
 - **Traces**: A/H commands resolved into execution traces, groove slots
   expanded. Used as the lookup target when inlining A-command references.
 
-FX command fields (`TABLE_FX_1`, `TABLE_FX_2`) are **not** included in
-either representation — the active command is implicit in the sparse
-FX value structure.
+FX command fields (`TABLE_FX_1`, `TABLE_FX_2`) use a **reduced enum**
+(8 values: 0 = non-continuous, 1-7 = CMD_D/F/K/L/P/S/T). This
+disambiguates the 7 continuous commands that share a single FX value
+column, while non-continuous commands are recoverable from sparse FX
+value structure.
 
 #### Trace representation (after groove inlining)
 
@@ -125,16 +127,18 @@ FX value structure.
 | Env volume      | (16,)          | high nibble + 1              |
 | Env duration    | (16,)          | low nibble + 1               |
 | Transpose       | (16,)          | byte + 1                     |
+| Reduced FX cmd 1| (16,)          | reduced enum (8 values)      |
 | FX value 1      | (16, 48)       | groove slot expanded (see §) |
+| Reduced FX cmd 2| (16,)          | reduced enum (8 values)      |
 | FX value 2      | (16, 48)       | groove slot expanded (see §) |
 
-**Total per trace**: 3×16 + 2×(16×48) = 48 + 1536 = **1584 features**.
+**Total per trace**: 5x16 + 2x(16x48) = 80 + 1536 = **1616 features**.
 
 #### Raw table representation (after groove + trace inlining)
 
 Same fields as traces, but FX value columns are wider: the Table FX
 slot (col 0) is replaced with the full flattened trace of the target
-table (1584 features), and the Groove FX slot is replaced with the
+table (1616 features), and the Groove FX slot is replaced with the
 groove vector (32 features). Non-A/G steps get zeros in those slots.
 
 | Field           | Shape per table | Notes                             |
@@ -142,8 +146,10 @@ groove vector (32 features). Non-A/G steps get zeros in those slots.
 | Env volume      | (16,)          | high nibble + 1                   |
 | Env duration    | (16,)          | low nibble + 1                    |
 | Transpose       | (16,)          | byte + 1                          |
-| FX value 1      | (16, 1631)     | table + groove slots expanded (§) |
-| FX value 2      | (16, 1631)     | table + groove slots expanded (§) |
+| Reduced FX cmd 1| (16,)          | reduced enum (8 values)           |
+| FX value 1      | (16, 1663)     | table + groove slots expanded (§) |
+| Reduced FX cmd 2| (16,)          | reduced enum (8 values)           |
+| FX value 2      | (16, 1663)     | table + groove slots expanded (§) |
 
 ---
 
@@ -157,52 +163,55 @@ The song is flattened to a single sequence ordered by channel:
 [PU1 steps] [PU2 steps] [WAV steps] [NOI steps]
 ```
 
-Each channel contributes `NUM_SONG_CHAINS (256) × PHRASES_PER_CHAIN (16)
-× STEPS_PER_PHRASE (16) = 65536` steps.
+Each channel contributes `NUM_SONG_CHAINS (256) x PHRASES_PER_CHAIN (16)
+x STEPS_PER_PHRASE (16) = 65536` steps.
 
-**Total sequence length**: 4 × 65536 = 262144 steps.
+**Total sequence length**: 4 x 65536 = 262144 steps.
 
 ### Per-step feature vector
 
 | Feature          | Dims | Vocab | Source / Notes                         |
 |------------------|------|-------|----------------------------------------|
-| Note             | 1    | 159   | Pitch [0-157] + 1; invalid → 0        |
+| Note             | 1    | 159   | Pitch [0-157] + 1; invalid -> 0        |
+| Instrument       | 1662 | mixed | Inlined; table + softsynth expanded    |
+| FX values        | 1663 | mixed | Sparse; table + groove slots inlined § |
+| Reduced FX cmd   | 1    | 8     | 0=non-continuous, 1-7=D/F/K/L/P/S/T   |
 | Chain transpose  | 1    | 257   | Per-phrase, broadcast across steps     |
-| FX values        | 1631 | mixed | Sparse; table + groove slots inlined § |
-| Instrument       | 1630 | mixed | Inlined; table + softsynth expanded    |
 
-**Raw feature count per step**: 1 + 1 + 1631 + 1630 = **3263 scalar tokens**.
+**Raw feature count per step**: 1 + 1662 + 1663 + 1 + 1 = **3328 scalar tokens**.
 
-Note: FX command is not a separate field — the active command is implicit
-in the sparse FX value structure (only one group is non-zero per step).
+The reduced FX command disambiguates the 7 continuous commands
+(D/F/K/L/P/S/T) that share a single FX value column. Non-continuous
+commands are recoverable from which FX value group is non-zero.
 
-### FX Values breakdown (1631 features) §
+### FX Values breakdown (1663 features) §
 
 Sparse vector — at most one group is non-zero per step. The active
-command is implicit (no separate FX command field). All scalar values
-use +1 null offset. Column order derives from `FX_VALUE_KEYS` with
-the Groove FX slot expanded.
+command is largely implicit (sparse FX values encode it), except for
+continuous commands which require the reduced FX cmd field. All scalar
+values use +1 null offset. Column order derives from `FX_VALUE_KEYS`
+with the Table FX and Groove FX slots expanded.
 
 | Cols       | Key             | Dims | Active when | Notes                     |
 |------------|-----------------|------|-------------|---------------------------|
-| 0–1583     | Table FX        | 1584 | CMD_A       | full table trace (§§)     |
-| 1584–1615  | Groove FX       | 32   | CMD_G       | full groove vector (§§§)  |
-| 1616       | Hop FX          | 1    | CMD_H       | byte + 1                  |
-| 1617       | Pan FX          | 1    | CMD_O       | enum [0-3] + 1            |
-| 1618–1619  | Chord FX        | 2    | CMD_C       | nibble-split + 1          |
-| 1620–1621  | Env FX          | 2    | CMD_E       | nibble-split + 1          |
-| 1622–1623  | Retrig FX       | 2    | CMD_R       | nibble-split + 1          |
-| 1624–1625  | Vibrato FX      | 2    | CMD_V       | nibble-split + 1          |
-| 1626       | Volume FX       | 1    | CMD_M       | byte + 1                  |
-| 1627       | Wave FX         | 1    | CMD_W       | enum [0-3] + 1            |
-| 1628–1629  | Random FX       | 2    | CMD_Z       | nibble-split + 1          |
-| 1630       | Continuous FX   | 1    | CMD_D/F/K/L/P/S/T | byte + 1           |
+| 0-1615     | Table FX        | 1616 | CMD_A       | full table trace (§§)     |
+| 1616-1647  | Groove FX       | 32   | CMD_G       | full groove vector (§§§)  |
+| 1648       | Hop FX          | 1    | CMD_H       | byte + 1                  |
+| 1649       | Pan FX          | 1    | CMD_O       | enum [0-3] + 1            |
+| 1650-1651  | Chord FX        | 2    | CMD_C       | nibble-split + 1          |
+| 1652-1653  | Env FX          | 2    | CMD_E       | nibble-split + 1          |
+| 1654-1655  | Retrig FX       | 2    | CMD_R       | nibble-split + 1          |
+| 1656-1657  | Vibrato FX      | 2    | CMD_V       | nibble-split + 1          |
+| 1658       | Volume FX       | 1    | CMD_M       | byte + 1                  |
+| 1659       | Wave FX         | 1    | CMD_W       | enum [0-3] + 1            |
+| 1660-1661  | Random FX       | 2    | CMD_Z       | nibble-split + 1          |
+| 1662       | Continuous FX   | 1    | CMD_D/F/K/L/P/S/T | byte + 1           |
 
 **No scalar entity IDs remain** in the final song tokens. All entity
 references are replaced with the full data of the referenced entity.
 
 **§§ Table inlining**: The Table FX slot (originally a scalar table ID)
-is replaced with the flattened **trace** of the target table (1584
+is replaced with the flattened **trace** of the target table (1616
 features). Traces are used rather than raw tables because A/H commands
 are already resolved, avoiding recursive expansion. Steps without
 CMD_A get zeros.
@@ -215,17 +224,16 @@ from (STEPS_PER_GROOVE, 2) to 32 scalars. Steps without CMD_G get zeros.
 
 All entity references in the song sequence are **inlined** — the
 tokenizer replaces every entity ID with the full data of the referenced
-entity. The final song tokens contain no scalar entity IDs. The FX
-command is also implicit (sparse FX values encode it).
+entity. The final song tokens contain no scalar entity IDs.
 
 Entity generation strategies (how the model produces the entities that
 get inlined) remain architecture-dependent. Possible strategies include:
 
 - **Upfront generation**: all entities are generated before the song
   sequence, forming an embedding bank ("palette") for lookup during sequence
-  generation. In this architecture, the model outputs a query vector 
+  generation. In this architecture, the model outputs a query vector
   in the same space as the palette embeddings. Cosine similarity produces a categorical distribution over palette entries (tables, grooves, instruments).
-  
+
 - **Incremental generation**: entities are defined on-the-fly as the
   song is generated, with new entities created when needed (e.g., based
   on cosine similarity with existing ones).
@@ -238,6 +246,7 @@ decision.
 Song sequence (per step, all entities inlined):
   note ──────────────→ Embedding(159)     ──┐
   chain_transpose ───→ Embedding(257)     ──┤
-  fx_values (1631) ──→ FXValueEmbedder    ──┤──→ concat → Linear → d_model
-  instrument (1630) ─→ Linear             ──┘
+  reduced_fx_cmd ────→ Embedding(8)       ──┤
+  fx_values (1663) ──→ FXValueEmbedder    ──┤──→ concat → Linear → d_model
+  instrument (1662) ─→ Linear             ──┘
 ```
