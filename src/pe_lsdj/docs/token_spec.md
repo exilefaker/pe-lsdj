@@ -54,74 +54,96 @@ WAV-channel waveform parameters. 13 scalar fields per synth.
 
 ### Instruments (64 instruments)
 
-30 scalar fields per instrument. Many fields are type-conditional
-(zeroed for irrelevant instrument types).
+35 scalar fields per instrument (before inlining). Many fields are
+type-conditional (zeroed for irrelevant instrument types).
 
-| Field            | Vocab | Used by     | Parse              |
-|------------------|-------|-------------|--------------------|
-| Type ID          | 5     | All         | enum [0-3] + 1     |
-| Table ID         | 33    | All         | 5-bit + 1          |
-| Table on/off     | 3     | All         | bit + 1            |
-| Table automate   | 3     | All         | bit + 1            |
-| Automate 2       | 3     | All         | bit + 1            |
-| Pan              | 5     | All         | enum [0-3] + 1     |
-| Vibrato type     | 5     | PU,WAV,KIT  | enum [0-3] + 1     |
-| Vibrato direction| 3     | PU,WAV,KIT  | bit + 1            |
-| Env volume       | 17    | PU,NOI      | high nibble + 1    |
-| Env fade         | 17    | PU,NOI      | low nibble + 1     |
-| Length           | 65    | PU,NOI      | 6-bit + 1          |
-| Length limited   | 3     | PU,NOI      | bit + 1            |
-| Sweep            | 257   | PU,NOI      | byte + 1           |
-| Volume           | 5     | WAV,KIT     | 2-bit + 1          |
-| Phase transpose  | 257   | PU          | byte + 1           |
-| Wave             | 3     | PU          | bit + 1            |
-| Phase finetune   | 17    | PU          | 4-bit + 1          |
-| Softsynth ID     | 17    | WAV         | high nibble + 1    |
-| Repeat           | 17    | WAV         | low nibble + 1     |
-| Play type        | 5     | WAV         | enum [0-3] + 1     |
-| Wave length      | 17    | WAV         | high nibble + 1    |
-| Speed            | 17    | WAV         | low nibble + 1     |
-| Keep attack 1    | 3     | KIT         | bit + 1            |
-| Keep attack 2    | 3     | KIT         | bit + 1            |
-| Kit 1 ID         | 65    | KIT         | 6-bit + 1          |
-| Kit 2 ID         | 65    | KIT         | 6-bit + 1          |
-| Length kit 1     | 257   | KIT         | byte + 1           |
-| Length kit 2     | 257   | KIT         | byte + 1           |
-| Loop kit 1       | 3     | KIT         | bit + 1            |
-| Loop kit 2       | 3     | KIT         | bit + 1            |
-| Offset kit 1     | 257   | KIT         | byte + 1           |
-| Offset kit 2     | 257   | KIT         | byte + 1           |
-| Half-speed       | 3     | KIT         | bit + 1            |
-| Pitch            | 257   | KIT         | byte + 1           |
-| Distortion type  | 5     | KIT         | enum [0-3] + 1     |
+| Field            | Dims | Vocab | Used by     | Parse              |
+|------------------|------|-------|-------------|--------------------|
+| Type ID          | 1    | 5     | All         | enum [0-3] + 1     |
+| Table            | 1584 | —     | All         | inlined raw table  |
+| Table on/off     | 1    | 3     | All         | bit + 1            |
+| Table automate   | 1    | 3     | All         | bit + 1            |
+| Automate 2       | 1    | 3     | All         | bit + 1            |
+| Pan              | 1    | 5     | All         | enum [0-3] + 1     |
+| Vibrato type     | 1    | 5     | PU,WAV,KIT  | enum [0-3] + 1     |
+| Vibrato direction| 1    | 3     | PU,WAV,KIT  | bit + 1            |
+| Env volume       | 1    | 17    | PU,NOI      | high nibble + 1    |
+| Env fade         | 1    | 17    | PU,NOI      | low nibble + 1     |
+| Length           | 1    | 65    | PU,NOI      | 6-bit + 1          |
+| Length limited   | 1    | 3     | PU,NOI      | bit + 1            |
+| Sweep            | 1    | 257   | PU,NOI      | byte + 1           |
+| Volume           | 1    | 5     | WAV,KIT     | 2-bit + 1          |
+| Phase transpose  | 1    | 257   | PU          | byte + 1           |
+| Wave             | 1    | 3     | PU          | bit + 1            |
+| Phase finetune   | 1    | 17    | PU          | 4-bit + 1          |
+| Softsynth        | 13   | mixed | WAV         | inlined softsynth  |
+| Repeat           | 1    | 17    | WAV         | low nibble + 1     |
+| Play type        | 1    | 5     | WAV         | enum [0-3] + 1     |
+| Wave length      | 1    | 17    | WAV         | high nibble + 1    |
+| Speed            | 1    | 17    | WAV         | low nibble + 1     |
+| Keep attack 1    | 1    | 3     | KIT         | bit + 1            |
+| Keep attack 2    | 1    | 3     | KIT         | bit + 1            |
+| Kit 1 ID         | 1    | 65    | KIT         | 6-bit + 1          |
+| Kit 2 ID         | 1    | 65    | KIT         | 6-bit + 1          |
+| Length kit 1     | 1    | 257   | KIT         | byte + 1           |
+| Length kit 2     | 1    | 257   | KIT         | byte + 1           |
+| Loop kit 1       | 1    | 3     | KIT         | bit + 1            |
+| Loop kit 2       | 1    | 3     | KIT         | bit + 1            |
+| Offset kit 1     | 1    | 257   | KIT         | byte + 1           |
+| Offset kit 2     | 1    | 257   | KIT         | byte + 1           |
+| Half-speed       | 1    | 3     | KIT         | bit + 1            |
+| Pitch            | 1    | 257   | KIT         | byte + 1           |
+| Distortion type  | 1    | 5     | KIT         | enum [0-3] + 1     |
 
-**Total**: (64, 30). Column-stacked in dict-key order above.
+**Total after inlining**: (64, 1630) = 33 scalar fields + 1584 raw table + 13 softsynth.
 
-Note: `Table ID` and `Softsynth ID` reference reusable entities.
-At embedding time, these IDs should resolve to learned representations
-rather than raw ID embeddings (see Embedding Notes).
+The `Table` field (originally a scalar 5-bit ID) is replaced with the
+full groove-inlined raw table vector. Raw tables preserve A-command
+patterns so the model can learn table composition.
+
+The `Softsynth` field (originally a scalar 4-bit ID) is replaced with
+the full softsynth parameter vector (13 fields). WAV-only; zeroed for
+other instrument types.
 
 ### Tables (32 tables × 16 steps)
 
-Two representations with identical shape and keys:
+Two representations, both fully inlined (no entity IDs remain):
 
-- **Raw tables**: original data with A/H commands intact. Primary
-  representation; used for entity-level embedding.
-- **Traces**: A/H commands resolved into execution traces. Used within
-  table definitions to avoid recursive references.
+- **Raw tables**: original data with A/H commands intact, but groove
+  and nested-table slots expanded in-place. Used for entity-level embedding.
+- **Traces**: A/H commands resolved into execution traces, groove slots
+  expanded. Used as the lookup target when inlining A-command references.
 
-| Field           | Shape per table | Vocab | Parse              |
-|-----------------|----------------|-------|--------------------|
-| Env volume      | (16,)          | 17    | high nibble + 1    |
-| Env duration    | (16,)          | 17    | low nibble + 1     |
-| Transpose       | (16,)          | 257   | byte + 1           |
-| FX command 1    | (16,)          | 19    | enum [0-18], no +1 |
-| FX value 1      | (16, 17)       | mixed | see FX Values      |
-| FX command 2    | (16,)          | 19    | enum [0-18], no +1 |
-| FX value 2      | (16, 17)       | mixed | see FX Values      |
+FX command fields (`TABLE_FX_1`, `TABLE_FX_2`) are **not** included in
+either representation — the active command is implicit in the sparse
+FX value structure.
 
-**Total per step**: 2 + 1 + 1 + 17 + 1 + 17 = 39 features.
-**Total per table**: (16, 39) = 624 features.
+#### Trace representation (after groove inlining)
+
+| Field           | Shape per table | Notes                        |
+|-----------------|----------------|------------------------------|
+| Env volume      | (16,)          | high nibble + 1              |
+| Env duration    | (16,)          | low nibble + 1               |
+| Transpose       | (16,)          | byte + 1                     |
+| FX value 1      | (16, 48)       | groove slot expanded (see §) |
+| FX value 2      | (16, 48)       | groove slot expanded (see §) |
+
+**Total per trace**: 3×16 + 2×(16×48) = 48 + 1536 = **1584 features**.
+
+#### Raw table representation (after groove + trace inlining)
+
+Same fields as traces, but FX value columns are wider: the Table FX
+slot (col 0) is replaced with the full flattened trace of the target
+table (1584 features), and the Groove FX slot is replaced with the
+groove vector (32 features). Non-A/G steps get zeros in those slots.
+
+| Field           | Shape per table | Notes                             |
+|-----------------|----------------|-----------------------------------|
+| Env volume      | (16,)          | high nibble + 1                   |
+| Env duration    | (16,)          | low nibble + 1                    |
+| Transpose       | (16,)          | byte + 1                          |
+| FX value 1      | (16, 1631)     | table + groove slots expanded (§) |
+| FX value 2      | (16, 1631)     | table + groove slots expanded (§) |
 
 ---
 
@@ -142,53 +164,62 @@ Each channel contributes `NUM_SONG_CHAINS (256) × PHRASES_PER_CHAIN (16)
 
 ### Per-step feature vector
 
-| Feature          | Dims | Vocab | Source / Notes                       |
-|------------------|------|-------|--------------------------------------|
-| Note             | 1    | 159   | Pitch [0-157] + 1; invalid → 0      |
-| Chain transpose  | 1    | 257   | Per-phrase, broadcast across steps   |
-| FX command       | 1    | 19    | Enum [0-18], no +1 offset            |
-| FX values        | 17   | mixed | Sparse: only 1 group active per step |
-| Instrument       | 30   | mixed | Inlined from instrument palette      |
+| Feature          | Dims | Vocab | Source / Notes                         |
+|------------------|------|-------|----------------------------------------|
+| Note             | 1    | 159   | Pitch [0-157] + 1; invalid → 0        |
+| Chain transpose  | 1    | 257   | Per-phrase, broadcast across steps     |
+| FX values        | 1631 | mixed | Sparse; table + groove slots inlined § |
+| Instrument       | 1630 | mixed | Inlined; table + softsynth expanded    |
 
-**Raw feature count per step**: 1 + 1 + 1 + 17 + 30 = **50 scalar tokens**.
+**Raw feature count per step**: 1 + 1 + 1631 + 1630 = **3263 scalar tokens**.
 
-### FX Values breakdown (17 features)
+Note: FX command is not a separate field — the active command is implicit
+in the sparse FX value structure (only one group is non-zero per step).
 
-Sparse vector — at most one group is non-zero per step, determined by the
-FX command. All use +1 null offset. Column order matches `FX_VALUE_KEYS`.
+### FX Values breakdown (1631 features) §
 
-| Col | Key             | Vocab | Active when | Parse           |
-|-----|-----------------|-------|-------------|-----------------|
-| 0   | Table FX        | 33    | CMD_A       | 5-bit ID + 1    |
-| 1   | Groove FX       | 33    | CMD_G       | 5-bit ID + 1    |
-| 2   | Hop FX          | 257   | CMD_H       | byte + 1        |
-| 3   | Pan FX          | 5     | CMD_O       | enum [0-3] + 1  |
-| 4   | Chord FX 1      | 17    | CMD_C       | high nibble + 1 |
-| 5   | Chord FX 2      | 17    | CMD_C       | low nibble + 1  |
-| 6   | Env FX vol      | 17    | CMD_E       | high nibble + 1 |
-| 7   | Env FX fade     | 17    | CMD_E       | low nibble + 1  |
-| 8   | Retrig FX fade  | 17    | CMD_R       | high nibble + 1 |
-| 9   | Retrig FX rate  | 17    | CMD_R       | low nibble + 1  |
-| 10  | Vibrato speed   | 17    | CMD_V       | high nibble + 1 |
-| 11  | Vibrato depth   | 17    | CMD_V       | low nibble + 1  |
-| 12  | Volume FX       | 257   | CMD_M       | byte + 1        |
-| 13  | Wave FX         | 5     | CMD_W       | enum [0-3] + 1  |
-| 14  | Random FX L     | 17    | CMD_Z       | high nibble + 1 |
-| 15  | Random FX R     | 17    | CMD_Z       | low nibble + 1  |
-| 16  | Continuous FX   | 257   | CMD_D/F/K/L/P/S/T | byte + 1 |
+Sparse vector — at most one group is non-zero per step. The active
+command is implicit (no separate FX command field). All scalar values
+use +1 null offset. Column order derives from `FX_VALUE_KEYS` with
+the Groove FX slot expanded.
 
-Columns 0 and 1 (Table FX, Groove FX) are entity IDs — at embedding
-time, these should resolve to learned representations of the referenced
-entity rather than raw ID embeddings.
+| Cols       | Key             | Dims | Active when | Notes                     |
+|------------|-----------------|------|-------------|---------------------------|
+| 0–1583     | Table FX        | 1584 | CMD_A       | full table trace (§§)     |
+| 1584–1615  | Groove FX       | 32   | CMD_G       | full groove vector (§§§)  |
+| 1616       | Hop FX          | 1    | CMD_H       | byte + 1                  |
+| 1617       | Pan FX          | 1    | CMD_O       | enum [0-3] + 1            |
+| 1618–1619  | Chord FX        | 2    | CMD_C       | nibble-split + 1          |
+| 1620–1621  | Env FX          | 2    | CMD_E       | nibble-split + 1          |
+| 1622–1623  | Retrig FX       | 2    | CMD_R       | nibble-split + 1          |
+| 1624–1625  | Vibrato FX      | 2    | CMD_V       | nibble-split + 1          |
+| 1626       | Volume FX       | 1    | CMD_M       | byte + 1                  |
+| 1627       | Wave FX         | 1    | CMD_W       | enum [0-3] + 1            |
+| 1628–1629  | Random FX       | 2    | CMD_Z       | nibble-split + 1          |
+| 1630       | Continuous FX   | 1    | CMD_D/F/K/L/P/S/T | byte + 1           |
+
+**No scalar entity IDs remain** in the final song tokens. All entity
+references are replaced with the full data of the referenced entity.
+
+**§§ Table inlining**: The Table FX slot (originally a scalar table ID)
+is replaced with the flattened **trace** of the target table (1584
+features). Traces are used rather than raw tables because A/H commands
+are already resolved, avoiding recursive expansion. Steps without
+CMD_A get zeros.
+
+**§§§ Groove inlining**: The Groove FX slot (originally a scalar groove
+ID) is replaced with the full groove vector: `grooves[id]` flattened
+from (STEPS_PER_GROOVE, 2) to 32 scalars. Steps without CMD_G get zeros.
 
 ### Embedding Notes
 
-Entity references (instrument IDs, table IDs, groove IDs, softsynth IDs)
-appear both in the song sequence and within entity definitions themselves.
-At embedding time, each ID should resolve to a learned representation of
-the referenced entity — the exact mechanism is architecture-dependent.
+All entity references in the song sequence are **inlined** — the
+tokenizer replaces every entity ID with the full data of the referenced
+entity. The final song tokens contain no scalar entity IDs. The FX
+command is also implicit (sparse FX values encode it).
 
-Possible strategies include:
+Entity generation strategies (how the model produces the entities that
+get inlined) remain architecture-dependent. Possible strategies include:
 
 - **Upfront generation**: all entities are generated before the song
   sequence, forming an embedding bank ("palette") for lookup during sequence
@@ -204,23 +235,9 @@ arrays regardless. The embedding/generation strategy is an architecture
 decision.
 
 ```
-Entity encoders:
-  Grooves  (32)  ──┐
-  Softsynths (16) ─┤
-  Tables (32)  ────┤──→  Entity representations
-  Instruments (64) ┘
-
-Song sequence (per step):
-  note ─────────────→ Embedding(159)     ──┐
-  chain_transpose ──→ Embedding(257)     ──┤
-  fx_command ───────→ Embedding(19)      ──┤
-  fx_values ────────→ FXValueEmbedder    ──┤──→ concat → Linear → d_model
-  instrument_ID ────→ entity lookup      ──┤
-  table_fx_ID ──────→ entity lookup      ──┤
-  groove_fx_ID ─────→ entity lookup      ──┘
+Song sequence (per step, all entities inlined):
+  note ──────────────→ Embedding(159)     ──┐
+  chain_transpose ───→ Embedding(257)     ──┤
+  fx_values (1631) ──→ FXValueEmbedder    ──┤──→ concat → Linear → d_model
+  instrument (1630) ─→ Linear             ──┘
 ```
-
-
-For generation: the model outputs a query vector in the same space as the
-      204 -palette embeddings. Cosine similarity produces a categorical distribution
-      205 -over palette entries (tables, grooves, instruments).

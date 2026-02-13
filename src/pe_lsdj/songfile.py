@@ -3,31 +3,83 @@ import jax.numpy as jnp
 from jaxtyping import Array
 from pe_lsdj.tokenizer import (
     parse_grooves,
-    parse_envelopes,
     parse_instruments,
     parse_notes,
     parse_fx_commands,
     parse_fx_values,
+    parse_softsynths,
     parse_tables,
 )
 from pylsdj import load_lsdsng
 from pe_lsdj.constants import *
 
 
-def flat_format(data: Array) -> Array:
+def step_format(data: Array) -> Array:
     """
-    Expects input of shape (NUM_SONG_PHRASES, NUM_CHANNELS, STEPS_PER_PHRASE)
-    Collects the channel dimension upfront and flattens -
-    Returns (NUM_CHANNELS * NUM_SONG_PHRASES * STEPS_PER_PHRASE)
+    (phrases, channels, steps_per_phrase) -> (total_steps, channels)
+    Merges phrases and steps into a single time axis, preserving channels.
     """
-    return jnp.transpose(
-        data,
-        (1, 0, 2) # (channel, song_phrase, step)
-    ).reshape((NUM_CHANNELS * NUM_SONG_STEPS))
+    return jnp.transpose(data, (0, 2, 1)).reshape(-1, data.shape[1])
+
+
+def step_format_nd(data: Array) -> Array:
+    """
+    (phrases, channels, steps_per_phrase, feat_dim) -> (total_steps, channels, feat_dim)
+    Like step_format but for multi-dimensional features.
+    """
+    return jnp.transpose(data, (0, 2, 1, 3)).reshape(
+        -1, data.shape[1], data.shape[3]
+    )
+
+
+def first_contiguous_block(arr_1d):
+    """Return (start, end) of first contiguous run of non-255 values."""
+    active = arr_1d != 255
+    if not jnp.any(active):
+        return 0, 0
+    
+    start = int(jnp.argmax(active))
+    rest = active[start:]
+    if jnp.all(rest):
+        end = len(arr_1d)
+    else:
+        end = start + int(jnp.argmin(rest))
+
+    return start, end
+
+
+def _inline_slot(fx_vals_flat, slot_idx, lookup_padded):
+    """Replace a scalar ID column in sparse FX values with looked-up vectors.
+
+    fx_vals_flat: (N, D) — flattened FX value array
+    slot_idx: column index of the ID to replace
+    lookup_padded: (max_id+1, vec_dim) with zero row at index 0 for null
+    Returns: (N, D - 1 + vec_dim)
+    """
+    vecs = lookup_padded[fx_vals_flat[:, slot_idx]]
+    return jnp.concatenate([
+        fx_vals_flat[:, :slot_idx],
+        vecs,
+        fx_vals_flat[:, slot_idx + 1:],
+    ], axis=1)
+
+
+def _with_sentinel(arr):
+    return jnp.concatenate([
+        arr, jnp.zeros((1,) + arr.shape[1:], dtype=arr.dtype)
+    ])
+
 
 class SongTokenizer(eqx.Module):
     name: str
-    tokens: dict[str, Array]
+    tempo: jnp.int32
+    song_tokens: Array
+
+    # TODO probably remove
+    song_notes: Array
+    song_fx_values: Array
+    song_instruments: Array
+    song_transposes: Array
 
     def __init__(self, filename: str):
         self._load_data(filename)
@@ -48,20 +100,17 @@ class SongTokenizer(eqx.Module):
         NUM_SONG_STEPS x (
             song_notes, 
             song_instruments, 
-            song_fx, 
             song_fx_val, 
             chain_transpose
-        )
+        ) ... concatenated across channels!
 
-        For each input stream:
-            batch_dim = (channels * song_steps) [flattened]
-            embedding_dim = (batch dim, feature_dim)
         """
         # Decompress using pylsdj's load function
         pylsdj_project = load_lsdsng(filename)
         raw_data = jnp.array(pylsdj_project._raw_bytes, dtype=jnp.uint8)
 
         self.name = pylsdj_project.name
+        self.tempo = raw_data[TEMPO_ADDR][0]
         
         # ===== Create 2D (flat_sequence x feature_dim) representation =====
 
@@ -78,164 +127,191 @@ class SongTokenizer(eqx.Module):
              (NUM_CHAINS, PHRASES_PER_CHAIN)
         ).astype(jnp.uint8)
 
-        song_phrases = chain_phrases[
-            song_chains
-        ].reshape((NUM_SONG_PHRASES, -1))
-
-        phrase_instruments = raw_data[PHRASE_INSTR_ADDR].reshape(
+        # Instruments per phrase
+        phrase_instrument_ids = raw_data[PHRASE_INSTR_ADDR].reshape(
             (NUM_PHRASES, STEPS_PER_PHRASE)
         ).astype(jnp.uint8)
 
+        # ------- Preprocess to get "effective" sequence --------
+
+        # Chain level: per channel, find the played chain block
+        active_song_chains = []
+        for ch in range(NUM_CHANNELS):
+            ch_chains = song_chains[:, ch]
+            first_phrases = chain_phrases[ch_chains, 0]
+            c_start, c_end = first_contiguous_block(first_phrases)
+            active_song_chains.append(ch_chains[c_start:c_end])
+
+        # Phrase level: per active chain, extract the played phrase block
+        # and its transpose, then concatenate per channel
+        active_song_phrases = []
+        active_song_transposes = []
+        for ch in range(NUM_CHANNELS):
+            ph_ids = []
+            tr_vals = []
+            for cid in active_song_chains[ch]:
+                cp = chain_phrases[cid]
+                ct = chain_transposes[cid]
+                p_start, p_end = first_contiguous_block(cp)
+                if p_end > p_start:
+                    ph_ids.append(cp[p_start:p_end])
+                    tr_vals.append(ct[p_start:p_end])
+            if ph_ids:
+                active_song_phrases.append(jnp.concatenate(ph_ids))
+                active_song_transposes.append(jnp.concatenate(tr_vals))
+            else:
+                active_song_phrases.append(jnp.array([], dtype=jnp.uint8))
+                active_song_transposes.append(jnp.array([], dtype=jnp.uint8))
+
+        # ------- Pack ragged lists into (max_phrases, NUM_CHANNELS) --------
+        # Pad shorter channels with 255 (sentinel = empty phrase).
+        max_phrases = max(len(cp) for cp in active_song_phrases)
+        song_phrases = jnp.full(
+            (max_phrases, NUM_CHANNELS), 255, dtype=jnp.uint8
+        )
+        song_transposes_raw = jnp.zeros(
+            (max_phrases, NUM_CHANNELS), dtype=jnp.uint8
+        )
+        for ch in range(NUM_CHANNELS):
+            n = len(active_song_phrases[ch])
+            song_phrases = song_phrases.at[:n, ch].set(active_song_phrases[ch])
+            song_transposes_raw = song_transposes_raw.at[:n, ch].set(
+                active_song_transposes[ch]
+            )
+        num_active_phrases = max_phrases
+        num_active_steps = num_active_phrases * STEPS_PER_PHRASE
+
         # =========== Parse tokens from raw data ===========
+        # Each phrase-level array gets a zero sentinel row appended at
+        # index 255, so padded (empty) phrase slots produce null data.
 
-        # NOTES: tokens per phrase, to be rearranged
-        phrase_notes = parse_notes(raw_data[PHRASE_NOTES_ADDR])
+        phrase_notes = _with_sentinel(
+            parse_notes(raw_data[PHRASE_NOTES_ADDR])
+        )
+        phrase_instrument_ids = _with_sentinel(phrase_instrument_ids)
 
-        # GROOVES: ((even step ticks, odd step ticks) per 16 steps)
+        phrase_fx_raw = parse_fx_commands(raw_data[PHRASE_FX_ADDR])
         grooves = parse_grooves(raw_data[GROOVES_ADDR])
 
-        # This pulls data from several places in the array
-        # TABLES: (NUM_TABLES, STEPS_PER_TABLE, concatenate_table_feature_tokens_dim)
+        # Parse FX values and inline groove vectors
+        fx_vals_dict = parse_fx_values(raw_data[PHRASE_FX_VAL_ADDR], phrase_fx_raw)
+        fx_vals_flat = jnp.column_stack(list(fx_vals_dict.values()))
+
+        # Replace scalar groove IDs with full groove data.
+        # Groove IDs have +1 null offset: 0 = no groove, k = groove k-1.
+        # Prepend a zero row so index 0 maps to zeros.
+        groove_idx = list(fx_vals_dict.keys()).index(GROOVE_FX)
+        grooves_flat = grooves.reshape(NUM_GROOVES, -1)
+        grooves_padded = jnp.concatenate([
+            jnp.zeros((1, grooves_flat.shape[-1]), dtype=jnp.uint8),
+            grooves_flat,
+        ])
+        # Groove-inline phrase FX values (flat; table inlining applied below)
+        fx_vals_grooved = _inline_slot(fx_vals_flat, groove_idx, grooves_padded)
+
         tables_vecs, trace_vecs = parse_tables(raw_data)
 
+        # --- Table-level inlining (inside-out) ---
+
+        # 1. Inline grooves in trace FX values
+        table_slot = FX_VALUE_KEYS.index(TABLE_FX)
+        for key in (TABLE_FX_VALUE_1, TABLE_FX_VALUE_2):
+            fxv = trace_vecs[key].reshape(-1, trace_vecs[key].shape[-1])
+            trace_vecs[key] = _inline_slot(fxv, groove_idx, grooves_padded) \
+                .reshape(NUM_TABLES, STEPS_PER_TABLE, -1)
+
+        # 2. Flatten groove-inlined traces into per-table lookup vectors.
+        #    Drop FX command fields (TABLE_FX_1/2) — the active command is
+        #    implicit in the sparse FX value structure.
+        trace_keys = [k for k in trace_vecs if k not in (TABLE_FX_1, TABLE_FX_2)]
+        trace_flat = jnp.concatenate([
+            trace_vecs[k].reshape(NUM_TABLES, -1) for k in trace_keys
+        ], axis=1)
+        trace_padded = jnp.concatenate([
+            jnp.zeros((1, trace_flat.shape[1]), dtype=trace_flat.dtype),
+            trace_flat,
+        ])
+
+        # 3. Build groove-inlined raw table vectors for instrument inlining.
+        #    Uses raw tables (A-command patterns preserved) before step 4
+        #    mutates tables_vecs with trace inlining.
+        raw_tbl_keys = [k for k in tables_vecs if k not in (TABLE_FX_1, TABLE_FX_2)]
+        raw_tbl_parts = []
+        for k in raw_tbl_keys:
+            v = tables_vecs[k]
+            if k in (TABLE_FX_VALUE_1, TABLE_FX_VALUE_2):
+                flat = v.reshape(-1, v.shape[-1])
+                v = _inline_slot(flat, groove_idx, grooves_padded) \
+                    .reshape(NUM_TABLES, STEPS_PER_TABLE, -1)
+            raw_tbl_parts.append(v.reshape(NUM_TABLES, -1))
+        raw_table_flat = jnp.concatenate(raw_tbl_parts, axis=1)
+        raw_table_padded = jnp.concatenate([
+            jnp.zeros((1, raw_table_flat.shape[1]), dtype=raw_table_flat.dtype),
+            raw_table_flat,
+        ])
+
+        # 4. Inline grooves then traces in raw table FX values.
+        #    Groove slot (index 1) first, then table slot (index 0) —
+        #    groove inlining doesn't shift index 0.
+        for key in (TABLE_FX_VALUE_1, TABLE_FX_VALUE_2):
+            fxv = tables_vecs[key].reshape(-1, tables_vecs[key].shape[-1])
+            fxv = _inline_slot(fxv, groove_idx, grooves_padded)
+            fxv = _inline_slot(fxv, table_slot, trace_padded)
+            tables_vecs[key] = fxv.reshape(NUM_TABLES, STEPS_PER_TABLE, -1)
+
+        # 5. Inline table traces in phrase FX values.
+        #    Table slot is still at index 0 (groove inlining was at index 1).
+        fx_vals_inlined = _inline_slot(fx_vals_grooved, table_slot, trace_padded)
+        phrase_fx_values = _with_sentinel(
+            fx_vals_inlined.reshape(NUM_PHRASES, STEPS_PER_PHRASE, -1)
+        )
+
+        # 6. Inline table and softsynth data into instruments.
         instruments_dict = parse_instruments(raw_data[INSTRUMENTS_ADDR])
-        # INSTRUMENTS: (NUM_INSTRUMENTS, concatenated_feature_tokens_dim)
-        instruments = jnp.column_stack(instruments_dict.values())
+        instr_keys = list(instruments_dict.keys())
+        instruments_flat = jnp.column_stack(instruments_dict.values())
 
-        phrase_fx = parse_fx_commands(raw_data[PHRASE_FX_ADDR])
-        phrase_fx_values_dict = parse_fx_values(
-            raw_data[PHRASE_FX_VAL_ADDR], 
-            phrase_fx
-        )
-        # PHRASE FX VALUES: (NUM_PHRASES, concatenated_FX_val_features_dim)
-        phrase_fx_values = jnp.column_stack(
-            phrase_fx_values_dict.values()
-        )
+        #    TABLE field → groove-inlined raw table vector (1584 dims)
+        table_col = instr_keys.index(TABLE)
+        instruments_flat = _inline_slot(instruments_flat, table_col, raw_table_padded)
 
-        # ======= Slot tokens into global structure =========
+        #    SOFTSYNTH_ID field → full softsynth vector (13 dims)
+        #    Column index shifted by table expansion (1584 - 1 = +1583).
+        softsynths_dict = parse_softsynths(raw_data[SOFTSYNTH_PARAMS_ADDR])
+        synths_flat = jnp.column_stack(softsynths_dict.values())
+        synths_padded = jnp.concatenate([
+            jnp.zeros((1, synths_flat.shape[1]), dtype=jnp.uint8),
+            synths_flat,
+        ])
+        synth_col_orig = instr_keys.index(SOFTSYNTH_ID)
+        synth_col = synth_col_orig + (raw_table_padded.shape[1] - 1) * (synth_col_orig > table_col)
+        instruments = _inline_slot(instruments_flat, synth_col, synths_padded)
 
-        # Reshape to (channel * song_phrases * steps_per_phrase, feature_dim)
-        song_notes = flat_format(phrase_notes[song_phrases])
-        song_instrument_IDs = flat_format(phrase_instruments[song_phrases])
+        # ======= Build song-level step sequences =======
+        # Lookups produce (max_phrases, NUM_CHANNELS, STEPS_PER_PHRASE[, feat])
+        # step_format merges phrase+step dims: -> (num_active_steps, NUM_CHANNELS[, feat])
+        song_notes = step_format(phrase_notes[song_phrases])
+        song_instrument_IDs = step_format(phrase_instrument_ids[song_phrases])
         song_instruments = instruments[song_instrument_IDs]
-        song_fx = flat_format(phrase_fx.reshape((NUM_PHRASES, STEPS_PER_PHRASE))[song_phrases])
+        song_fx_values = step_format_nd(phrase_fx_values[song_phrases])
 
-        song_fx_values = jnp.transpose(
-            phrase_fx_values.reshape(
-                (NUM_PHRASES, STEPS_PER_PHRASE, FX_VALUES_FEATURE_DIM)
-            )[song_phrases],
-            (1, 0, 2, 3)
-        ).reshape((NUM_CHANNELS * NUM_SONG_STEPS, FX_VALUES_FEATURE_DIM))
+        # Broadcast per-phrase transposes to step level
+        song_transposes = jnp.repeat(
+            song_transposes_raw, repeats=STEPS_PER_PHRASE, axis=0
+        )
 
-        # Broadcast per-phrase chain transposes across steps in each phrase
-        song_phrase_transposes = jnp.repeat(
-            jnp.transpose(
-                chain_transposes[song_chains],
-                (1,0,2)
-            ).reshape(NUM_CHANNELS * NUM_SONG_CHAINS, PHRASES_PER_CHAIN),
-            repeats=STEPS_PER_PHRASE,
+        # Final shape: (num_active_steps, NUM_CHANNELS, per_channel_feat_dim)
+        # note(1) + instrument(N) + fx_values(48) + transpose(1)
+        self.song_tokens = jnp.concatenate(
+            [
+                song_notes[:, :, None],
+                song_instruments,
+                song_fx_values,
+                song_transposes[:, :, None],
+            ],
             axis=-1
-        ).ravel()
-
-        print("song notes", song_notes.shape)
-        print("song instruments", song_instruments.shape)
-        print("song fx", song_fx.shape)
-        print("song fx val", song_fx_values.shape)
-        print("song transpose", song_phrase_transposes.shape)
-
-
-
-
-
-        self.tokens = dict()
-        # tokens[GROOVES] = parse_grooves(raw_data[GROOVES_ADDR])
-
-
-
-        # self.table_envelopes = parse_envelopes(
-        #      raw_data[TABLE_ENVELOPES_ADDR]
-        # )
-
-
-        
-
-        # self.table_transposes = raw_data[TABLE_TRANSPOSES_ADDR].reshape(
-        #     NUM_TABLES, STEPS_PER_TABLE
-        # ) + 1
-
-        # self.table_fx_1 = parse_table_fx(raw_data[TABLE_FX_ADDR])
-
-
-
-
-        # table_command = [
-        #     ("fx", b.array(NUM_TABLES,
-        #                 b.array(STEPS_PER_TABLE, b.enum(8, FX_COMMANDS)))),
-        #     ("val", b.array(NUM_TABLES, b.array(STEPS_PER_TABLE, b.byte)))
-        # ]
-
-
-
-        # #  512 3680-387F: tables-> fx
-        # TABLE_FX_ADDR = slice(0x3680,0x3880)
-        # #  (FX enum, value) - 1 byte each
-        # #  I believe pylsdj first interleaves the FX and FX-val per command, 
-        # #  in the decompression stage?
-        # #  512 3880-3A7F: tables-> fx val
-        # TABLE_FX_VAL_ADDR = slice(0x3880,0x3A80)
-        # #  512 3A80-3C7F: tables-> fx 2
-        # TABLE_FX_2_ADDR = slice(0x3A80,0x3C80)
-        # #  512 3C80-3E7F: tables-> fx 2 val
-        # TABLE_FX_2_VAL_ADDR = slice(0x3C80,0x3E80)
-        # #    2 3E80-3E81: mem initialized flag (set to “rb” on init)
-        # MEM_INIT_FLAG2_ADDR = slice(0x3E80,0x3E82)
-        # #   32 3E82-3EA1: phrase allocation table (bit per phrase, 1 if alloced, 0 else)
-        # # 255 phrases; technically I think the last bit is padding
-        # PHRASE_ALLOC_TABLE_ADDR = slice(0x3E82,0x3EA2)
-        # #   16 3EA2-3EB1: chain allocation table (bit per chain, 1 if alloced, 0 else)
-        # CHAIN_ALLOC_TABLE_ADDR = slice(0x3EA2,0x3EB2)
-        # #  256 3EB2-3FB1: softsynth params (16 parameter blocks of 16 bytes each)
-        # SOFTSYNTH_PARAMS_ADDR = slice(0x3EB2,0x3FB2)
-        # #    1 3FB2-3FB2: clock, hours
-        # CLOCK_HOURS_LEN = 1 # Ignore for now
-        # #    1 3FB3-3FB3: clock, minutes
-        # CLOCK_MINS_LEN = 1 # Ignore for now
-        # #    1 3FB4-3FB4: tempo
-        # TEMPO_ADDR = slice(0x3FB4,0x3FB5)
-        # # Ignore most of these for now...
-        # #    1 3FB5-3FB5: tune setting
-        # #    1 3FB6-3FB6: total clock, days
-        # #    1 3FB7-3FB7: total clock, hours
-        # #    1 3FB8-3FB8: total clock, minutes
-        # #    1 3FB9-3FB9: total clock, checksum (days+hours+minutes)
-        # #    1 3FBA-3FBA: key delay
-        # #    1 3FBB-3FBB: key repeat
-        # #    1 3FBC-3FBC: font
-        # #    1 3FBD-3FBD: sync setting
-        # #    1 3FBE-3FBE: colorset
-        # #    1 3FBF-3FBF: empty
-        # #    1 3FC0-3FC0: clone (0=deep, 1=slim)
-        # #    1 3FC1-3FC1: file changed?
-        # #    1 3FC2-3FC2: power save
-        # #    1 3FC3-3FC3: prelisten
-        # #    2 3FC4-3FC5: wave synth overwrite locks
-        # #   58 3FC6-3FFF: empty
-
-        # # Bank 2:
-        # # 4080 4000-4FEF: phrases->fx
-        # PHRASE_FX_ADDR = slice(0x4000,0x4FF0)
-        # # 4080 4FF0-5FDF: phrases->fx val
-        # PHRASE_FX_VAL_ADDR = slice(0x4FF0,0x5FE0)
-        # #   32 5FE0-5FFF: empty
-
-        # # Bank 3:
-        # # 4096 6000-6FFF: 256 wave frames (each frame has 32 4-bit samples)
-        # WAVE_FRAMES_ADDR = slice(0x6000,0x7000)
-        # # 4080 7000-7FEF: phrases->instr
-        # PHRASE_INSTR_ADDR = slice(0x7000,0x7FF0)
-        # #    2 7FF0-7FF1: mem initialized flag (set to “rb” on init)
-        # MEM_INIT_FLAG3_ADDR = slice(0x7FF0,0x7FF2)
-        # #   13 7FF2-7FFE: empty
-        # #    1 7FFF-7FFF: version byte
-        # VERSION_ADDR = slice(0x7FFF,0x8000)
-
+        )
+        self.song_notes = song_notes
+        self.song_instruments = song_instruments
+        self.song_fx_values = song_fx_values
+        self.song_transposes = song_transposes
