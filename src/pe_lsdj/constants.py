@@ -225,7 +225,23 @@ LENGTH_KIT_2 = "Length kit 2"
 OFFSET_KIT_1 = "Offset kit 1"
 OFFSET_KIT_2 = "Offset kit 2"
 
+# Softsynth fields
+SOFTSYNTH_WAVEFORM = "Softsynth waveform"
+SOFTSYNTH_FILTER_TYPE = "Softsynth filter type"
+SOFTSYNTH_FILTER_RESONANCE = "Softsynth filter resonance"
+SOFTSYNTH_DISTORTION = "Softsynth distortion"
+SOFTSYNTH_PHASE_TYPE = "Softsynth phase type"
+SOFTSYNTH_START_VOLUME = "Softsynth start volume"
+SOFTSYNTH_START_FILTER_CUTOFF = "Softsynth start filter cutoff"
+SOFTSYNTH_START_PHASE_AMOUNT = "Softsynth start phase amount"
+SOFTSYNTH_START_VERTICAL_SHIFT = "Softsynth start vertical shift"
+SOFTSYNTH_END_VOLUME = "Softsynth end volume"
+SOFTSYNTH_END_FILTER_CUTOFF = "Softsynth end filter cutoff"
+SOFTSYNTH_END_PHASE_AMOUNT = "Softsynth end phase amount"
+SOFTSYNTH_END_VERTICAL_SHIFT = "Softsynth end vertical shift"
+
 # Utilities / misc
 INSTRUMENT_SIZE = 0x10
+SYNTH_SIZE = 0x10
 FX_VALUES_FEATURE_DIM = 17
 NUM_CHANNELS = 4

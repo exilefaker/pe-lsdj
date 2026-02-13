@@ -13,6 +13,7 @@ from pe_lsdj.constants import *
 #   - Tables (32 of them)    [ [concat features -> proj per step] -> proj per table ]
 #   - Instruments (64 of them) [concat features -> proj per instrument]
 #   - Softsynths (16 of them)  [concat features -> proj per synth]
+#   - Grooves (32)
 
 # Then, use transformer to generate main sequence
 # use embeddings in place of the IDs for the above palette fields
@@ -74,6 +75,9 @@ def _nibble_split(bytes: list[int]) -> Array:
 
 def _get_bit(bytes: list[int], bit_no: int) -> Array:
     return ((bytes >> bit_no) & 0x01)
+
+def _with_null(data: Array) -> Array:
+    return data.astype(jnp.uint8) + 1
 
 def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     """
@@ -377,7 +381,7 @@ def parse_5bit_IDs(data_bytes: Array) -> Array:
 def parse_3bit_enum(data_bytes: Array) -> Array:
     return (data_bytes + 1) * (data_bytes <= 3)
 
-def parse_fx_values(data_bytes: Array, fx_command_IDs: Array) -> Array:
+def parse_fx_values(data_bytes: Array, fx_command_IDs: Array) -> dict[str, Array]:
     """
     Parse raw (decompressed) bytes representing FX into appropriate
     structures, conditional on FX command IDs.
@@ -449,3 +453,72 @@ def parse_fx_values(data_bytes: Array, fx_command_IDs: Array) -> Array:
 
     return parsed_fx_values
 
+
+def parse_softsynths(data: Array) -> dict[str, Array]:
+    """
+    Parse raw (decompressed) bytes into Softsynth params
+    (WAV channel instrument configs).
+
+    Field              | Semantics                          | Byte
+    ====================================================================
+    Waveform           | [sawtooth, square, sine]           | 0
+    Filter type        | [lowpass, highpass, bandpass, all]  | 1
+    Filter resonance   | continuous (0-255)                 | 2
+    Distortion         | [clip, wrap]                       | 3
+    Phase type         | [normal, resync, resync2]          | 4
+    Start volume       | continuous (0-255)                 | 5
+    Start filter cutoff| continuous (0-255)                 | 6
+    Start phase amount | continuous (0-255)                 | 7
+    Start vert. shift  | continuous (0-255)                 | 8
+    End volume         | continuous (0-255)                 | 9
+    End filter cutoff  | continuous (0-255)                 | 10
+    End phase amount   | continuous (0-255)                 | 11
+    End vert. shift    | continuous (0-255)                 | 12
+    (padding)          |                                    | 13-15
+    """
+    raw = data.reshape(NUM_SYNTHS, SYNTH_SIZE)
+
+    # Byte 0: waveform enum (0=sawtooth, 1=square, 2=sine)
+    waveforms = ((raw[:, 0] + 1) * (raw[:, 0] <= 2)).astype(jnp.uint8)
+
+    # Byte 1: filter_type enum (0=lowpass, 1=highpass, 2=bandpass, 3=allpass)
+    filter_types = ((raw[:, 1] + 1) * (raw[:, 1] <= 3)).astype(jnp.uint8)
+
+    # Byte 2: filter_resonance (continuous)
+    filter_resonances = _with_null(raw[:, 2])
+
+    # Byte 3: distortion enum (0=clip, 1=wrap)
+    distortions = ((raw[:, 3] + 1) * (raw[:, 3] <= 1)).astype(jnp.uint8)
+
+    # Byte 4: phase_type enum (0=normal, 1=resync, 2=resync2)
+    phase_types = ((raw[:, 4] + 1) * (raw[:, 4] <= 2)).astype(jnp.uint8)
+
+    # Bytes 5-8: start params
+    start_volumes = _with_null(raw[:, 5])
+    start_filter_cutoffs = _with_null(raw[:, 6])
+    start_phase_amounts = _with_null(raw[:, 7])
+    start_vertical_shifts = _with_null(raw[:, 8])
+
+    # Bytes 9-12: end params
+    end_volumes = _with_null(raw[:, 9])
+    end_filter_cutoffs = _with_null(raw[:, 10])
+    end_phase_amounts = _with_null(raw[:, 11])
+    end_vertical_shifts = _with_null(raw[:, 12])
+
+    # Bytes 13-15: padding (ignored)
+
+    return {
+        SOFTSYNTH_WAVEFORM: waveforms,
+        SOFTSYNTH_FILTER_TYPE: filter_types,
+        SOFTSYNTH_FILTER_RESONANCE: filter_resonances,
+        SOFTSYNTH_DISTORTION: distortions,
+        SOFTSYNTH_PHASE_TYPE: phase_types,
+        SOFTSYNTH_START_VOLUME: start_volumes,
+        SOFTSYNTH_START_FILTER_CUTOFF: start_filter_cutoffs,
+        SOFTSYNTH_START_PHASE_AMOUNT: start_phase_amounts,
+        SOFTSYNTH_START_VERTICAL_SHIFT: start_vertical_shifts,
+        SOFTSYNTH_END_VOLUME: end_volumes,
+        SOFTSYNTH_END_FILTER_CUTOFF: end_filter_cutoffs,
+        SOFTSYNTH_END_PHASE_AMOUNT: end_phase_amounts,
+        SOFTSYNTH_END_VERTICAL_SHIFT: end_vertical_shifts,
+    }

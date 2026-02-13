@@ -176,3 +176,64 @@ def repack_instruments(tokens_dict: dict[str, Array]) -> Array:
 
 
     return repacked_bytes.ravel().tolist()
+
+
+def repack_softsynths(tokens_dict: dict[str, Array]) -> Array:
+    repacked_bytes = jnp.zeros((NUM_SYNTHS, SYNTH_SIZE), dtype=jnp.uint8)
+
+    # Byte 0: waveform
+    repacked_bytes = repacked_bytes.at[:, 0].set(
+        (tokens_dict[SOFTSYNTH_WAVEFORM] - 1).astype(jnp.uint8)
+    )
+
+    # Byte 1: filter_type
+    repacked_bytes = repacked_bytes.at[:, 1].set(
+        (tokens_dict[SOFTSYNTH_FILTER_TYPE] - 1).astype(jnp.uint8)
+    )
+
+    # Byte 2: filter_resonance
+    repacked_bytes = repacked_bytes.at[:, 2].set(
+        (tokens_dict[SOFTSYNTH_FILTER_RESONANCE] - 1).astype(jnp.uint8)
+    )
+
+    # Byte 3: distortion
+    repacked_bytes = repacked_bytes.at[:, 3].set(
+        (tokens_dict[SOFTSYNTH_DISTORTION] - 1).astype(jnp.uint8)
+    )
+
+    # Byte 4: phase_type
+    repacked_bytes = repacked_bytes.at[:, 4].set(
+        (tokens_dict[SOFTSYNTH_PHASE_TYPE] - 1).astype(jnp.uint8)
+    )
+
+    # Bytes 5-8: start params
+    repacked_bytes = repacked_bytes.at[:, 5].set(
+        (tokens_dict[SOFTSYNTH_START_VOLUME] - 1).astype(jnp.uint8)
+    )
+    repacked_bytes = repacked_bytes.at[:, 6].set(
+        (tokens_dict[SOFTSYNTH_START_FILTER_CUTOFF] - 1).astype(jnp.uint8)
+    )
+    repacked_bytes = repacked_bytes.at[:, 7].set(
+        (tokens_dict[SOFTSYNTH_START_PHASE_AMOUNT] - 1).astype(jnp.uint8)
+    )
+    repacked_bytes = repacked_bytes.at[:, 8].set(
+        (tokens_dict[SOFTSYNTH_START_VERTICAL_SHIFT] - 1).astype(jnp.uint8)
+    )
+
+    # Bytes 9-12: end params
+    repacked_bytes = repacked_bytes.at[:, 9].set(
+        (tokens_dict[SOFTSYNTH_END_VOLUME] - 1).astype(jnp.uint8)
+    )
+    repacked_bytes = repacked_bytes.at[:, 10].set(
+        (tokens_dict[SOFTSYNTH_END_FILTER_CUTOFF] - 1).astype(jnp.uint8)
+    )
+    repacked_bytes = repacked_bytes.at[:, 11].set(
+        (tokens_dict[SOFTSYNTH_END_PHASE_AMOUNT] - 1).astype(jnp.uint8)
+    )
+    repacked_bytes = repacked_bytes.at[:, 12].set(
+        (tokens_dict[SOFTSYNTH_END_VERTICAL_SHIFT] - 1).astype(jnp.uint8)
+    )
+
+    # Bytes 13-15: padding (zeros, already initialized)
+
+    return repacked_bytes.ravel().tolist()
