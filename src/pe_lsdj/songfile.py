@@ -2,34 +2,14 @@ import equinox as eqx
 import jax.numpy as jnp
 from jaxtyping import Array
 from pe_lsdj.tokenizer import (
-    # parse_chain_phrases,
     parse_grooves,
     parse_envelopes, 
     parse_instruments,
-    parse_table_fx,
     parse_notes,
-    parse_fx,
+    parse_fx_commands,
     parse_fx_values,
-    # parse_song_chains,
 )
 from pylsdj import load_lsdsng
-#     load_lsdsng,
-#     NUM_CHAINS,
-#     NUM_CHANNELS,
-#     NUM_GROOVES, 
-#     NUM_INSTRUMENTS,
-#     NUM_SONG_CHAINS,
-#     NUM_SYNTHS,
-#     NUM_TABLES,
-#     NUM_PHRASES, 
-#     NUM_WORDS,
-#     PHRASES_PER_CHAIN,
-#     STEPS_PER_GROOVE, 
-#     STEPS_PER_TABLE, 
-#     STEPS_PER_PHRASE, 
-#     WORD_LENGTH,   
-# )
-# from pe_lsdj.memory import MemoryMapEntry, MEMORY_MAP as MM, NUM_PHRASES, STEPS_PER_PHRASE
 from pe_lsdj.constants import *
 
 
@@ -56,18 +36,9 @@ class SongTokenizer(eqx.Module):
         Parse the (decompressed) raw bytes of a LSDJ v3.9.2 track
         into embedding indices (tokens)
 
-        Target shapes:
-
-        1. For embedding, batch all features:
-
-        feature_embedding = (channels, song_steps, feature_dim)
-
-        feature_embedding = (steps, channels, feature_dim)
-
-        [ notes = (steps, channels).ravel() ]
-        [ instruments = (steps, channels).ravel() ]
-
-
+        For each input stream:
+            batch_dim = (channels * song_steps) [flattened]
+            embedding_dim = (batch dim, feature_dim)
         """
         # Decompress using pylsdj's load function
         pylsdj_project = load_lsdsng(filename)
@@ -123,8 +94,17 @@ class SongTokenizer(eqx.Module):
         instruments_dict = parse_instruments(raw_data[INSTRUMENTS_ADDR])
         instruments = jnp.column_stack(instruments_dict.values())
 
-        phrase_fx = parse_fx(raw_data[PHRASE_FX_ADDR])
-        phrase_fx_vals = parse_fx_values(raw_data[PHRASE_FX_VAL_ADDR])
+        phrase_fx = parse_fx_commands(raw_data[PHRASE_FX_ADDR])
+        # (NUM_PHRASES, concatenated_FX_val_features_dim)
+        phrase_fx_values_dict = parse_fx_values(
+            raw_data[PHRASE_FX_VAL_ADDR], 
+            phrase_fx
+        )
+        phrase_fx_values = jnp.column_stack(
+            phrase_fx_values_dict.values()
+        )
+        print("phrase fx", phrase_fx.shape)
+        print("phrase fx values", phrase_fx_values.shape)
 
         # ======= Slot tokens into global structure =========
 
@@ -132,32 +112,14 @@ class SongTokenizer(eqx.Module):
         song_notes = flat_format(phrase_notes[song_phrases])
         song_instrument_IDs = flat_format(phrase_instruments[song_phrases])
         song_instruments = instruments[song_instrument_IDs]
-        song_fx = flat_format(phrase_fx[song_phrases])
-        song_fx_value_IDs = flat_format(phrase_fx_vals[song_phrases])
+        song_fx = flat_format(phrase_fx.reshape((NUM_PHRASES, STEPS_PER_PHRASE))[song_phrases])
 
-        song_fx_values = fx_values[song_fx_value_IDs]
-
-        # FX VALUES by command
-
-        # - (NULL) - set to NULL
-        # A (table) - 32 IDs - tables[jnp.where(fx_val_IDs == TABLE)] 
-        # C (chord) - (semitone 1, semitone 2) - nibbles
-        # D (delay) - byte determines number of ticks to delay (continuous)
-        # E (env) - envelope (volume, fade) - nibbles
-        # F (finetune) - basically, continuous value
-        # G (groove) - 32 IDs - grooves[jnp.where(fx_val_IDs == GROOVE)]
-        # H (hop) - basically, continuous value
-        # K (kill) - intensity, basically continuous
-        # L (slide) - slide speed, basically continuous
-        # M (master vol) - complex semantics; hardly use, nibbles should work
-        # O (pan) - 4-val enum
-        # P (pitch) - continuous intensity
-        # R (retrigger) - nibble split (fade, rate)
-        # S (sweep) - continuous
-        # T (tempo) - continuous
-        # V (vibrato) - nibbles (speed, depth)
-        # W (wave) - 4-val waveform enum (has dual use for WAV chan but rare)
-        # Z (random) - nibbles (first digit range, second digit range)
+        song_fx_values = jnp.transpose(
+            phrase_fx_values.reshape(
+                (NUM_PHRASES, STEPS_PER_PHRASE, FX_VALUES_FEATURE_DIM)
+            )[song_phrases],
+            (1, 0, 2, 3)
+        ).reshape((NUM_CHANNELS * NUM_SONG_STEPS, FX_VALUES_FEATURE_DIM))
 
         # Broadcast per-phrase chain transposes across steps in each phrase
         song_phrase_transposes = jnp.repeat(
@@ -172,7 +134,7 @@ class SongTokenizer(eqx.Module):
         print("song notes", song_notes.shape)
         print("song instruments", song_instruments.shape)
         print("song fx", song_fx.shape)
-        print("song fx val", song_fx_value_IDs.shape)
+        print("song fx val", song_fx_values.shape)
         print("song transpose", song_phrase_transposes.shape)
 
 

@@ -146,10 +146,47 @@ WAV = 2
 KIT = 3
 NOI = 4
 
+CMD_NULL = 0
+CMD_A = 1
+CMD_C = 2
+CMD_D = 3
+CMD_E = 4
+CMD_F = 5
+CMD_G = 6
+CMD_H = 7
+CMD_K = 8
+CMD_L = 9
+CMD_M = 10
+CMD_O = 11
+CMD_P = 12
+CMD_R = 13
+CMD_S = 14
+CMD_T = 15
+CMD_V = 16
+CMD_W = 17
+CMD_Z = 18
+
+TABLE_FX = "Table FX"
+GROOVE_FX = "Groove FX"
+HOP_FX = "Hop FX"
+PAN_FX = "Pan FX"
+CHORD_FX_1 = "Chord FX 1"
+CHORD_FX_2 = "Chord FX 2"
+ENV_FX_VOL = "Env FX Vol"
+ENV_FX_FADE = "Env FX Fade"
+RETRIG_FX_FADE = "Retrig FX Fade"
+RETRIG_FX_RATE = "Retrig FX Rate"
+VIBRATO_FX_SPEED = "Vibrato FX Speed"
+VIBRATO_FX_DEPTH = "Vibrato FX Depth"
+VOLUME_FX = "Volume FX"
+WAVE_FX = "Wave FX"
+RANDOM_FX_L = "Random FX L"
+RANDOM_FX_R = "Random FX R"
+CONTINUOUS_FX = "Continuous FX"
+
 # Main song fields
 PHRASE_NOTES = "Phrase notes"
 GROOVES = "Grooves"
-
 
 # Instrument fields
 TYPE_ID = "Type ID"
@@ -190,5 +227,5 @@ OFFSET_KIT_2 = "Offset kit 2"
 
 # Utilities / misc
 INSTRUMENT_SIZE = 0x10
-
+FX_VALUES_FEATURE_DIM = 17
 NUM_CHANNELS = 4

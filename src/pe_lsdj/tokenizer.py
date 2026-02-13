@@ -18,6 +18,7 @@ from pe_lsdj.constants import *
 # use embeddings in place of the IDs for the above palette fields
 # Concatenate; project to global emb_dim
 
+
 def parse_notes(data_bytes: Array) -> Array:
     raw_data = data_bytes.reshape(
         (NUM_PHRASES, STEPS_PER_PHRASE)
@@ -25,41 +26,23 @@ def parse_notes(data_bytes: Array) -> Array:
 
     return raw_data * ~(raw_data > 158) # Set invalid notes to NULL
 
+
 def parse_grooves(data_bytes: Array) -> Array:
     return data_bytes.reshape(
         (NUM_GROOVES, STEPS_PER_GROOVE)
     ).astype(jnp.uint8) + 1
 
-def parse_fx(data_bytes: Array) -> Array:
-    raw_data = data_bytes.reshape(
-        (NUM_PHRASES, STEPS_PER_PHRASE)
-    ).astype(jnp.uint8)
 
-    return raw_data * ~(raw_data > 19) # Set invalid FX commands to NULL
+def parse_fx_commands(data_bytes: Array) -> Array:
+    # Set invalid FX commands to NULL
+    return (data_bytes * ~(data_bytes > 18)).astype(jnp.uint8) 
 
-def parse_fx_values(data_bytes: Array) -> Array:
+
+def parse_fx_value_IDs(data_bytes: Array) -> Array:
     return data_bytes.reshape(
         (NUM_PHRASES, STEPS_PER_PHRASE)
     ).astype(jnp.uint8)
 
-# def parse_song_chains(data_bytes: Array) -> Array:
-#     # Don't offset by 1, because this is only used to construct
-#     # tokens[song_phrases], and doesn't appear in the final embedding
-#     return data_bytes.reshape(
-#         ((NUM_SONG_CHAINS, NUM_CHANNELS))
-#     ).astype(jnp.uint8)
-
-#     # NOTE: This makes the "null value" 255 wrap around to 0,
-#     # which works with our semantics
-
-# def parse_chain_phrases(data_bytes: Array) -> Array:
-#     # Don't offset by 1, because this is only used to construct
-#     # tokens[song_phrases], and doesn't appear in the final embedding
-#     return data_bytes.reshape(
-#         ((NUM_CHAINS, PHRASES_PER_CHAIN))
-#     ).astype(jnp.uint8) + 1
-#     # NOTE: This makes the "null value" 255 wrap around to 0,
-#     # which works with our semantics
 
 def parse_envelopes(data_bytes: Array) -> Array:
     """
@@ -84,6 +67,7 @@ def parse_envelopes(data_bytes: Array) -> Array:
             16
         )
     ).astype(jnp.uint8) + 1
+
 
 def _nibble_split(bytes: list[int]) -> Array:
     return jnp.column_stack(jnp.divmod(bytes, 16))
@@ -252,7 +236,8 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
         * (type_IDs == PU)
     ).astype(jnp.uint8)
 
-    pans = (byte7 & 0x03) + 1
+    raw_pans = byte7 & 0x03
+    pans = (raw_pans + 1) * (raw_pans <= 3)
 
     # Byte 8
     pitches = (
@@ -352,6 +337,7 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
 
     return instruments
 
+
 # NOTE: Unclear we need these. Alloc tables can (and probably should)
 # be derived algorithmically from generated data.
 def parse_alloc_table(data: list[int]):
@@ -376,14 +362,90 @@ def parse_phrase_alloc_table(data: list[int]):
     
     return alloc_table
 
-def parse_table_fx(data: Array) -> Array:
-    raw_bytes = data.reshape((NUM_TABLES, STEPS_PER_TABLE))
 
-    # Set values outside the valid enum range to NULL
-    return (raw_bytes + 1) * ~(raw_bytes > 19)
+# Parse FX command values
 
+def parse_tables(data_bytes: Array) -> Array:
+    # TODO
+    return data_bytes
 
+def parse_5bit_IDs(data_bytes: Array) -> Array:
+    # Add NULL token and use for invalid entries
+    with_null = data_bytes + 1
+    return (with_null * ~(with_null > 32)).astype(jnp.uint8)
 
+def parse_3bit_enum(data_bytes: Array) -> Array:
+    return (data_bytes + 1) * (data_bytes <= 3)
 
+def parse_fx_values(data_bytes: Array, fx_command_IDs: Array) -> Array:
+    """
+    Parse raw (decompressed) bytes representing FX into appropriate
+    structures, conditional on FX command IDs.
 
+    FX VALUE semantics by command:
+
+    COMMAND       | Semantics                | Parse                |  Group
+    ===========================================================================
+    - (NULL)      | NULL                     | Set to 0             |    -
+    A (table)     | 32 IDs                   | TableEncoder         | Table
+    C (chord)     | (semitone 1, semitone 2) | High and low nibbles | Chord
+    D (delay)     | Onset delay in ticks     | Discretized value    | Continuous
+    E (env)       | (volume, fade)           | High and low nibbles | Env
+    F (finetune)  | <Instrument-specific>    | Discretized value    | Continuous
+    G (groove)    | 32 IDs                   | GrooveEncoder        | Groove
+    H (hop)       | Location                 | Discretized value    | Hop
+    K (kill)      | Kill delay in ticks      | Discretized value    | Continuous
+    L (slide)     | Slide speed              | Discretized value    | Continuous
+    M (master vol)| <Complex semantics>      | Discretized value    | Volume
+                    (strictly speaking this could be split into nibbles)
+    O (pan)       | [Off, L, R, LR]          | Embed 4-value enum   | Pan
+    P (pitch)     | Intensity                | Discretized value    | Continuous
+    R (retrigger) | (fade, rate)             | High and low nibbles | Retrig
+    S (sweep)     | Intensity                | Discretized value    | Continuous
+    T (tempo)     | Tempo                    | Discretized value    | Continuous
+    V (vibrato)   | (speed, depth)           | High and low nibbles | Vibrato
+    W (wave)      | [12.5, 25, 50, 75]%      | Embed 4-value enum   | Wave
+                    (has dual use for WAV chan but rare)
+    Z (random)    | Ranges (L digit, R digit)| High and low nibbles | Random
+    """
+    byte_parse = data_bytes + 1
+    nibble_parse = (_nibble_split(data_bytes) + 1)
+    ID_parse = parse_5bit_IDs(data_bytes)
+    enum_parse = parse_3bit_enum(data_bytes)
+    chord_FX = nibble_parse * (fx_command_IDs == CMD_C)[:,None]
+    env_FX = nibble_parse * (fx_command_IDs == CMD_E)[:,None]
+    retrig_FX = nibble_parse * (fx_command_IDs == CMD_R)[:,None]
+    vibrato_FX = nibble_parse * (fx_command_IDs == CMD_V)[:,None]
+    random_FX = nibble_parse * (fx_command_IDs == CMD_Z)[:,None]
+    is_continuous = (
+        (fx_command_IDs == CMD_D) 
+        | (fx_command_IDs == CMD_F) 
+        | (fx_command_IDs == CMD_K) 
+        | (fx_command_IDs == CMD_L) 
+        | (fx_command_IDs == CMD_P)
+        | (fx_command_IDs == CMD_S)
+        | (fx_command_IDs == CMD_T)
+    )
+
+    parsed_fx_values = {
+        TABLE_FX: ID_parse * (fx_command_IDs == CMD_A),
+        GROOVE_FX: ID_parse * (fx_command_IDs == CMD_G),
+        HOP_FX: byte_parse * (fx_command_IDs == CMD_H),
+        PAN_FX: enum_parse * (fx_command_IDs == CMD_O),
+        CHORD_FX_1: chord_FX[:,0],
+        CHORD_FX_2: chord_FX[:,1],
+        ENV_FX_VOL: env_FX[:,0],
+        ENV_FX_FADE: env_FX[:,1],
+        RETRIG_FX_FADE: retrig_FX[:,0],
+        RETRIG_FX_RATE: retrig_FX[:,1],
+        VIBRATO_FX_SPEED: vibrato_FX[:,0],
+        VIBRATO_FX_DEPTH: vibrato_FX[:,1],
+        VOLUME_FX: byte_parse * (fx_command_IDs == CMD_M),
+        WAVE_FX: enum_parse * (fx_command_IDs == CMD_W),
+        RANDOM_FX_L: random_FX[:,0],
+        RANDOM_FX_R: random_FX[:,1], 
+        CONTINUOUS_FX: byte_parse * is_continuous,
+    }
+
+    return parsed_fx_values
 
