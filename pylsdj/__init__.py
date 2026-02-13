@@ -24,3 +24,21 @@ from .table import Table, TableFX
 from .vibrato import Vibrato
 from . import exceptions
 from . import utils
+
+# Alex: Add constants
+from .bread_spec import (
+    NOTES,
+    NUM_CHAINS,
+    NUM_GROOVES, 
+    NUM_INSTRUMENTS,
+    NUM_SONG_CHAINS,
+    NUM_SYNTHS,
+    NUM_TABLES,
+    NUM_PHRASES, 
+    NUM_WORDS,
+    PHRASES_PER_CHAIN,
+    STEPS_PER_GROOVE, 
+    STEPS_PER_TABLE, 
+    STEPS_PER_PHRASE, 
+    WORD_LENGTH,    
+)

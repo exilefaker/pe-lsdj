@@ -1,0 +1,35 @@
+[project]
+name = "Parallel.Experiments.LSDJ.2025"
+version = "1.0.0"
+description = "Tools for training generative models on LSDJ data"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  {name = "Alex Kiefer"},
+]
+urls = { repository = "..." }
+
+dependencies = [
+    "equinox>=0.11.2",
+    "jaxtyping>=0.2.23",
+    "rich>=14.2.0",
+    "numpy>=2.4.1",
+]
+
+[project.optional-dependencies]
+testing = [
+    "coverage==7.3.2",
+    "pytest==7.2.0",
+    "pytest-lazy-fixture==0.6.3",
+]
+
+examples = [
+    "jupyter>=1.0",
+    "matplotlib>=3.7.1",
+    "Pillow>=12.1.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "src",
+]
