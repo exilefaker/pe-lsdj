@@ -378,51 +378,6 @@ def repack_tables(tokens_dict: dict[str, Array]) -> dict[str, list]:
 
 # --- FX command recovery (reduced → full enum) ---
 
-# Map from FX_VALUE_KEYS column index to full CMD enum.
-# Paired columns (chord, env, retrig, vibrato, random) map to the same CMD.
-_FX_COL_TO_CMD = {
-    0: CMD_A,   # TABLE_FX
-    1: CMD_G,   # GROOVE_FX
-    2: CMD_H,   # HOP_FX
-    3: CMD_O,   # PAN_FX
-    4: CMD_C,   # CHORD_FX_1
-    5: CMD_C,   # CHORD_FX_2
-    6: CMD_E,   # ENV_FX_VOL
-    7: CMD_E,   # ENV_FX_FADE
-    8: CMD_R,   # RETRIG_FX_FADE
-    9: CMD_R,   # RETRIG_FX_RATE
-    10: CMD_V,  # VIBRATO_FX_SPEED
-    11: CMD_V,  # VIBRATO_FX_DEPTH
-    12: CMD_M,  # VOLUME_FX
-    13: CMD_W,  # WAVE_FX
-    14: CMD_Z,  # RANDOM_FX_L
-    15: CMD_Z,  # RANDOM_FX_R
-    # 16: CONTINUOUS_FX — handled by reduced_fx
-}
-
-
-def _recover_fx_commands(reduced_fx, fx_vals):
-    """Recover full FX command enum (0-18) from reduced enum + sparse FX values.
-
-    reduced_fx: (...) array, 0=non-continuous, 1-7=CONTINUOUS_CMDS index
-    fx_vals: (..., 17) array, sparse FX value columns (FX_VALUE_KEYS order)
-    Returns: (...) array of full CMD_* values (uint8)
-    """
-    result = np.zeros(reduced_fx.shape, dtype=np.uint8)
-
-    # Continuous commands: reduced_fx encodes which one
-    for i, cmd in enumerate(CONTINUOUS_CMDS):
-        result = np.where(reduced_fx == i + 1, cmd, result)
-
-    # Non-continuous commands: infer from which FX value column is non-zero
-    is_non_continuous = (reduced_fx == 0)
-    for col, cmd in _FX_COL_TO_CMD.items():
-        col_active = fx_vals[..., col] != 0
-        result = np.where(is_non_continuous & col_active, cmd, result)
-
-    return result.astype(np.uint8)
-
-
 # --- Song-level reconstruction ---
 
 def repack_song(
@@ -448,17 +403,14 @@ def repack_song(
     # 1. Split song_tokens columns
     notes = tokens[:, :, 0]
     instr_ids = tokens[:, :, 1]
-    reduced_fx = tokens[:, :, 2]
+    fx = tokens[:, :, 2]
     fx_vals = tokens[:, :, 3:20]
     transposes = tokens[:, :, 20]
 
-    # 2. Recover full FX commands
-    full_fx = _recover_fx_commands(reduced_fx, fx_vals)
-
-    # 3. Reverse step_format: (S, C) → (P, 16, C)
+    # 2. Reverse step_format: (S, C) → (P, 16, C)
     notes_by_phrase = notes.reshape(num_phrase_blocks, STEPS_PER_PHRASE, NUM_CHANNELS)
     instr_by_phrase = instr_ids.reshape(num_phrase_blocks, STEPS_PER_PHRASE, NUM_CHANNELS)
-    fx_cmd_by_phrase = full_fx.reshape(num_phrase_blocks, STEPS_PER_PHRASE, NUM_CHANNELS)
+    fx_cmd_by_phrase = fx.reshape(num_phrase_blocks, STEPS_PER_PHRASE, NUM_CHANNELS)
     fx_val_by_phrase = fx_vals.reshape(
         num_phrase_blocks, STEPS_PER_PHRASE, NUM_CHANNELS, FX_VALUES_FEATURE_DIM
     )

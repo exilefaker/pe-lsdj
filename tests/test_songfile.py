@@ -1,41 +1,7 @@
 import numpy as np
 import pytest
-from pe_lsdj.detokenizer import _recover_fx_commands
 from pe_lsdj.songfile import SongFile
 from pe_lsdj.constants import *
-
-
-# --- FX command recovery ---
-
-def test_recover_fx_commands_continuous():
-    """Continuous commands should round-trip through reduced → recovered."""
-    reduced = np.array([0, 1, 2, 3, 4, 5, 6, 7], dtype=np.uint8)
-    fx_vals = np.zeros((8, 17), dtype=np.uint8)
-    recovered = _recover_fx_commands(reduced, fx_vals)
-    expected = np.array([
-        0, CMD_D, CMD_F, CMD_K, CMD_L, CMD_P, CMD_S, CMD_T
-    ], dtype=np.uint8)
-    np.testing.assert_array_equal(recovered, expected)
-
-
-def test_recover_fx_commands_non_continuous():
-    """Non-continuous commands should be inferred from sparse FX values."""
-    reduced = np.zeros(5, dtype=np.uint8)
-    fx_vals = np.zeros((5, 17), dtype=np.uint8)
-    # CMD_A: col 0 (TABLE_FX)
-    fx_vals[0, 0] = 5
-    # CMD_G: col 1 (GROOVE_FX)
-    fx_vals[1, 1] = 3
-    # CMD_C: col 4 (CHORD_FX_1)
-    fx_vals[2, 4] = 7
-    # CMD_E: col 6 (ENV_FX_VOL)
-    fx_vals[3, 6] = 10
-    # CMD_H: col 2 (HOP_FX)
-    fx_vals[4, 2] = 1
-
-    recovered = _recover_fx_commands(reduced, fx_vals)
-    expected = np.array([CMD_A, CMD_G, CMD_C, CMD_E, CMD_H], dtype=np.uint8)
-    np.testing.assert_array_equal(recovered, expected)
 
 
 # --- Song round-trip ---

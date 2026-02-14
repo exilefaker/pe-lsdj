@@ -5,7 +5,6 @@ from typing import NamedTuple
 from pylsdj.blockutils import BlockWriter, BlockFactory
 from jaxtyping import Array
 from pe_lsdj.tokenizer import (
-    _reduced_fx_cmd,
     parse_grooves,
     parse_instruments,
     parse_notes,
@@ -185,8 +184,8 @@ class SongFile(eqx.Module):
         phrase_instrument_ids = _with_sentinel(phrase_instrument_ids)
 
         phrase_fx_raw = parse_fx_commands(raw_data[PHRASE_FX_ADDR])
-        phrase_reduced_fx = _with_sentinel(
-            _reduced_fx_cmd(phrase_fx_raw).reshape(NUM_PHRASES, STEPS_PER_PHRASE)
+        phrase_fx_cmds = _with_sentinel(
+            phrase_fx_raw.reshape(NUM_PHRASES, STEPS_PER_PHRASE)
         )
 
         fx_vals_dict = parse_fx_values(raw_data[PHRASE_FX_VAL_ADDR], phrase_fx_raw)
@@ -199,7 +198,7 @@ class SongFile(eqx.Module):
 
         song_notes = step_format(phrase_notes[song_phrases])
         song_instr_ids = step_format(phrase_instrument_ids[song_phrases])
-        song_reduced_fx = step_format(phrase_reduced_fx[song_phrases])
+        song_fx_cmds = step_format(phrase_fx_cmds[song_phrases])
         song_fx_vals = step_format_nd(phrase_fx_vals[song_phrases])
 
         song_transposes = jnp.repeat(
@@ -207,13 +206,13 @@ class SongFile(eqx.Module):
         )
 
         # song_tokens: (steps, NUM_CHANNELS, f_dim)
-        # f_dim = note(1) + instr_id(1) + reduced_fx_cmd(1) 
+        # f_dim = note(1) + instr_id(1) + fx_cmd(1)
         # + sparse_fx_vals(17) + transpose(1)
         self.song_tokens = jnp.concatenate(
             [
                 song_notes[:, :, None],
                 song_instr_ids[:, :, None],
-                song_reduced_fx[:, :, None],
+                song_fx_cmds[:, :, None],
                 song_fx_vals,
                 song_transposes[:, :, None],
             ],

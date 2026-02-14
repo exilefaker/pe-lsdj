@@ -28,6 +28,8 @@ from pylsdj import (
     WORD_LENGTH,   
 )
 
+NUM_NOTES = len(NOTES)
+
 NUM_SONG_PHRASES = NUM_SONG_CHAINS * PHRASES_PER_CHAIN
 NUM_SONG_STEPS = NUM_SONG_PHRASES * STEPS_PER_PHRASE
 
@@ -266,10 +268,6 @@ FX_VALUES_FEATURE_DIM = 17  # len(FX_VALUE_KEYS)
 
 EMPTY = 255
 
-# Reduced FX command enum: only disambiguates continuous commands
-# (D/F/K/L/P/S/T share one FX value column). 0 = non-continuous.
-CONTINUOUS_CMDS = (CMD_D, CMD_F, CMD_K, CMD_L, CMD_P, CMD_S, CMD_T)
-REDUCED_FX_DIM = len(CONTINUOUS_CMDS) + 1  # 8
 NUM_CHANNELS = 4
 
 # Canonical column order for stacked FX value arrays.

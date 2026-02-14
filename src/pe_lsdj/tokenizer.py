@@ -11,26 +11,24 @@ from pe_lsdj.constants import *
 def parse_notes(data_bytes: Array) -> Array:
     raw_data = data_bytes.reshape(
         (NUM_PHRASES, STEPS_PER_PHRASE)
-    ).astype(jnp.uint8) + 1 # Reserve 0 for NULL across entire system
+    ).astype(jnp.uint8) + 1
+    # 0 is NULL
 
-    return raw_data * ~(raw_data > 158) # Set invalid notes to NULL
+    return raw_data * ~(raw_data > NUM_NOTES) # Set invalid notes to NULL
+
+
+# TODO: Decide how best to integrate
+def parse_notes_normed(data_bytes: Array) -> Array:
+    is_note = (data_bytes > 0) & ~(data_bytes > NUM_NOTES)
+
+    return jnp.column_stack(
+        [is_note, (data_bytes * is_note) / NUM_NOTES]
+    ).reshape((NUM_PHRASES, STEPS_PER_PHRASE)).astype(jnp.float32)
 
 
 def parse_fx_commands(data_bytes: Array) -> Array:
     # Set invalid FX commands to NULL
     return (data_bytes * ~(data_bytes > 18)).astype(jnp.uint8)
-
-
-def _reduced_fx_cmd(fx_commands):
-    """Map full FX command enum → reduced enum (0=non-continuous, 1-7=continuous).
-
-    fx_commands: array of CMD_* values (uint8)
-    Returns: same shape, uint8, values in [0, REDUCED_FX_DIM)
-    """
-    result = jnp.zeros_like(fx_commands)
-    for i, cmd in enumerate(CONTINUOUS_CMDS):
-        result = jnp.where(fx_commands == cmd, i + 1, result)
-    return result.astype(jnp.uint8)
 
 
 def parse_envelopes(data_bytes: Array) -> Array:
