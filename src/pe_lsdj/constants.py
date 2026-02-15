@@ -259,6 +259,9 @@ SOFTSYNTH_END_FILTER_CUTOFF = "Softsynth end filter cutoff"
 SOFTSYNTH_END_PHASE_AMOUNT = "Softsynth end phase amount"
 SOFTSYNTH_END_VERTICAL_SHIFT = "Softsynth end vertical shift"
 
+# Model wave frames along with instruments
+WAVEFRAME_ID = "Wave frame ID"
+
 # Utilities / misc
 INSTRUMENT_SIZE = 0x10
 SYNTH_SIZE = 0x10

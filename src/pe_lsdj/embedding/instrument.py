@@ -1,36 +1,34 @@
 from pe_lsdj.constants import *
-from pe_lsdj.embedding import (
+from pe_lsdj.embedding.base import (
     BaseEmbedder,
     ConcatEmbedder,
-    SumEmbedder,
-    EnumEmbedder, 
-    EntityEmbedder, 
+    EnumEmbedder,
+    EntityEmbedder,
     GatedNormedEmbedder,
-    TableEmbedder,
 )
+from pe_lsdj.embedding.fx import TableEntityEmbedder
 from jaxtyping import Array, Key
 import jax.random as jr
 import equinox as eqx
 
 
-
 class SoftsynthEmbedder(ConcatEmbedder):
     def __init__(
-        self, 
-        key, 
+        self,
+        key,
         enum_out_dim=32,
-        sound_param_out_dim=16, 
+        sound_param_out_dim=16,
         continuous_out_dim=16,
         out_dim=64,
     ):
-        keys = jr.split(key, 9)
+        keys = jr.split(key, 10)
 
-        param_embedders = [
-            GatedNormedEmbedder(sound_param_out_dim, keys[0]), # volume
-            GatedNormedEmbedder(sound_param_out_dim, keys[1]), # cutoff
-            GatedNormedEmbedder(sound_param_out_dim, keys[2]), # phase
-            GatedNormedEmbedder(sound_param_out_dim, keys[3]), # v.shift
-        ]
+        param_embedders = {
+            "volume": GatedNormedEmbedder(sound_param_out_dim, keys[0]),
+            "cutoff": GatedNormedEmbedder(sound_param_out_dim, keys[1]),
+            "phase": GatedNormedEmbedder(sound_param_out_dim, keys[2]),
+            "vshift": GatedNormedEmbedder(sound_param_out_dim, keys[3]),
+        }
 
         sound_param_embedder = ConcatEmbedder(
             keys[4],
@@ -39,26 +37,10 @@ class SoftsynthEmbedder(ConcatEmbedder):
         )
 
         embedders = {
-            "waveform": EnumEmbedder(
-                4,
-                enum_out_dim,
-                keys[5]
-            ),
-            "filter_type": EnumEmbedder(
-                5,
-                enum_out_dim,
-                keys[6]
-            ),
-            "distortion": EnumEmbedder(
-                3,
-                enum_out_dim,
-                keys[7]
-            ),
-            "phase_type": EnumEmbedder(
-                4,
-                enum_out_dim,
-                keys[8]
-            ),
+            "waveform": EnumEmbedder(4, enum_out_dim, keys[5]),
+            "filter_type": EnumEmbedder(5, enum_out_dim, keys[6]),
+            "distortion": EnumEmbedder(3, enum_out_dim, keys[7]),
+            "phase_type": EnumEmbedder(4, enum_out_dim, keys[8]),
             "start_params": sound_param_embedder,
             "end_params": sound_param_embedder,
         }
@@ -67,85 +49,150 @@ class SoftsynthEmbedder(ConcatEmbedder):
 
 
 class SoftsynthEntityEmbedder(EntityEmbedder):
-    def __init__(self, key, softsynths: Array):
+    def __init__(
+            self, 
+            key, 
+            softsynths: Array, 
+            out_dim: int=64,
+            enum_out_dim=32,
+            sound_param_out_dim=16,
+            continuous_out_dim=16,
+        ):
         self.entity_bank = softsynths
-        self.embedder = SoftsynthEmbedder(key)
+        self.embedder = SoftsynthEmbedder(
+            key, 
+            out_dim, 
+            enum_out_dim, 
+            sound_param_out_dim, 
+            continuous_out_dim
+        )
 
 
 class WaveframeEmbedder(BaseEmbedder):
-    # This could just be a continuous embedder...?
-    # Waveframes will be part of the instrument definition,
-    # but differ from other entity collections in that they're 
-    # always defined, no alloc table
     linear: eqx.nn.Linear
 
     def __init__(self, key: Key, out_dim: int):
+        self.out_dim = out_dim
         self.linear = eqx.nn.Linear(
             in_features=WAVES_PER_SYNTH * FRAMES_PER_WAVE,
             out_features=out_dim,
             use_bias=False,
             key=key,
-
         )
 
     def __call__(self, x):
         return self.linear(x)
-    
+
 
 class WaveFrameEntityEmbedder(EntityEmbedder):
-    # TODO
-    pass
+    def __init__(self, key, waveframes: Array, out_dim: int):
+        self.entity_bank = waveframes
+        self.embedder = WaveframeEmbedder(key, out_dim)
 
 
 class InstrumentEmbedder(ConcatEmbedder):
+    """
+    Embeds all 35 instrument fields via ConcatEmbedder.
+
+    Type-specific fields (e.g. KIT-only) are zeroed for inapplicable types,
+    handled naturally by GatedNormedEmbedder's gate and EnumEmbedder's
+    null position (index 0).
+
+    Entity references (TABLE, SOFTSYNTH_ID) are passed in from outside
+    since they depend on entity banks constructed at the song level.
+    """
     def __init__(
-        self, 
-        key,
-        table_embedder: TableEmbedder,
-        enum_out_dim=32,
-        continuous_out_dim=16,
-        out_dim=128,
+        self,
+        key: Key,
+        table_entity_embedder: TableEntityEmbedder,
+        softsynth_entity_embedder: SoftsynthEntityEmbedder,
+        waveframe_entity_embedder: WaveFrameEntityEmbedder,
+        enum_out_dim: int = 16,
+        gated_out_dim: int = 16,
+        out_dim: int = 128,
     ):
-        keys = jr.split(key, 9) #?
+        # 31 fresh embedders + 1 projection key = 32
+        keys = jr.split(key, 32)
+        ki = iter(range(32))
 
-        sparse_feat_embedder = (
-            embedders = 
+        def _enum(vocab_size):
+            return EnumEmbedder(vocab_size, enum_out_dim, keys[next(ki)])
 
-        )
+        def _gated(max_value=255):
+            return GatedNormedEmbedder(gated_out_dim, keys[next(ki)],
+                                       1, 0, max_value)
 
         embedders = {
-            TYPE_ID: EnumEmbedder(
-                5,
-                enum_out_dim,
-                keys[0]
-            ),
-            TABLE: table_embedder,
-            TABLE_ON_OFF: EnumEmbedder(
-                2,
-                enum_out_dim,
-                keys[1]
-            ),
-            TABLE_AUTOMATE: EnumEmbedder(
-                2,
-                enum_out_dim,
-                keys[2]
-            ),
-            AUTOMATE_2: EnumEmbedder(
-                2,
-                enum_out_dim,
-                keys[2]
-            ),
-            PAN: EnumEmbedder(
-                5,
-                enum_out_dim,
-                keys[3]
-            )
+            # --- Universal (all instrument types) ---
+            TYPE_ID:         _enum(5),   # PU=1, WAV=2, KIT=3, NOI=4
+            TABLE:           table_entity_embedder,
+            TABLE_ON_OFF:    _enum(2),   # 0=off, 1=on (universal, no null)
+            TABLE_AUTOMATE:  _enum(2),   # universal boolean
+            AUTOMATE_2:      _enum(2),   # universal boolean
+            PAN:             _enum(5),   # 0=null, 1=off, 2=L, 3=R, 4=LR
+
+            # --- All but Noise ---
+            VIBRATO_TYPE:      _enum(5), # 0=null, 1-4: HF/saw/sine/square
+            VIBRATO_DIRECTION: _enum(3), # 0=null, 1=down, 2=up
+
+            # --- Pulse / Noise ---
+            ENV_VOLUME:      _gated(0x0F),
+            ENV_FADE:        _gated(0x0F),
+            LENGTH:          _gated(0x3F),
+            LENGTH_LIMITED:  _enum(3),
+            SWEEP:           _gated(),
+
+            # --- WAV / KIT ---
+            VOLUME:          _enum(5),   # 0=null, 1-4: volume levels
+
+            # --- Pulse only ---
+            PHASE_TRANSPOSE: _gated(),
+            WAVE:            _enum(5),   # 0=null, 1-4: 12.5/25/50/75%
+            PHASE_FINETUNE:  _gated(0x0F),
+
+            # --- WAV only ---
+            SOFTSYNTH_ID:    softsynth_entity_embedder,
+            WAVEFRAME_ID:    waveframe_entity_embedder,
+            REPEAT:          _gated(0x0F),
+            PLAY_TYPE:       _enum(5),   # 0=null, 1-4: once/loop/pp/manual
+            WAVE_LENGTH:     _gated(0x0F),
+            SPEED:           _gated(0x0F),
+
+            # --- KIT only ---
+            KEEP_ATTACK_1:   _enum(3),
+            KEEP_ATTACK_2:   _enum(3),
+            KIT_1_ID:        _gated(0x3F),
+            KIT_2_ID:        _gated(0x3F),
+            LENGTH_KIT_1:    _gated(),
+            LENGTH_KIT_2:    _gated(),
+            LOOP_KIT_1:      _enum(3),
+            LOOP_KIT_2:      _enum(3),
+            OFFSET_KIT_1:    _gated(),
+            OFFSET_KIT_2:    _gated(),
+            HALF_SPEED:      _enum(3),
+            PITCH:           _gated(),
+            DISTORTION_TYPE: _enum(5),   # 0=null, 1-4: clip/shape/shape2/wrap
         }
 
-        super().__init__(keys[9], embedders, out_dim)    
+        proj_key = keys[next(ki)]
+        super().__init__(proj_key, embedders, out_dim)
 
 
 class InstrumentEntityEmbedder(EntityEmbedder):
-    # TODO
-    pass
-
+    def __init__(
+        self,
+        key: Key,
+        instruments: Array,
+        table_entity_embedder: TableEntityEmbedder,
+        softsynth_entity_embedder: SoftsynthEntityEmbedder,
+        waveframe_entity_embedder: WaveFrameEntityEmbedder,
+        out_dim: int = 128,
+    ):
+        self.entity_bank = instruments
+        self.embedder = InstrumentEmbedder(
+            key,
+            table_entity_embedder,
+            softsynth_entity_embedder,
+            waveframe_entity_embedder,
+            out_dim=out_dim,
+        )

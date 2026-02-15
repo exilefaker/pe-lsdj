@@ -188,8 +188,8 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
 
     # Byte 5
     byte5 = raw_instruments[:,5]
-    table_automates = _get_bit(byte5, 4) + 1
-    automate_2s = _get_bit(byte5, 3) + 1
+    table_automates = _get_bit(byte5, 4)  # universal boolean, no +1
+    automate_2s = _get_bit(byte5, 3)      # universal boolean, no +1
 
     vibrato_types = (
         (((byte5 >> 1) & 0x03) + 1)
@@ -214,7 +214,7 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     # Byte 6
     byte6 = raw_instruments[:,6]
     tables = (byte6 & 0x1F) + 1
-    table_toggles = _get_bit(byte6, 5) + 1
+    table_toggles = _get_bit(byte6, 5)  # universal boolean, no +1
 
     # Byte 7
     byte7 = raw_instruments[:,7]

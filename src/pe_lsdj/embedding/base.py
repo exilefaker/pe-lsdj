@@ -9,8 +9,7 @@ from pe_lsdj.constants import *
 
 
 class BaseEmbedder(eqx.Module):
-    in_dim: int
-    out_dim: int # TODO: Needed in practice?
+    out_dim: int
 
 
 def _soft_hot(x, size: int, soft: bool):
@@ -25,7 +24,7 @@ class EnumEmbedder(BaseEmbedder):
     projection: eqx.nn.Linear
 
     def __init__(self, vocab_size, out_dim, key):
-        self.in_dim = vocab_size
+        self.vocab_size = vocab_size
         self.out_dim = out_dim
 
         self.projection = eqx.nn.Linear(
@@ -36,7 +35,7 @@ class EnumEmbedder(BaseEmbedder):
         )
 
     def __call__(self, x, soft: bool=False):
-        soft_hot = _soft_hot(x, self.in_dim, soft)
+        soft_hot = _soft_hot(x, self.vocab_size, soft)
         return self.projection(soft_hot)
 
 
@@ -54,6 +53,7 @@ class GatedNormedEmbedder(BaseEmbedder):
         null_value=0, 
         max_value=255,
     ):
+        self.out_dim = out_dim
         self.null_value = null_value
         self.max_value = max_value
 
@@ -106,20 +106,20 @@ class EntityEmbedder(BaseEmbedder):
         )
 
 
-class SumEmbedder(eqx.Module):
+class SumEmbedder(BaseEmbedder):
     """
     Aggregates embeddings by summing
     """
     embedders: dict[str, eqx.Module]
 
-    def __call__(self, xs: dict):
+    def __call__(self, **kwargs):
         embeddings = [
-            e(xs[k]) for k, e in self.embedders.items()
+            e(kwargs[k]) for k, e in self.embedders.items()
         ]
         return jax.tree.reduce(jnp.add, embeddings)
 
 
-class ConcatEmbedder(eqx.Module):
+class ConcatEmbedder(BaseEmbedder):
     """
     Aggregates embeddings by concatenating
     """
@@ -128,16 +128,21 @@ class ConcatEmbedder(eqx.Module):
 
     def __init__(self, key, embedders: dict[str, BaseEmbedder], out_dim: int):
 
-        total_in_dim = sum([e.in_dim for e in embedders])
+        total_in_dim = sum([e.out_dim for e in embedders])
         self.projection = eqx.nn.Linear(
             in_features=total_in_dim,
             out_features=out_dim,
             use_bias=False,
             key=key,
         )
+        self.embedders = embedders
+        self.out_dim = out_dim
 
-    def __call__(self, xs: dict):
+    def __call__(self, **kwargs):
         embeddings = jnp.concatenate(
-            [e(xs[k]) for k, e in self.embedders.items()]
+            [e(kwargs[k]) for k, e in self.embedders.items()]
         )
         return self.projection(embeddings)
+
+
+

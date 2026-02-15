@@ -84,8 +84,8 @@ def repack_instruments(tokens_dict: dict[str, Array]) -> Array:
     ).astype(jnp.uint8)
 
     # Byte 5
-    table_automate_bit = ((tokens_dict[TABLE_AUTOMATE] - 1) & 0x01) << 4
-    automate_2_bit = ((tokens_dict[AUTOMATE_2] - 1) & 0x01) << 3
+    table_automate_bit = (tokens_dict[TABLE_AUTOMATE] & 0x01) << 4
+    automate_2_bit = (tokens_dict[AUTOMATE_2] & 0x01) << 3
     vibrato_type_bits = ((tokens_dict[VIBRATO_TYPE] - 1) & 0x03) << 1
     vibrato_direction_bits = (tokens_dict[VIBRATO_DIRECTION] - 1) & 0x01
     loop_kit_bit1 = ((tokens_dict[LOOP_KIT_1] - 1) & 0x01) << 6
@@ -107,7 +107,7 @@ def repack_instruments(tokens_dict: dict[str, Array]) -> Array:
 
     # Byte 6
     table_bits = (tokens_dict[TABLE] - 1) & 0x1F
-    table_on_off_bits = ((tokens_dict[TABLE_ON_OFF] - 1) << 5)
+    table_on_off_bits = (tokens_dict[TABLE_ON_OFF] << 5)
     table_byte = (table_bits | table_on_off_bits) & 0xFF
 
     repacked_bytes = repacked_bytes.at[:,6].set(table_byte)
