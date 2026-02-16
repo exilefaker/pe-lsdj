@@ -14,13 +14,15 @@ import equinox as eqx
 
 class GrooveEntityEmbedder(EntityEmbedder):
     def __init__(self, out_dim, key, grooves):
-        self.entity_bank = grooves
-        self.embedder = GatedNormedEmbedder(
-            out_dim,
-            key,
-            STEPS_PER_GROOVE * 2,
-            0, 
-            255,
+        super().__init__(
+            grooves,
+            GatedNormedEmbedder(
+                out_dim,
+                key,
+                STEPS_PER_GROOVE * 2,
+                0,
+                255,
+            ),
         )
 
 
@@ -35,8 +37,6 @@ class TableFXValueEmbedder(SumEmbedder):
         key: Key,
         groove_embedder: GrooveEntityEmbedder,
     ):
-        self.out_dim = out_dim
-
         PARAMS = {
             "hop": (1, 0, 255),
             "chord": (2, 0, 0x0F), # (semitone 1, semitone 2)
@@ -74,8 +74,8 @@ class TableFXValueEmbedder(SumEmbedder):
                 params[1],
                 params[2],
             )
-        
-        self.embedders = embedders
+
+        super().__init__(embedders)
 
 
 class FXEmbedder(ConcatEmbedder):
@@ -181,11 +181,9 @@ class TableEntityEmbedder(EntityEmbedder):
         tables: Array,
         table_fx_embedder: FXEmbedder
     ):
-        self.entity_bank = tables
-        self.embedder = TableEmbedder(
-            out_dim,
-            key,
-            table_fx_embedder,
+        super().__init__(
+            tables,
+            TableEmbedder(out_dim, key, table_fx_embedder),
         )
 
 
@@ -196,11 +194,11 @@ class PhraseFXValueEmbedder(SumEmbedder):
         table_fx_value_embedder: TableFXValueEmbedder,
         table_entity_embedder: TableEntityEmbedder,
     ):
-        self.out_dim = table_fx_value_embedder.out_dim
-        self.embedders = {
+        embedders = {
             **table_fx_value_embedder.embedders,
             "table_embedder": table_entity_embedder,
         }
+        super().__init__(embedders)
 
 
 class PhraseFXEmbedder(FXEmbedder):

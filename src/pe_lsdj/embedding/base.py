@@ -9,6 +9,7 @@ from pe_lsdj.constants import *
 
 
 class BaseEmbedder(eqx.Module):
+    in_dim: int
     out_dim: int
 
 
@@ -24,7 +25,7 @@ class EnumEmbedder(BaseEmbedder):
     projection: eqx.nn.Linear
 
     def __init__(self, vocab_size, out_dim, key):
-        self.vocab_size = vocab_size
+        self.vocab_size = self.in_dim = vocab_size
         self.out_dim = out_dim
 
         self.projection = eqx.nn.Linear(
@@ -46,13 +47,14 @@ class GatedNormedEmbedder(BaseEmbedder):
     null_value: int = 0
 
     def __init__(
-        self, 
+        self,
         out_dim,
         key,
         in_dim=1,
-        null_value=0, 
+        null_value=0,
         max_value=255,
     ):
+        self.in_dim = in_dim
         self.out_dim = out_dim
         self.null_value = null_value
         self.max_value = max_value
@@ -95,6 +97,14 @@ class EntityEmbedder(BaseEmbedder):
     entity_bank: Array
     embedder: eqx.Module
 
+    def __init__(self, entity_bank, embedder):
+        self.entity_bank = entity_bank
+        self.embedder = embedder
+
+        num_entities = entity_bank.shape[0]
+        self.in_dim = num_entities
+        self.out_dim = embedder.out_dim
+
     def __call__(self, x, soft: bool=False):
         """
         x: one-hot or categorical distribution
@@ -112,6 +122,15 @@ class SumEmbedder(BaseEmbedder):
     """
     embedders: dict[str, eqx.Module]
 
+    def __init__(self, embedders: dict[str, BaseEmbedder]):
+        self.embedders = embedders
+        out_dims = [e.out_dim for e in embedders.values()]
+        assert all(d == out_dims[0] for d in out_dims), (
+            f"SumEmbedder: all sub-embedder out_dims must match, got {out_dims}"
+        )
+        self.in_dim = out_dims[0]
+        self.out_dim = out_dims[0]
+
     def __call__(self, **kwargs):
         embeddings = [
             e(kwargs[k]) for k, e in self.embedders.items()
@@ -127,16 +146,15 @@ class ConcatEmbedder(BaseEmbedder):
     projection: eqx.nn.Linear
 
     def __init__(self, key, embedders: dict[str, BaseEmbedder], out_dim: int):
-
-        total_in_dim = sum([e.out_dim for e in embedders])
+        self.embedders = embedders
+        self.in_dim = sum(e.out_dim for e in embedders.values())
+        self.out_dim = out_dim
         self.projection = eqx.nn.Linear(
-            in_features=total_in_dim,
+            in_features=self.in_dim,
             out_features=out_dim,
             use_bias=False,
             key=key,
         )
-        self.embedders = embedders
-        self.out_dim = out_dim
 
     def __call__(self, **kwargs):
         embeddings = jnp.concatenate(

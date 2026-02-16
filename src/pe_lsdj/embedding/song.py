@@ -1,120 +1,75 @@
+import jax
+import jax.numpy as jnp
+import jax.random as jr
+import equinox as eqx
+
 from pe_lsdj.constants import *
-from pe_lsdj.embedding import (
-    ConcatEmbedder, 
-    GatedNormedEmbedder, 
+from pe_lsdj.embedding.base import BaseEmbedder, GatedNormedEmbedder
+from pe_lsdj.embedding.fx import (
     GrooveEntityEmbedder,
-    InstrumentEntityEmbedder, 
-    FXEmbedder,
     PhraseFXEmbedder,
-    SoftsynthEntityEmbedder,
-    WaveFrameEntityEmbedder,
-    # TableFXEmbedder,
     TableFXValueEmbedder,
-    TableEmbedder,
+    FXEmbedder,
     TableEntityEmbedder,
 )
+from pe_lsdj.embedding.instrument import (
+    InstrumentEntityEmbedder,
+    SoftsynthEntityEmbedder,
+    WaveFrameEntityEmbedder,
+)
 from jaxtyping import Array, Key
-import jax.random as jr
 
 
-"""
-Sketch on overall dimensions:
-
-Song step - [Note, Instrument, FX, Transpose]
-
-Instrument - [ misc., Table, Softsynth, Waveframes ]
-    Target: 128
-
-    misc: 64
-    table: 64
-    softsynth: 64
-    waveframes: 32
-
-    224 -> linear -> 128
-
-FX - [ misc., Table, Groove ]
-    Target: 128
-
-    misc: 128
-    table: 64
-    groove: 32
-
-    224 -> linear -> 128
-
-    
-Target for d_model (song step): 512
-
-Note: 128
-Instrument: 128
-FX: 128
-Transpose: 16
-
-sum: 400 PER CHANNEL * NUM_CHANNELS = 1600
-(concat -> proj)? ConcatEmbedder -> 512
-
-"""
-
-
-class ChannelStepEmbedder(ConcatEmbedder):
-    def __init__(
-        self, 
-        key: Key, 
-        out_dim: int,
-        note_embedder: GatedNormedEmbedder,
-        instrument_embedder: InstrumentEntityEmbedder,
-        fx_embedder: FXEmbedder,
-        transpose_embedder: GatedNormedEmbedder,
-    ):
-        
-        super().__init__(
-            key, 
-            {
-                "note_embedder": note_embedder,
-                "instrument_embedder": instrument_embedder,
-                "fx_embedder": fx_embedder,
-                "transpose_embedder": transpose_embedder
-            },
-            out_dim
-        )
-
-
-class SongStepEmbedder(ConcatEmbedder):
+class SongStepEmbedder(eqx.Module):
     """
     Embedder for one step of an LSDJ track:
     [Pulse 1 | Pulse 2 | Wav | Noise]
-        |       
-        |__> | Note | Instrument | FX | Traspose | (per channel)
+        |
+        |__> | Note | Instrument | FX | Transpose | (per channel)
                           |        |
                          ...      ...
 
-    Channels share feature encoders, but each have their own
-    learned linear projection into the final step embedding.
+    Channels share sub-embedders (note, instrument, FX, transpose).
+    Each channel gets its own learned linear projection via a stacked
+    weight array and vmap'd matmul.
+
+    Output: (4 * per_ch_dim,) = (out_dim,)
     """
+    note_embedder: GatedNormedEmbedder
+    instrument_embedder: InstrumentEntityEmbedder
+    fx_embedder: PhraseFXEmbedder
+    transpose_embedder: GatedNormedEmbedder
+
+    # (4, per_ch_dim, concat_dim) — one projection per channel
+    channel_projections: Array
+
+    out_dim: int
+
     def __init__(
-        self, 
-        key: Key, 
+        self,
+        key: Key,
         instruments: Array,
         softsynths: Array,
         waveframes: Array,
         grooves: Array,
         tables: Array,
         out_dim: int = 512,
-        PU1_dim: int = 400,
-        PU2_dim: int = 400,
-        WAV_dim: int = 400,
-        NOI_dim: int = 400,
         note_dim: int = 128,
         instr_dim: int = 128,
         fx_dim: int = 128,
         table_dim: int = 64,
         transpose_dim: int = 16,
-        groove_dim: int = 32,
+        groove_dim: int = 64,
         softsynth_dim: int = 64,
         waveframe_dim: int = 32,
     ):
-        keys = jr.split(key, 15)
+        assert out_dim % 4 == 0, f"out_dim must be divisible by 4, got {out_dim}"
+        per_ch_dim = out_dim // 4
 
-        note_embedder = GatedNormedEmbedder(
+        keys = jr.split(key, 11)
+
+        # --- Shared sub-embedders ---
+        self.note_embedder = GatedNormedEmbedder(
             note_dim,
             keys[0],
             max_value=NUM_NOTES,
@@ -127,7 +82,7 @@ class SongStepEmbedder(ConcatEmbedder):
         )
 
         table_fx_value_embedder = TableFXValueEmbedder(
-            64, # What should this be? Make top-level param
+            64,
             keys[2],
             groove_embedder,
         )
@@ -157,68 +112,65 @@ class SongStepEmbedder(ConcatEmbedder):
             waveframe_dim,
         )
 
-        instr_embedder = InstrumentEntityEmbedder(
-            keys[7], 
-            instruments, 
-            table_embedder, 
-            softsynth_embedder, 
+        self.instrument_embedder = InstrumentEntityEmbedder(
+            keys[7],
+            instruments,
+            table_embedder,
+            softsynth_embedder,
             waveframe_embedder,
             instr_dim,
         )
 
-        phrase_fx_embedder = PhraseFXEmbedder(
+        self.fx_embedder = PhraseFXEmbedder(
             keys[8],
             table_fx_value_embedder,
             table_embedder,
             fx_dim,
         )
 
-        transpose_embedder = GatedNormedEmbedder(
+        self.transpose_embedder = GatedNormedEmbedder(
             transpose_dim,
             keys[9],
         )
 
-        PU1_embedder = ChannelStepEmbedder(
-            keys[10],
-            PU1_dim,
-            note_embedder,
-            instr_embedder,
-            phrase_fx_embedder,
-            transpose_embedder,
-        )
+        # --- Per-channel projections (stacked for vmap) ---
+        concat_dim = note_dim + instr_dim + fx_dim + transpose_dim
 
-        PU2_embedder = ChannelStepEmbedder(
-            keys[11],
-            PU2_dim,
-            note_embedder,
-            instr_embedder,
-            phrase_fx_embedder,
-            transpose_embedder,
-        )
+        proj_keys = jr.split(keys[10], 4)
+        self.channel_projections = jnp.stack([
+            jr.normal(k, (per_ch_dim, concat_dim)) / jnp.sqrt(concat_dim)
+            for k in proj_keys
+        ])  # (4, per_ch_dim, concat_dim)
 
-        WAV_embedder = ChannelStepEmbedder(
-            keys[12],
-            WAV_dim,
-            note_embedder,
-            instr_embedder,
-            phrase_fx_embedder,
-            transpose_embedder,
-        )
+        self.out_dim = out_dim
 
-        NOI_embedder = ChannelStepEmbedder(
-            keys[13],
-            NOI_dim,
-            note_embedder,
-            instr_embedder,
-            phrase_fx_embedder,
-            transpose_embedder,
-        )
+    def _embed_one_channel(self, note, instr_id, fx_cmd, fx_vals, transpose):
+        """Shared sub-embedders → concatenated feature vector."""
+        return jnp.concatenate([
+            self.note_embedder(note),
+            self.instrument_embedder(instr_id),
+            self.fx_embedder(fx_cmd=fx_cmd, fx_value=fx_vals),
+            self.transpose_embedder(transpose),
+        ])  # (concat_dim,)
 
-        embedders = {
-            "PU1_embedder": PU1_embedder,
-            "PU2_embedder": PU2_embedder,
-            "WAV_embedder": WAV_embedder,
-            "NOI_embedder": NOI_embedder,
-        }
+    def __call__(self, step):
+        """
+        step: (4, 21) — one timestep across all channels
+        Returns: (out_dim,) where out_dim = 4 * per_ch_dim
+        """
+        # Embed each channel with shared weights → (4, concat_dim)
+        channel_embs = jnp.stack([
+            self._embed_one_channel(
+                step[ch, 0],       # note
+                step[ch, 1],       # instr_id
+                step[ch, 2],       # fx_cmd
+                step[ch, 3:20],    # fx_vals (17 values)
+                step[ch, 20],      # transpose
+            )
+            for ch in range(4)
+        ])
 
-        super().__init__(keys[14], embedders, out_dim)
+        # Per-channel projection via vmap: (4, per_ch_dim)
+        projected = jax.vmap(jnp.dot)(self.channel_projections, channel_embs)
+
+        return projected.reshape(-1)  # (4 * per_ch_dim,) = (out_dim,)

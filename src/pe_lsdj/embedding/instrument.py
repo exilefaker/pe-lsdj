@@ -50,21 +50,23 @@ class SoftsynthEmbedder(ConcatEmbedder):
 
 class SoftsynthEntityEmbedder(EntityEmbedder):
     def __init__(
-            self, 
-            key, 
-            softsynths: Array, 
-            out_dim: int=64,
-            enum_out_dim=32,
-            sound_param_out_dim=16,
-            continuous_out_dim=16,
-        ):
-        self.entity_bank = softsynths
-        self.embedder = SoftsynthEmbedder(
-            key, 
-            out_dim, 
-            enum_out_dim, 
-            sound_param_out_dim, 
-            continuous_out_dim
+        self, 
+        key, 
+        softsynths: Array, 
+        out_dim: int=64,
+        enum_out_dim=32,
+        sound_param_out_dim=16,
+        continuous_out_dim=16,
+    ):
+        super().__init__(
+            softsynths,
+            SoftsynthEmbedder(
+                key, 
+                out_dim, 
+                enum_out_dim, 
+                sound_param_out_dim, 
+                continuous_out_dim
+            )
         )
 
 
@@ -72,6 +74,7 @@ class WaveframeEmbedder(BaseEmbedder):
     linear: eqx.nn.Linear
 
     def __init__(self, key: Key, out_dim: int):
+        self.in_dim = WAVES_PER_SYNTH * FRAMES_PER_WAVE
         self.out_dim = out_dim
         self.linear = eqx.nn.Linear(
             in_features=WAVES_PER_SYNTH * FRAMES_PER_WAVE,
@@ -86,8 +89,7 @@ class WaveframeEmbedder(BaseEmbedder):
 
 class WaveFrameEntityEmbedder(EntityEmbedder):
     def __init__(self, key, waveframes: Array, out_dim: int):
-        self.entity_bank = waveframes
-        self.embedder = WaveframeEmbedder(key, out_dim)
+        super().__init__(waveframes, WaveframeEmbedder(key, out_dim))
 
 
 class InstrumentEmbedder(ConcatEmbedder):
@@ -188,11 +190,13 @@ class InstrumentEntityEmbedder(EntityEmbedder):
         waveframe_entity_embedder: WaveFrameEntityEmbedder,
         out_dim: int = 128,
     ):
-        self.entity_bank = instruments
-        self.embedder = InstrumentEmbedder(
-            key,
-            table_entity_embedder,
-            softsynth_entity_embedder,
-            waveframe_entity_embedder,
-            out_dim=out_dim,
+        super().__init__(
+            entity_bank = instruments,
+            embedder = InstrumentEmbedder(
+                key,
+                table_entity_embedder,
+                softsynth_entity_embedder,
+                waveframe_entity_embedder,
+                out_dim=out_dim,
+            )
         )
