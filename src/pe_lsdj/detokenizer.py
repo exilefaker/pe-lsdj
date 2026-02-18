@@ -246,7 +246,7 @@ def repack_softsynths(tokens_dict: dict[str, Array]) -> Array:
 
 
 def repack_waveframes(waveframe_tokens: Array) -> list[int]:
-    flat = waveframe_tokens.reshape(-1, 2)
+    flat = waveframe_tokens.reshape(-1, 2) - 1
     return _nibble_merge(flat[:, 0], flat[:, 1]).astype(jnp.uint8).ravel().tolist()
 
 

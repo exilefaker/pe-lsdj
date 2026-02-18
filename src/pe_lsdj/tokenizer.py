@@ -118,7 +118,6 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     --------------------------------------------------------------------
     Wave length    | 4-bit int (hex)        | byte 14 bits 7-4| [WAV]
     Speed          | 4-bit int (hex)        | byte 14 bits 3-0| [WAV]
-
     """
 
     raw_instruments = data_bytes.reshape(NUM_INSTRUMENTS, INSTRUMENT_SIZE)
@@ -520,7 +519,7 @@ def parse_waveframes(data: Array) -> Array:
         NUM_SYNTHS,
         WAVES_PER_SYNTH,
         FRAMES_PER_WAVE
-    ))
+    )) + 1
 
 
 # Parse tables

@@ -1,21 +1,21 @@
 from pe_lsdj.embedding.fx import (
     GrooveEntityEmbedder,
-    PhraseFXEmbedder,
-    TableFXValueEmbedder,
-    TableEmbedder,
-    TableEntityEmbedder,
+    build_fx_value_embedders,
+    FXValueEmbedder,
     FXEmbedder,
+    TableEmbedder,
 )
 from pe_lsdj.embedding.instrument import (
     InstrumentEmbedder,
     InstrumentEntityEmbedder,
     SoftsynthEmbedder,
     SoftsynthEntityEmbedder,
-    WaveFrameEmbedder,
+    WaveframeEmbedder,
     WaveFrameEntityEmbedder,
 )
 from pe_lsdj.embedding.base import (
     BaseEmbedder,
+    DummyEmbedder,
     EnumEmbedder,
     GatedNormedEmbedder,
     SumEmbedder,

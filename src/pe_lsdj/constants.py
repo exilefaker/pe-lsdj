@@ -282,3 +282,10 @@ FX_VALUE_KEYS = (
     VOLUME_FX, WAVE_FX, RANDOM_FX_L, RANDOM_FX_R,
     CONTINUOUS_FX,
 )
+
+
+# Token dimensions (input to embedding layer)
+
+INSTR_WIDTH = 35 # +1 within embedding, for waveframes
+TABLE_WIDTH = 39
+SOFTSYNTH_WIDTH = 13

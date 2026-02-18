@@ -2,9 +2,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import jax.nn.initializers as init
+from itertools import accumulate
 from jaxtyping import Array
-from jax import lax
 from pe_lsdj.constants import *
 
 
@@ -14,18 +13,17 @@ class BaseEmbedder(eqx.Module):
 
 
 def _soft_hot(x, size: int, soft: bool):
-    return lax.cond(
-        soft,
-        lambda x: x,
-        lambda x: jax.nn.one_hot(x, size),
-        x
-    )    
+    if soft:
+        return x
+    return jax.nn.one_hot(x, size)
 
 class EnumEmbedder(BaseEmbedder):
     projection: eqx.nn.Linear
+    vocab_size: int
 
     def __init__(self, vocab_size, out_dim, key):
-        self.vocab_size = self.in_dim = vocab_size
+        self.vocab_size = vocab_size
+        self.in_dim = 1
         self.out_dim = out_dim
 
         self.projection = eqx.nn.Linear(
@@ -36,6 +34,7 @@ class EnumEmbedder(BaseEmbedder):
         )
 
     def __call__(self, x, soft: bool=False):
+        x = jnp.squeeze(x)
         soft_hot = _soft_hot(x, self.vocab_size, soft)
         return self.projection(soft_hot)
 
@@ -84,83 +83,123 @@ class GatedNormedEmbedder(BaseEmbedder):
 
         # Normalize only if event; otherwise it's 0.0
         normed = jnp.where(
-            valid_event > 0, 
-            (x - 1) / self.max_value, 
+            valid_event > 0,
+            (x - 1) / self.max_value,
             0.0
         )
         continuous_emb = self.projection(normed)
 
         return gate_emb + continuous_emb
-    
+
 
 class EntityEmbedder(BaseEmbedder):
+    """
+    Grabs one of a bank of discrete entities by ID
+    (or using a soft mixture), and embeds it using
+    .embedder.
+    """
     entity_bank: Array
+    num_entities: int
     embedder: eqx.Module
+    null_entry: bool
 
-    def __init__(self, entity_bank, embedder):
+    def __init__(self, entity_bank, embedder, null_entry=False):
+        """
+        null_entry: if True, prepends a zero row so that index 0
+        maps to a zero vector.  Tokens are assumed to already carry
+        a +1 offset (0 = null), so no additional offset is applied.
+        """
+        self.null_entry = null_entry
+        entity_dim = entity_bank.shape[-1]
+        print("bank shape", entity_bank.shape)
+        print("zero shape", jnp.zeros((1, entity_dim), entity_bank.dtype).shape)
+        entity_bank = jnp.concatenate(
+            [jnp.zeros((1, entity_dim), entity_bank.dtype), entity_bank],
+            axis=0
+        ) if null_entry else entity_bank
+
         self.entity_bank = entity_bank
         self.embedder = embedder
 
-        num_entities = entity_bank.shape[0]
-        self.in_dim = num_entities
+        self.num_entities = entity_bank.shape[0]
+        self.in_dim = 1
         self.out_dim = embedder.out_dim
 
     def __call__(self, x, soft: bool=False):
-        """
-        x: one-hot or categorical distribution
-        """
-        soft_hot = _soft_hot(x, self.in_dim, soft)
-
+        x = jnp.squeeze(x)
+        soft_hot = _soft_hot(x, self.num_entities, soft)
         return self.embedder(
             soft_hot @ self.entity_bank
         )
 
 
+def _offsets(embedders):
+    """Compute slice offsets from a list of embedders."""
+    return (0, *accumulate(e.in_dim for e in embedders))
+
+
 class SumEmbedder(BaseEmbedder):
     """
-    Aggregates embeddings by summing
+    Aggregates embeddings by summing.
     """
-    embedders: dict[str, eqx.Module]
+    embedders: list[BaseEmbedder]
+    offsets: tuple
 
-    def __init__(self, embedders: dict[str, BaseEmbedder]):
+    def __init__(self, embedders: list[BaseEmbedder]):
         self.embedders = embedders
-        out_dims = [e.out_dim for e in embedders.values()]
+        self.offsets = _offsets(embedders)
+        out_dims = [e.out_dim for e in embedders]
         assert all(d == out_dims[0] for d in out_dims), (
             f"SumEmbedder: all sub-embedder out_dims must match, got {out_dims}"
         )
-        self.in_dim = out_dims[0]
+        self.in_dim = self.offsets[-1]
         self.out_dim = out_dims[0]
 
-    def __call__(self, **kwargs):
+    def __call__(self, x):
         embeddings = [
-            e(kwargs[k]) for k, e in self.embedders.items()
+            e(x[self.offsets[i]:self.offsets[i+1]])
+            for i, e in enumerate(self.embedders)
         ]
         return jax.tree.reduce(jnp.add, embeddings)
 
 
 class ConcatEmbedder(BaseEmbedder):
     """
-    Aggregates embeddings by concatenating
+    Aggregates embeddings by concatenating, then projects.
     """
-    embedders: dict[str, BaseEmbedder]
+    embedders: list[BaseEmbedder]
+    offsets: tuple
     projection: eqx.nn.Linear
 
-    def __init__(self, key, embedders: dict[str, BaseEmbedder], out_dim: int):
+    def __init__(self, key, embedders: list[BaseEmbedder], out_dim: int,
+                 *, _projection=None):
         self.embedders = embedders
-        self.in_dim = sum(e.out_dim for e in embedders.values())
+        self.offsets = _offsets(embedders)
+        self.in_dim = self.offsets[-1]
         self.out_dim = out_dim
-        self.projection = eqx.nn.Linear(
-            in_features=self.in_dim,
-            out_features=out_dim,
-            use_bias=False,
-            key=key,
-        )
+        concat_dim = sum(e.out_dim for e in embedders)
+        if _projection is not None:
+            self.projection = _projection
+        else:
+            self.projection = eqx.nn.Linear(
+                in_features=concat_dim,
+                out_features=out_dim,
+                use_bias=False,
+                key=key,
+            )
 
-    def __call__(self, **kwargs):
-        embeddings = jnp.concatenate(
-            [e(kwargs[k]) for k, e in self.embedders.items()]
-        )
+    def __call__(self, x):
+        embeddings = jnp.concatenate([
+            e(x[self.offsets[i]:self.offsets[i+1]])
+            for i, e in enumerate(self.embedders)
+        ])
         return self.projection(embeddings)
 
 
+class DummyEmbedder(BaseEmbedder):
+    def __init__(self, in_dim, out_dim):
+        self.in_dim = in_dim
+        self.out_dim = out_dim
 
+    def __call__(self, _x):
+        return jnp.zeros(self.out_dim)

@@ -4,13 +4,17 @@ import jax.random as jr
 import equinox as eqx
 
 from pe_lsdj.constants import *
-from pe_lsdj.embedding.base import BaseEmbedder, GatedNormedEmbedder
+from pe_lsdj.embedding.base import (
+    DummyEmbedder,
+    EntityEmbedder,
+    GatedNormedEmbedder,
+)
 from pe_lsdj.embedding.fx import (
     GrooveEntityEmbedder,
-    PhraseFXEmbedder,
-    TableFXValueEmbedder,
+    build_fx_value_embedders,
+    FXValueEmbedder,
     FXEmbedder,
-    TableEntityEmbedder,
+    TableEmbedder,
 )
 from pe_lsdj.embedding.instrument import (
     InstrumentEntityEmbedder,
@@ -30,14 +34,21 @@ class SongStepEmbedder(eqx.Module):
                          ...      ...
 
     Channels share sub-embedders (note, instrument, FX, transpose).
-    Each channel gets its own learned linear projection via a stacked
-    weight array and vmap'd matmul.
+    Each channel gets its own learned linear projection.
+
+    FX value embedding uses three different table embedders:
+      Base: DummyEmbedder for use inside TableEmbedder definition
+            (no A commands possible here)
+      Within-table: EntityEmbedder over traces bank for TABLE_FX
+            (tables can be used, but not recursively)
+      Phrase/instrument-level:  EntityEmbedder over tables bank
+            (full table representation)
 
     Output: (4 * per_ch_dim,) = (out_dim,)
     """
     note_embedder: GatedNormedEmbedder
     instrument_embedder: InstrumentEntityEmbedder
-    fx_embedder: PhraseFXEmbedder
+    fx_embedder: FXEmbedder
     transpose_embedder: GatedNormedEmbedder
 
     # (4, per_ch_dim, concat_dim) — one projection per channel
@@ -53,67 +64,74 @@ class SongStepEmbedder(eqx.Module):
         waveframes: Array,
         grooves: Array,
         tables: Array,
+        traces: Array,
         out_dim: int = 512,
         note_dim: int = 128,
         instr_dim: int = 128,
         fx_dim: int = 128,
         table_dim: int = 64,
         transpose_dim: int = 16,
-        groove_dim: int = 64,
+        value_out_dim: int = 64,
         softsynth_dim: int = 64,
         waveframe_dim: int = 32,
     ):
         assert out_dim % 4 == 0, f"out_dim must be divisible by 4, got {out_dim}"
         per_ch_dim = out_dim // 4
 
-        keys = jr.split(key, 11)
+        keys = jr.split(key, 14)
 
-        # --- Shared sub-embedders ---
+        # --- Note ---
         self.note_embedder = GatedNormedEmbedder(
             note_dim,
             keys[0],
             max_value=NUM_NOTES,
         )
 
+        # --- Shared FX value sub-embedders (positions 1..11) ---
         groove_embedder = GrooveEntityEmbedder(
-            groove_dim,
+            value_out_dim,
             keys[1],
             grooves,
+            null_entry=True,
+        )
+        shared_embedders = build_fx_value_embedders(value_out_dim, keys[2], groove_embedder)
+
+        # --- Tier 0: base table embedder (DummyEmbedder for TABLE_FX) ---
+        dummy_table_fx = DummyEmbedder(1, value_out_dim)
+        fxv0 = FXValueEmbedder(dummy_table_fx, shared_embedders)
+        fx0 = FXEmbedder(keys[3], fxv0, fx_dim)
+        table_embedder_0 = TableEmbedder(table_dim, keys[4], fx0)
+
+        # --- Tier 1: trace entity for TABLE_FX ---
+        trace_embedder = EntityEmbedder(traces, table_embedder_0)
+        fxv1 = FXValueEmbedder(trace_embedder, shared_embedders)
+        fx1 = FXEmbedder(keys[5], fxv1, fx_dim, _projection=fx0.projection)
+        table_table_embedder = TableEmbedder(table_dim, keys[6], fx1, _projection=table_embedder_0.projection)
+
+        # --- Phrase/instr level: table entity for TABLE_FX ---
+        table_embedder = EntityEmbedder(tables, table_table_embedder)
+        fxv_phrase = FXValueEmbedder(table_embedder, shared_embedders)
+        self.fx_embedder = FXEmbedder(
+            keys[7], fxv_phrase, fx_dim, _projection=fx0.projection,
         )
 
-        table_fx_value_embedder = TableFXValueEmbedder(
-            64,
-            keys[2],
-            groove_embedder,
-        )
-
-        table_fx_embedder = FXEmbedder(
-            keys[3],
-            table_fx_value_embedder,
-            fx_dim,
-        )
-
-        table_embedder = TableEntityEmbedder(
-            table_dim,
-            keys[4],
-            tables,
-            table_fx_embedder=table_fx_embedder,
-        )
-
+        # --- Instrument ---
         softsynth_embedder = SoftsynthEntityEmbedder(
-            keys[5],
+            keys[8],
             softsynths,
             softsynth_dim,
+            null_entry=True,
         )
 
         waveframe_embedder = WaveFrameEntityEmbedder(
-            keys[6],
+            keys[9],
             waveframes,
             waveframe_dim,
+            null_entry=True,
         )
 
         self.instrument_embedder = InstrumentEntityEmbedder(
-            keys[7],
+            keys[10],
             instruments,
             table_embedder,
             softsynth_embedder,
@@ -121,22 +139,16 @@ class SongStepEmbedder(eqx.Module):
             instr_dim,
         )
 
-        self.fx_embedder = PhraseFXEmbedder(
-            keys[8],
-            table_fx_value_embedder,
-            table_embedder,
-            fx_dim,
-        )
-
+        # --- Transpose ---
         self.transpose_embedder = GatedNormedEmbedder(
             transpose_dim,
-            keys[9],
+            keys[11],
         )
 
         # --- Per-channel projections (stacked for vmap) ---
         concat_dim = note_dim + instr_dim + fx_dim + transpose_dim
 
-        proj_keys = jr.split(keys[10], 4)
+        proj_keys = jr.split(keys[12], 4)
         self.channel_projections = jnp.stack([
             jr.normal(k, (per_ch_dim, concat_dim)) / jnp.sqrt(concat_dim)
             for k in proj_keys
@@ -144,12 +156,12 @@ class SongStepEmbedder(eqx.Module):
 
         self.out_dim = out_dim
 
-    def _embed_one_channel(self, note, instr_id, fx_cmd, fx_vals, transpose):
+    def _embed_one_channel(self, note, instr_id, fx_data, transpose):
         """Shared sub-embedders → concatenated feature vector."""
         return jnp.concatenate([
             self.note_embedder(note),
             self.instrument_embedder(instr_id),
-            self.fx_embedder(fx_cmd=fx_cmd, fx_value=fx_vals),
+            self.fx_embedder(fx_data),
             self.transpose_embedder(transpose),
         ])  # (concat_dim,)
 
@@ -161,11 +173,10 @@ class SongStepEmbedder(eqx.Module):
         # Embed each channel with shared weights → (4, concat_dim)
         channel_embs = jnp.stack([
             self._embed_one_channel(
-                step[ch, 0],       # note
-                step[ch, 1],       # instr_id
-                step[ch, 2],       # fx_cmd
-                step[ch, 3:20],    # fx_vals (17 values)
-                step[ch, 20],      # transpose
+                step[ch, 0:1],     # note
+                step[ch, 1:2],     # instr_id
+                step[ch, 2:20],    # fx_cmd + fx_vals (18 values)
+                step[ch, 20:21],   # transpose
             )
             for ch in range(4)
         ])

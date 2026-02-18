@@ -67,3 +67,18 @@ def test_repack_song_tempo_round_trip(song_file):
     raw_bytes = song_file.repack()
     sf2 = SongFile(raw_bytes=raw_bytes, name=song_file.name)
     assert int(song_file.tempo) == int(sf2.tempo)
+
+
+# ---- Array property shortcuts ----
+
+def test_instruments_array(song_file):
+    instruments_arr = song_file.instruments_array
+    assert instruments_arr.shape == (NUM_INSTRUMENTS, INSTR_WIDTH)
+
+def test_tables_array(song_file):
+    tables_arr = song_file.tables_array
+    assert tables_arr.shape == (NUM_TABLES * STEPS_PER_TABLE, TABLE_WIDTH)
+
+def test_softsynths_array(song_file):
+    softsynths_arr = song_file.softsynths_array
+    assert softsynths_arr.shape == (NUM_SYNTHS, SOFTSYNTH_WIDTH)
