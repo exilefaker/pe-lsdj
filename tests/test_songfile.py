@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from pe_lsdj.songfile import SongFile
+from pe_lsdj.tokenizer.songfile import SongFile
 from pe_lsdj.constants import *
 
 

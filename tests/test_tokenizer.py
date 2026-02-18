@@ -1,9 +1,9 @@
-from pe_lsdj.tokenizer import (
+from pe_lsdj.tokenizer.tokenize import (
     parse_instruments, parse_notes, parse_softsynths,
     parse_fx_commands, parse_fx_values, parse_tables, parse_grooves,
     parse_waveframes, get_resolve_maps, get_traces,
 )
-from pe_lsdj.detokenizer import repack_instruments, repack_notes, repack_softsynths, repack_fx_values, repack_tables, repack_grooves, repack_waveframes
+from pe_lsdj.tokenizer.detokenize import repack_instruments, repack_notes, repack_softsynths, repack_fx_values, repack_tables, repack_grooves, repack_waveframes
 from pe_lsdj.constants import *
 import numpy as np
 import jax.numpy as jnp

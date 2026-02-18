@@ -1,6 +1,6 @@
 import pytest
 from pylsdj import load_lsdsng
-from pe_lsdj.songfile import SongFile
+from pe_lsdj.tokenizer.songfile import SongFile
 
 
 SONG_FILES = [

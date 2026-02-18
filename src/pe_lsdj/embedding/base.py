@@ -95,8 +95,7 @@ class GatedNormedEmbedder(BaseEmbedder):
 class EntityEmbedder(BaseEmbedder):
     """
     Grabs one of a bank of discrete entities by ID
-    (or using a soft mixture), and embeds it using
-    .embedder.
+    (or using a soft mixture), and embeds it.
     """
     entity_bank: Array
     num_entities: int
@@ -107,12 +106,10 @@ class EntityEmbedder(BaseEmbedder):
         """
         null_entry: if True, prepends a zero row so that index 0
         maps to a zero vector.  Tokens are assumed to already carry
-        a +1 offset (0 = null), so no additional offset is applied.
+        a +1 offset (0 = null).
         """
         self.null_entry = null_entry
         entity_dim = entity_bank.shape[-1]
-        print("bank shape", entity_bank.shape)
-        print("zero shape", jnp.zeros((1, entity_dim), entity_bank.dtype).shape)
         entity_bank = jnp.concatenate(
             [jnp.zeros((1, entity_dim), entity_bank.dtype), entity_bank],
             axis=0
@@ -134,7 +131,6 @@ class EntityEmbedder(BaseEmbedder):
 
 
 def _offsets(embedders):
-    """Compute slice offsets from a list of embedders."""
     return (0, *accumulate(e.in_dim for e in embedders))
 
 

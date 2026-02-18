@@ -4,7 +4,7 @@ import bread
 from typing import NamedTuple
 from pylsdj.blockutils import BlockWriter, BlockFactory
 from jaxtyping import Array
-from pe_lsdj.tokenizer import (
+from pe_lsdj.tokenizer.tokenize import (
     parse_grooves,
     parse_instruments,
     parse_notes,
@@ -14,7 +14,7 @@ from pe_lsdj.tokenizer import (
     parse_tables,
     parse_waveframes,
 )
-from pe_lsdj.detokenizer import repack_song
+from pe_lsdj.tokenizer.detokenize import repack_song
 from pylsdj import load_lsdsng, filepack, bread_spec as spec
 from pe_lsdj.constants import *
 
@@ -235,6 +235,36 @@ class SongFile(eqx.Module):
             self.tempo,
             self.settings.settings_bytes,
         )
+
+    @property
+    def instruments_array(self):
+        return jnp.column_stack(self.instruments.values())
+    
+    @property 
+    def grooves_array(self):
+        return self.grooves.reshape((NUM_GROOVES, -1))
+    
+    @property
+    def waveframes_array(self):
+        return self.waveframes.reshape((NUM_SYNTHS, -1))
+
+    @property
+    def tables_array(self):
+        return jnp.column_stack([
+            v.reshape(NUM_TABLES*STEPS_PER_TABLE, -1)
+            for v in self.tables.values()]
+        )
+
+    @property
+    def traces_array(self):
+        return jnp.column_stack([
+            v.reshape(NUM_TABLES*STEPS_PER_TABLE, -1)
+            for v in self.traces.values()]
+        )
+
+    @property
+    def softsynths_array(self):
+        return jnp.column_stack(self.softsynths.values())
 
     def to_lsdsng(self, output_filename=None, name="", version=25):
         """
