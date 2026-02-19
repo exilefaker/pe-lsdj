@@ -370,7 +370,89 @@ class TestForwardPassShapes:
         assert out.shape == (512,)
         assert jnp.linalg.norm(out) > 0
     
-    # Real data
+    # --- Null value behavior ---
+
+    def test_entity_embedder_null_entry_zero_index(self):
+        """With null_entry=True, index 0 feeds zeros to the inner embedder."""
+        bank = jnp.ones((10, 4))
+        inner = GatedNormedEmbedder(16, KEY, in_dim=4)
+        e = EntityEmbedder(bank, inner, null_entry=True)
+        out_null = e(jnp.array([0]))
+        # Index 0 → zero row → GatedNormedEmbedder gets all zeros → null gate
+        out_real = e(jnp.array([1]))
+        # Null output should differ from a real entity
+        assert not jnp.allclose(out_null, out_real)
+
+    def test_entity_embedder_null_entry_bank_size(self):
+        """null_entry=True prepends a zero row, increasing num_entities by 1."""
+        bank = jnp.ones((10, 4))
+        inner = GatedNormedEmbedder(16, KEY, in_dim=4)
+        e = EntityEmbedder(bank, inner, null_entry=True)
+        assert e.num_entities == 11
+        assert e.entity_bank.shape == (11, 4)
+        # Row 0 should be all zeros
+        assert jnp.all(e.entity_bank[0] == 0)
+
+    def test_gated_normed_null_vs_active(self):
+        """GatedNormedEmbedder: zero input (null) should differ from active input."""
+        e = GatedNormedEmbedder(16, KEY, in_dim=1, null_value=0, max_value=255)
+        out_null = e(jnp.zeros((1,)))
+        out_active = e(jnp.array([128.0]))
+        assert not jnp.allclose(out_null, out_active)
+
+    def test_gated_normed_null_no_continuous(self):
+        """GatedNormedEmbedder: null input should have no continuous component."""
+        e = GatedNormedEmbedder(16, KEY, in_dim=2, null_value=0, max_value=15)
+        out_null = e(jnp.zeros((2,)))
+        # The gate embedding for event=0 plus zero continuous contribution
+        gate_only = e.gate_embedder(jnp.array(0.0))
+        assert jnp.allclose(out_null, gate_only)
+
+    def test_dummy_embedder_always_zero(self):
+        """DummyEmbedder returns zeros regardless of input."""
+        e = DummyEmbedder(3, 64)
+        assert jnp.all(e(jnp.array([1, 2, 3])) == 0)
+        assert jnp.all(e(jnp.zeros((3,))) == 0)
+        assert jnp.all(e(jnp.ones((3,)) * 255) == 0)
+
+    # --- Soft mode ---
+
+    def test_enum_embedder_soft_mode(self):
+        """EnumEmbedder soft mode accepts a probability vector."""
+        e = EnumEmbedder(5, 16, KEY)
+        probs = jnp.array([0.1, 0.2, 0.4, 0.2, 0.1])
+        out = e(probs, soft=True)
+        assert out.shape == (16,)
+
+    def test_enum_embedder_soft_onehot_matches_hard(self):
+        """Soft mode with a one-hot vector should match hard mode."""
+        e = EnumEmbedder(5, 16, KEY)
+        hard_out = e(jnp.array([3]))
+        soft_out = e(jnp.array([0, 0, 0, 1, 0], dtype=jnp.float32), soft=True)
+        assert jnp.allclose(hard_out, soft_out, atol=1e-5)
+
+    def test_entity_embedder_soft_mode(self):
+        """EntityEmbedder soft mode: probability vector selects mixture of entities."""
+        bank = jnp.arange(30, dtype=jnp.float32).reshape(10, 3)
+        inner = GatedNormedEmbedder(16, KEY, in_dim=3)
+        e = EntityEmbedder(bank, inner)
+        probs = jnp.zeros(10).at[3].set(1.0)
+        out_soft = e(probs, soft=True)
+        out_hard = e(jnp.array([3]))
+        assert out_soft.shape == (16,)
+        assert jnp.allclose(out_soft, out_hard, atol=1e-5)
+
+    def test_entity_embedder_soft_mixture(self):
+        """Soft mode with uniform weights produces a valid embedding."""
+        bank = jnp.ones((10, 4))
+        inner = GatedNormedEmbedder(16, KEY, in_dim=4)
+        e = EntityEmbedder(bank, inner)
+        probs = jnp.ones(10) / 10.0
+        out = e(probs, soft=True)
+        assert out.shape == (16,)
+
+    # --- Real data ---
+
     def test_song_step_on_real_data(self, song_file):
         k = jr.PRNGKey(33)
         song_step_embedder = SongStepEmbedder(
