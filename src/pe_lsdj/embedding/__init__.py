@@ -22,3 +22,9 @@ from pe_lsdj.embedding.base import (
     ConcatEmbedder,
     EntityEmbedder,
 )
+from pe_lsdj.embedding.position import (
+    SinusoidalPositionEncoding,
+    PhrasePositionEmbedder,
+    ChannelPositionEmbedder,
+    SequenceEmbedder,
+)

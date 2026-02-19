@@ -15,7 +15,6 @@ def test_repack_song_tokens_round_trip(song_file):
         np.array(sf2.song_tokens),
     )
 
-
 def test_repack_song_grooves_round_trip(song_file):
     """Grooves should survive the round-trip."""
     raw_bytes = song_file.repack()
@@ -82,3 +81,17 @@ def test_tables_array(song_file):
 def test_softsynths_array(song_file):
     softsynths_arr = song_file.softsynths_array
     assert softsynths_arr.shape == (NUM_SYNTHS, SOFTSYNTH_WIDTH)
+
+
+# ---- Set max phrases for repack ----
+
+def test_repack_song_tokens_custom_max_phrases(song_file):
+    raw_bytes = song_file.repack(max_phrases_per_chain=4)
+    chain_phrases = (
+        np.array(raw_bytes)[CHAIN_PHRASES_ADDR]
+    ).reshape((NUM_CHAINS, PHRASES_PER_CHAIN))
+
+    # Get first chain
+    chain = chain_phrases[0]
+    assert not np.any(chain[:4] == EMPTY)
+    assert np.all(chain[4:] == EMPTY)

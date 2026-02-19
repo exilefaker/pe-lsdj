@@ -224,7 +224,7 @@ class SongFile(eqx.Module):
             raw_bytes[SETTINGS_ADDR]
         )
     
-    def repack(self):
+    def repack(self, max_phrases_per_chain: int = PHRASES_PER_CHAIN):
         return repack_song(
             self.song_tokens,
             self.instruments,
@@ -234,6 +234,7 @@ class SongFile(eqx.Module):
             self.waveframes,
             self.tempo,
             self.settings.settings_bytes,
+            max_phrases_per_chain,
         )
 
     @property

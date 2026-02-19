@@ -21,6 +21,11 @@ from pe_lsdj.embedding.instrument import (
     SoftsynthEntityEmbedder,
     WaveFrameEntityEmbedder,
 )
+from pe_lsdj.embedding.position import (
+    SinusoidalPositionEncoding,
+    PhrasePositionEmbedder,
+    ChannelPositionEmbedder,
+)
 from jaxtyping import Array, Key
 
 
@@ -54,6 +59,7 @@ class SongStepEmbedder(eqx.Module):
     # (4, per_ch_dim, concat_dim) — one projection per channel
     channel_projections: Array
 
+    per_ch_dim: int
     out_dim: int
 
     def __init__(
@@ -77,6 +83,7 @@ class SongStepEmbedder(eqx.Module):
     ):
         assert out_dim % 4 == 0, f"out_dim must be divisible by 4, got {out_dim}"
         per_ch_dim = out_dim // 4
+        self.per_ch_dim = per_ch_dim
 
         keys = jr.split(key, 14)
 
@@ -168,7 +175,7 @@ class SongStepEmbedder(eqx.Module):
     def __call__(self, step):
         """
         step: (4, 21) — one timestep across all channels
-        Returns: (out_dim,) where out_dim = 4 * per_ch_dim
+        Returns: (4, per_ch_dim) — structured per-channel embeddings
         """
         # Embed each channel with shared weights → (4, concat_dim)
         channel_embs = jnp.stack([
@@ -182,6 +189,40 @@ class SongStepEmbedder(eqx.Module):
         ])
 
         # Per-channel projection via vmap: (4, per_ch_dim)
-        projected = jax.vmap(jnp.dot)(self.channel_projections, channel_embs)
+        return jax.vmap(jnp.dot)(self.channel_projections, channel_embs)
 
-        return projected.reshape(-1)  # (4 * per_ch_dim,) = (out_dim,)
+
+class SequenceEmbedder(eqx.Module):
+    """
+    Full sequence embedding: content + positional encodings.
+
+    Input:  song_tokens (S, 4, 21)
+    Output: (S, 4, per_ch_dim)
+    """
+    step_embedder: SongStepEmbedder
+    global_position: SinusoidalPositionEncoding
+    phrase_position: PhrasePositionEmbedder
+    channel_position: ChannelPositionEmbedder
+
+    def __init__(self, step_embedder, key):
+        k1, k2 = jr.split(key)
+        self.step_embedder = step_embedder
+        d = step_embedder.per_ch_dim
+        self.global_position = SinusoidalPositionEncoding(d)
+        self.phrase_position = PhrasePositionEmbedder(d, k1)
+        self.channel_position = ChannelPositionEmbedder(d, k2)
+
+    def __call__(self, song_tokens):
+        S = song_tokens.shape[0]
+        content = jax.vmap(self.step_embedder)(song_tokens)   # (S, 4, d)
+        global_pos = self.global_position(jnp.arange(S))      # (S, d)
+        phrase_pos = self.phrase_position(
+            jnp.arange(S) % STEPS_PER_PHRASE
+        )                                                     # (S, d)
+        channel_pos = self.channel_position()                 # (4, d)
+        return (
+            content
+            + global_pos[:, None, :]
+            + phrase_pos[:, None, :]
+            + channel_pos[None, :, :]
+        )

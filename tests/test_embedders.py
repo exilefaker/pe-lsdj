@@ -24,6 +24,12 @@ from pe_lsdj.embedding.instrument import (
     WaveframeEmbedder,
 )
 from pe_lsdj.embedding.song import SongStepEmbedder
+from pe_lsdj.embedding.position import (
+    SinusoidalPositionEncoding,
+    PhrasePositionEmbedder,
+    ChannelPositionEmbedder,
+    SequenceEmbedder,
+)
 
 
 KEY = jr.PRNGKey(0)
@@ -362,12 +368,12 @@ class TestForwardPassShapes:
     def test_song_step_embedder_zero(self, song_step_embedder):
         step = jnp.zeros((4, 21))
         out = song_step_embedder(step)
-        assert out.shape == (512,)
+        assert out.shape == (4, 128)
 
     def test_song_step_embedder_nonzero(self, song_step_embedder):
         step = jnp.ones((4, 21))
         out = song_step_embedder(step)
-        assert out.shape == (512,)
+        assert out.shape == (4, 128)
         assert jnp.linalg.norm(out) > 0
     
     # --- Null value behavior ---
@@ -465,5 +471,91 @@ class TestForwardPassShapes:
             song_file.traces_array,
         )
         out = song_step_embedder(song_file.song_tokens[0])
-        assert out.shape == (512,)
+        assert out.shape == (4, 128)
+        assert jnp.linalg.norm(out) > 0
+
+
+# ===================================================================
+# Positional encodings
+# ===================================================================
+
+class TestSinusoidalPositionEncoding:
+
+    @pytest.mark.parametrize("seq_len", [1, 16, 128])
+    def test_shape(self, seq_len):
+        enc = SinusoidalPositionEncoding(512)
+        out = enc(jnp.arange(seq_len))
+        assert out.shape == (seq_len, 512)
+
+    def test_deterministic(self):
+        enc = SinusoidalPositionEncoding(64)
+        pos = jnp.arange(32)
+        out1 = enc(pos)
+        out2 = enc(pos)
+        assert jnp.allclose(out1, out2)
+
+    def test_distinct_positions(self):
+        enc = SinusoidalPositionEncoding(64)
+        out = enc(jnp.arange(4))
+        # Each position should produce a unique vector
+        for i in range(4):
+            for j in range(i + 1, 4):
+                assert not jnp.allclose(out[i], out[j])
+
+
+class TestPhrasePositionEmbedder:
+
+    def test_shape(self):
+        e = PhrasePositionEmbedder(64, KEY)
+        out = e(jnp.arange(32))
+        assert out.shape == (32, 64)
+
+    def test_periodicity(self):
+        """Position 0 at step 0 should equal position 0 at step 16."""
+        e = PhrasePositionEmbedder(64, KEY)
+        positions = jnp.arange(32) % STEPS_PER_PHRASE
+        out = e(positions)
+        assert jnp.allclose(out[0], out[16])
+        assert jnp.allclose(out[1], out[17])
+
+
+class TestChannelPositionEmbedder:
+
+    def test_shape(self):
+        e = ChannelPositionEmbedder(64, KEY)
+        out = e()
+        assert out.shape == (4, 64)
+
+    def test_distinct_channels(self):
+        e = ChannelPositionEmbedder(64, KEY)
+        out = e()
+        for i in range(4):
+            for j in range(i + 1, 4):
+                assert not jnp.allclose(out[i], out[j])
+
+
+class TestSequenceEmbedder:
+
+    def test_shape(self, song_step_embedder):
+        seq_emb = SequenceEmbedder(song_step_embedder, KEY)
+        tokens = jnp.zeros((32, 4, 21))
+        out = seq_emb(tokens)
+        assert out.shape == (32, 4, 128)
+
+    def test_on_real_data(self, song_file):
+        k1, k2 = jr.split(jr.PRNGKey(33))
+        step_emb = SongStepEmbedder(
+            k1,
+            song_file.instruments_array,
+            song_file.softsynths_array,
+            song_file.waveframes_array,
+            song_file.grooves_array,
+            song_file.tables_array,
+            song_file.traces_array,
+        )
+        seq_emb = SequenceEmbedder(step_emb, k2)
+        # Embed first 32 steps
+        tokens = song_file.song_tokens[:32]
+        out = seq_emb(tokens)
+        assert out.shape == (32, 4, 128)
         assert jnp.linalg.norm(out) > 0

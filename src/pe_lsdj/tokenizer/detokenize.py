@@ -388,7 +388,8 @@ def repack_song(
     softsynth_tokens: Array,
     waveframe_tokens: Array,
     tempo_token: Array | int,
-    settings: Array,    
+    settings: Array,
+    max_phrases_per_chain: int = PHRASES_PER_CHAIN,
 ) -> list[int]:
     """Reconstruct raw LSDJ bytes (0x8000) from tokens.
 
@@ -477,9 +478,10 @@ def repack_song(
 
     for ch in range(NUM_CHANNELS):
         entries = phrase_ids_per_channel[ch]
-        # Split into chunks of PHRASES_PER_CHAIN
-        for i in range(0, len(entries), PHRASES_PER_CHAIN):
-            chunk = entries[i:i + PHRASES_PER_CHAIN]
+        # Split into chunks of max_phrases_per_chain 
+        # (default PHRASES_PER_CHAIN)
+        for i in range(0, len(entries), max_phrases_per_chain):
+            chunk = entries[i:i + max_phrases_per_chain]
             pids = [e[0] for e in chunk]
             trs = [e[1] for e in chunk]
 
