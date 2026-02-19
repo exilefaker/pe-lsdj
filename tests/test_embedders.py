@@ -43,8 +43,8 @@ def song_step_embedder():
         softsynths=jnp.zeros((16, SOFTSYNTH_WIDTH)),
         waveframes=jnp.zeros((16, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
         grooves=jnp.zeros((32, STEPS_PER_GROOVE * 2)),
-        tables=jnp.zeros((64, TABLE_WIDTH)),
-        traces=jnp.zeros((64, TABLE_WIDTH)),
+        tables=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
+        traces=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
     )
 
 # ===================================================================
@@ -167,7 +167,7 @@ def test_table_embedder_in_dim_matches_table_width():
     fxv = FXValueEmbedder(dummy, subs)
     fx_emb = FXEmbedder(k3, fxv, 64)
     te = TableEmbedder(64, k4, fx_emb)
-    assert te.in_dim == TABLE_WIDTH
+    assert te.in_dim == STEPS_PER_TABLE * TABLE_WIDTH
 
 # --- SoftsynthEmbedder weight sharing ---
 
@@ -334,7 +334,9 @@ class TestForwardPassShapes:
         te0 = TableEmbedder(64, k4, fx0)
 
         # Phrase level: table entity at position 0
-        table_entity = EntityEmbedder(jnp.ones((64, TABLE_WIDTH)), te0)
+        table_entity = EntityEmbedder(
+            jnp.ones((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)), te0,
+        )
         fxv_phrase = FXValueEmbedder(table_entity, subs)
         e = FXEmbedder(k5, fxv_phrase, 128, _projection=fx0.projection)
         x = jnp.ones((e.in_dim,))

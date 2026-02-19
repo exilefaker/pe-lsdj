@@ -77,7 +77,7 @@ def test_instruments_array(song_file):
 
 def test_tables_array(song_file):
     tables_arr = song_file.tables_array
-    assert tables_arr.shape == (NUM_TABLES * STEPS_PER_TABLE, TABLE_WIDTH)
+    assert tables_arr.shape == (NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)
 
 def test_softsynths_array(song_file):
     softsynths_arr = song_file.softsynths_array

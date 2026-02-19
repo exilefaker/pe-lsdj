@@ -251,14 +251,14 @@ class SongFile(eqx.Module):
     @property
     def tables_array(self):
         return jnp.column_stack([
-            v.reshape(NUM_TABLES*STEPS_PER_TABLE, -1)
+            v.reshape(NUM_TABLES, -1)
             for v in self.tables.values()]
         )
 
     @property
     def traces_array(self):
         return jnp.column_stack([
-            v.reshape(NUM_TABLES*STEPS_PER_TABLE, -1)
+            v.reshape(NUM_TABLES, -1)
             for v in self.traces.values()]
         )
 
