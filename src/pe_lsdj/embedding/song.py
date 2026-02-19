@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import equinox as eqx
 
+from pe_lsdj import SongFile
 from pe_lsdj.constants import *
 from pe_lsdj.embedding.base import (
     DummyEmbedder,
@@ -190,6 +191,19 @@ class SongStepEmbedder(eqx.Module):
 
         # Per-channel projection via vmap: (4, per_ch_dim)
         return jax.vmap(jnp.dot)(self.channel_projections, channel_embs)
+    
+    @classmethod
+    def from_songfile(cls, key: Key, songfile: SongFile, **kwargs):
+        return cls(
+            key,
+            songfile.instruments_array,
+            songfile.softsynths_array,
+            songfile.waveframes_array,
+            songfile.grooves_array,
+            songfile.tables_array,
+            songfile.traces_array,
+            **kwargs
+        )
 
 
 class SequenceEmbedder(eqx.Module):

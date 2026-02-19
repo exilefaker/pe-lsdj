@@ -23,12 +23,14 @@ from pe_lsdj.embedding.instrument import (
     SoftsynthEmbedder,
     WaveframeEmbedder,
 )
-from pe_lsdj.embedding.song import SongStepEmbedder
+from pe_lsdj.embedding.song import (
+    SongStepEmbedder,
+    SequenceEmbedder,
+)
 from pe_lsdj.embedding.position import (
     SinusoidalPositionEncoding,
     PhrasePositionEmbedder,
     ChannelPositionEmbedder,
-    SequenceEmbedder,
 )
 
 

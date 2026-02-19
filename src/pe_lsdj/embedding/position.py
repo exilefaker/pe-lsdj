@@ -5,7 +5,6 @@ import jax.random as jr
 
 from pe_lsdj.constants import NUM_CHANNELS, STEPS_PER_PHRASE
 from pe_lsdj.embedding.base import EnumEmbedder
-from pe_lsdj.embedding.song import SongStepEmbedder
 
 
 class SinusoidalPositionEncoding(eqx.Module):

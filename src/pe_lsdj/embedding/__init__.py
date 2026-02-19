@@ -26,5 +26,8 @@ from pe_lsdj.embedding.position import (
     SinusoidalPositionEncoding,
     PhrasePositionEmbedder,
     ChannelPositionEmbedder,
+)
+from pe_lsdj.embedding.song import (
+    SongStepEmbedder,
     SequenceEmbedder,
 )
