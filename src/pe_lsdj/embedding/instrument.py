@@ -25,24 +25,24 @@ class SoftsynthEmbedder(ConcatEmbedder):
 
         sound_param_embedder = ConcatEmbedder(
             keys[4],
-            [
-                GatedNormedEmbedder(sound_param_out_dim, keys[0]),  # volume
-                GatedNormedEmbedder(sound_param_out_dim, keys[1]),  # cutoff
-                GatedNormedEmbedder(sound_param_out_dim, keys[2]),  # phase
-                GatedNormedEmbedder(sound_param_out_dim, keys[3]),  # vshift
-            ],
+            {
+                'volume': GatedNormedEmbedder(sound_param_out_dim, keys[0]),
+                'cutoff': GatedNormedEmbedder(sound_param_out_dim, keys[1]),
+                'phase': GatedNormedEmbedder(sound_param_out_dim, keys[2]),
+                'vshift': GatedNormedEmbedder(sound_param_out_dim, keys[3]),
+            },
             continuous_out_dim,
         )
 
-        embedders = [
-            EnumEmbedder(4, enum_out_dim, keys[5]),    # waveform
-            EnumEmbedder(5, enum_out_dim, keys[6]),    # filter_type
-            GatedNormedEmbedder(enum_out_dim, keys[10]),  # filter_resonance
-            EnumEmbedder(3, enum_out_dim, keys[7]),    # distortion
-            EnumEmbedder(4, enum_out_dim, keys[8]),    # phase_type
-            sound_param_embedder,                       # start_params
-            sound_param_embedder,                       # end_params (shared)
-        ]
+        embedders = {
+            'waveform': EnumEmbedder(4, enum_out_dim, keys[5]),
+            'filter_type': EnumEmbedder(5, enum_out_dim, keys[6]),
+            'filter_resonance': GatedNormedEmbedder(enum_out_dim, keys[10]),
+            'distortion': EnumEmbedder(3, enum_out_dim, keys[7]),
+            'phase_type': EnumEmbedder(4, enum_out_dim, keys[8]),
+            'start_params': sound_param_embedder,
+            'end_params': sound_param_embedder,  # shared
+        }
 
         super().__init__(keys[9], embedders, out_dim)
 
@@ -99,8 +99,8 @@ class WaveFrameEntityEmbedder(EntityEmbedder):
 
 class InstrumentEmbedder(ConcatEmbedder):
     """
-    Type-specific fields (e.g. KIT-only) are zeroed for inapplicable 
-    types, handled by GatedNormedEmbedder's gate and EnumEmbedder's 
+    Type-specific fields (e.g. KIT-only) are zeroed for inapplicable
+    types, handled by GatedNormedEmbedder's gate and EnumEmbedder's
     null position (index 0).
 
     Entity references (TABLE, SOFTSYNTH_ID) are passed in from outside
@@ -116,7 +116,6 @@ class InstrumentEmbedder(ConcatEmbedder):
         gated_out_dim: int = 16,
         out_dim: int = 128,
     ):
-        # 33 embedders + 1 projection key = 34
         keys = jr.split(key, 34)
         ki = iter(range(34))
 
@@ -127,59 +126,52 @@ class InstrumentEmbedder(ConcatEmbedder):
             return GatedNormedEmbedder(gated_out_dim, keys[next(ki)],
                                        1, 0, max_value)
 
-        embedders = [
+        embedders = {
             # --- Universal (all instrument types) ---
-            _enum(5),                    # TYPE_ID: PU=1, WAV=2, KIT=3, NOI=4
-            table_entity_embedder,       # TABLE
-            _enum(2),                    # TABLE_ON_OFF: 0=off, 1=on
-            _enum(2),                    # TABLE_AUTOMATE
-            _enum(2),                    # AUTOMATE_2
-            _enum(5),                    # PAN: 0=null, 1=off, 2=L, 3=R, 4=LR
-
+            'type_id': _enum(5),
+            'table': table_entity_embedder,
+            'table_on_off': _enum(2),
+            'table_automate': _enum(2),
+            'automate_2': _enum(2),
+            'pan': _enum(5),
             # --- All but Noise ---
-            _enum(5),                    # VIBRATO_TYPE: 0=null, 1-4
-            _enum(3),                    # VIBRATO_DIRECTION: 0=null, 1=down, 2=up
-
+            'vibrato_type': _enum(5),
+            'vibrato_direction': _enum(3),
             # --- Pulse / Noise ---
-            _gated(0x0F),               # ENV_VOLUME
-            _gated(0x0F),               # ENV_FADE
-            _gated(0x3F),               # LENGTH
-            _enum(3),                    # LENGTH_LIMITED
-            _gated(),                    # SWEEP
-
+            'env_volume': _gated(0x0F),
+            'env_fade': _gated(0x0F),
+            'length': _gated(0x3F),
+            'length_limited': _enum(3),
+            'sweep': _gated(),
             # --- WAV / KIT ---
-            _enum(5),                    # VOLUME: 0=null, 1-4
-
+            'volume': _enum(5),
             # --- Pulse only ---
-            _gated(),                    # PHASE_TRANSPOSE
-            _enum(5),                    # WAVE: 0=null, 1-4: 12.5/25/50/75%
-            _gated(0x0F),               # PHASE_FINETUNE
-
+            'phase_transpose': _gated(),
+            'wave': _enum(5),
+            'phase_finetune': _gated(0x0F),
             # --- WAV only ---
-            softsynth_entity_embedder,   # SOFTSYNTH_ID
-            _gated(0x0F),               # REPEAT
-            _enum(5),                    # PLAY_TYPE: 0=null, 1-4
-            _gated(0x0F),               # WAVE_LENGTH
-            _gated(0x0F),               # SPEED
-
+            'softsynth': softsynth_entity_embedder,
+            'repeat': _gated(0x0F),
+            'play_type': _enum(5),
+            'wave_length': _gated(0x0F),
+            'speed': _gated(0x0F),
             # --- KIT only ---
-            _enum(3),                    # KEEP_ATTACK_1
-            _enum(3),                    # KEEP_ATTACK_2
-            _gated(0x3F),               # KIT_1_ID
-            _gated(0x3F),               # KIT_2_ID
-            _gated(),                    # LENGTH_KIT_1
-            _gated(),                    # LENGTH_KIT_2
-            _enum(3),                    # LOOP_KIT_1
-            _enum(3),                    # LOOP_KIT_2
-            _gated(),                    # OFFSET_KIT_1
-            _gated(),                    # OFFSET_KIT_2
-            _enum(3),                    # HALF_SPEED
-            _gated(),                    # PITCH
-            _enum(5),                    # DISTORTION_TYPE: 0=null, 1-4
-
-            # Append waveframes for insrument ID (if WAV)
-            waveframe_entity_embedder,   # WAVEFRAME_ID
-        ]
+            'keep_attack_1': _enum(3),
+            'keep_attack_2': _enum(3),
+            'kit_1_id': _gated(0x3F),
+            'kit_2_id': _gated(0x3F),
+            'length_kit_1': _gated(),
+            'length_kit_2': _gated(),
+            'loop_kit_1': _enum(3),
+            'loop_kit_2': _enum(3),
+            'offset_kit_1': _gated(),
+            'offset_kit_2': _gated(),
+            'half_speed': _enum(3),
+            'pitch': _gated(),
+            'distortion_type': _enum(5),
+            # Append waveframes for instrument ID (if WAV)
+            'waveframe': waveframe_entity_embedder,
+        }
 
         proj_key = keys[next(ki)]
         super().__init__(proj_key, embedders, out_dim)

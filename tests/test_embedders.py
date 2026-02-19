@@ -24,8 +24,10 @@ from pe_lsdj.embedding.instrument import (
     WaveframeEmbedder,
 )
 from pe_lsdj.embedding.song import (
+    SongBanks,
     SongStepEmbedder,
     SequenceEmbedder,
+    set_banks,
 )
 from pe_lsdj.embedding.position import (
     SinusoidalPositionEncoding,
@@ -42,18 +44,9 @@ def _split(n):
 
 @pytest.fixture(scope="module")
 def song_step_embedder():
-    """Construct a full SongStepEmbedder with correctly-shaped mock banks."""
+    """Construct a full SongStepEmbedder with default (zero) banks."""
     k = jr.PRNGKey(33)
-
-    return SongStepEmbedder(
-        k,
-        instruments=jnp.zeros((64, INSTR_WIDTH)),
-        softsynths=jnp.zeros((16, SOFTSYNTH_WIDTH)),
-        waveframes=jnp.zeros((16, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
-        grooves=jnp.zeros((32, STEPS_PER_GROOVE * 2)),
-        tables=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
-        traces=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
-    )
+    return SongStepEmbedder(k)
 
 # ===================================================================
 # Basic embedder class structures
@@ -94,35 +87,35 @@ def test_entity_embedder_dims():
 
 def test_sum_embedder_offsets():
     k1, k2, k3 = _split(3)
-    e = SumEmbedder([
-        EnumEmbedder(5, 16, k1),
-        GatedNormedEmbedder(16, k2, in_dim=2),
-        GatedNormedEmbedder(16, k3, in_dim=1),
-    ])
-    assert e.offsets[-1] == e.in_dim
-    assert (0, 1, 3, 4) == e.offsets
+    e = SumEmbedder({
+        'a': EnumEmbedder(5, 16, k1),
+        'b': GatedNormedEmbedder(16, k2, in_dim=2),
+        'c': GatedNormedEmbedder(16, k3, in_dim=1),
+    })
+    assert e.in_dim == 4
+    assert e.offsets == {'a': 0, 'b': 1, 'c': 3}
 
 def test_concat_embedder_offsets():
     k1, k2, k3 = _split(3)
-    e = ConcatEmbedder(k3, [
-        EnumEmbedder(5, 16, k1),
-        GatedNormedEmbedder(16, k2, in_dim=2),
-    ], out_dim=8)
-    assert e.offsets[-1] == e.in_dim
-    assert (0, 1, 3) == e.offsets
+    e = ConcatEmbedder(k3, {
+        'a': EnumEmbedder(5, 16, k1),
+        'b': GatedNormedEmbedder(16, k2, in_dim=2),
+    }, out_dim=8)
+    assert e.in_dim == 3
+    assert e.offsets == {'a': 0, 'b': 1}
 
 def test_sum_embedder_rejects_mismatched_out_dims():
     k1, k2 = _split(2)
     with pytest.raises(AssertionError, match="out_dims must match"):
-        SumEmbedder([
-            EnumEmbedder(5, 16, k1),
-            EnumEmbedder(5, 32, k2),
-        ])
+        SumEmbedder({
+            'a': EnumEmbedder(5, 16, k1),
+            'b': EnumEmbedder(5, 32, k2),
+        })
 
 def test_concat_embedder_projection_sharing():
     k1, k2, k3, k4 = _split(4)
-    e1 = ConcatEmbedder(k1, [EnumEmbedder(5, 16, k2)], out_dim=8)
-    e2 = ConcatEmbedder(k3, [EnumEmbedder(5, 16, k4)], out_dim=8,
+    e1 = ConcatEmbedder(k1, {'a': EnumEmbedder(5, 16, k2)}, out_dim=8)
+    e2 = ConcatEmbedder(k3, {'a': EnumEmbedder(5, 16, k4)}, out_dim=8,
                          _projection=e1.projection)
     assert e2.projection is e1.projection
 
@@ -135,11 +128,10 @@ def test_fx_value_embedder_structure():
     subs = build_fx_value_embedders(64, k2, ge)
     dummy = DummyEmbedder(1, 64)
     e = FXValueEmbedder(dummy, subs)
-    assert e.offsets[-1] == e.in_dim
     assert e.in_dim == FX_VALUES_FEATURE_DIM
     assert e.out_dim == 64
     # All sub-embedder out_dims must be 64
-    for sub in e.embedders:
+    for sub in e.embedders.values():
         assert sub.out_dim == 64
 
 def test_fx_embedder_in_dim():
@@ -164,7 +156,7 @@ def test_table_embedder_fx_weight_sharing():
     fxv = FXValueEmbedder(dummy, subs)
     fx_emb = FXEmbedder(k3, fxv, 64)
     te = TableEmbedder(64, k4, fx_emb)
-    assert te.embedders[te.fx1_idx] is te.embedders[te.fx2_idx]
+    assert te.embedders['fx1'] is te.embedders['fx2']
 
 def test_table_embedder_in_dim_matches_table_width():
     k1, k2, k3, k4 = _split(4)
@@ -181,8 +173,7 @@ def test_table_embedder_in_dim_matches_table_width():
 
 def test_softsynth_param_weight_sharing():
     se = SoftsynthEmbedder(KEY)
-    # start_params and end_params (indices 5 and 6) share weights
-    assert se.embedders[5] is se.embedders[6]
+    assert se.embedders['start_params'] is se.embedders['end_params']
 
 # --- Entity bank / inner embedder compatibility ---
 
@@ -193,20 +184,19 @@ def test_entity_bank_compat(song_step_embedder):
 
 def test_table_entity_bank_compat(song_step_embedder):
     # Table entity bank columns == TableEmbedder.in_dim
-    te = song_step_embedder.instrument_embedder.embedder.embedders[1]
+    te = song_step_embedder.instrument_embedder.embedder.embedders['table']
     assert te.entity_bank.shape[1] == te.embedder.in_dim
 
 def test_softsynth_entity_bank_compat(song_step_embedder):
-    se = song_step_embedder.instrument_embedder.embedder.embedders[17]
+    se = song_step_embedder.instrument_embedder.embedder.embedders['softsynth']
     assert se.entity_bank.shape[1] == se.embedder.in_dim
 
 def test_waveframe_entity_bank_compat(song_step_embedder):
-    we = song_step_embedder.instrument_embedder.embedder.embedders[-1]
+    we = song_step_embedder.instrument_embedder.embedder.embedders['waveframe']
     assert we.entity_bank.shape[1] == we.embedder.in_dim
 
 def test_groove_entity_bank_compat(song_step_embedder):
-    # Groove embedder is inside fx_embedder -> fx_value -> embedders[1]
-    ge = song_step_embedder.fx_embedder.embedders[1].embedders[1]
+    ge = song_step_embedder.fx_embedder.embedders['value'].embedders['groove']
     assert ge.entity_bank.shape[1] == ge.embedder.in_dim
 
 # --- Two-tier table embedding projection sharing ---
@@ -215,16 +205,16 @@ def test_tier_projection_sharing(song_step_embedder):
     # Phrase FXEmbedder shares projection with tier 0
     phrase_fx = song_step_embedder.fx_embedder
     # The table entity embedder inside phrase FX value embedder
-    table_entity_embedder = phrase_fx.embedders[1].embedders[0]
+    table_entity = phrase_fx.embedders['value'].embedders['table_fx']
     # table_entity.embedder is Tier 1 TableEmbedder
-    tier1_table = table_entity_embedder.embedder
+    tier1_table = table_entity.embedder
     # Tier 1 FXEmbedder is inside tier1_table
-    tier1_fx = tier1_table.embedders[tier1_table.fx1_idx]
+    tier1_fx = tier1_table.embedders['fx1']
     # Trace entity is inside tier1 FXValueEmbedder
-    trace_entity_embedder = tier1_fx.embedders[1].embedders[0]
+    trace_entity = tier1_fx.embedders['value'].embedders['table_fx']
     # trace_entity.embedder is Tier 0 TableEmbedder
-    tier0_table = trace_entity_embedder.embedder
-    tier0_fx = tier0_table.embedders[tier0_table.fx1_idx]
+    tier0_table = trace_entity.embedder
+    tier0_fx = tier0_table.embedders['fx1']
     # Verify projection sharing
     assert phrase_fx.projection is tier0_fx.projection
     assert tier1_fx.projection is tier0_fx.projection
@@ -274,20 +264,20 @@ class TestForwardPassShapes:
 
     def test_sum_embedder(self):
         k1, k2, k3 = _split(3)
-        e = SumEmbedder([
-            EnumEmbedder(5, 16, k1),
-            GatedNormedEmbedder(16, k2, in_dim=2),
-            GatedNormedEmbedder(16, k3),
-        ])
+        e = SumEmbedder({
+            'a': EnumEmbedder(5, 16, k1),
+            'b': GatedNormedEmbedder(16, k2, in_dim=2),
+            'c': GatedNormedEmbedder(16, k3),
+        })
         out = e(jnp.array([3, 100, 50, 42]))
         assert out.shape == (16,)
 
     def test_concat_embedder(self):
         k1, k2, k3 = _split(3)
-        e = ConcatEmbedder(k3, [
-            EnumEmbedder(5, 16, k1),
-            GatedNormedEmbedder(32, k2, in_dim=2),
-        ], out_dim=8)
+        e = ConcatEmbedder(k3, {
+            'a': EnumEmbedder(5, 16, k1),
+            'b': GatedNormedEmbedder(32, k2, in_dim=2),
+        }, out_dim=8)
         out = e(jnp.array([3, 100, 50]))
         assert out.shape == (8,)
 
@@ -370,12 +360,12 @@ class TestForwardPassShapes:
     def test_song_step_embedder_zero(self, song_step_embedder):
         step = jnp.zeros((4, 21))
         out = song_step_embedder(step)
-        assert out.shape == (4, 128)
+        assert out.shape == (4, 256)
 
     def test_song_step_embedder_nonzero(self, song_step_embedder):
         step = jnp.ones((4, 21))
         out = song_step_embedder(step)
-        assert out.shape == (4, 128)
+        assert out.shape == (4, 256)
         assert jnp.linalg.norm(out) > 0
     
     # --- Null value behavior ---
@@ -459,21 +449,21 @@ class TestForwardPassShapes:
         out = e(probs, soft=True)
         assert out.shape == (16,)
 
+    def test_song_step_embedder_default_banks(self):
+        """SongStepEmbedder with no banks arg should produce valid output."""
+        step = jnp.zeros((4, 21))
+        emb = SongStepEmbedder(jr.PRNGKey(99))
+        out = emb(step)
+        assert out.shape == (4, 256)
+
     # --- Real data ---
 
     def test_song_step_on_real_data(self, song_file):
         k = jr.PRNGKey(33)
-        song_step_embedder = SongStepEmbedder(
-            k,
-            song_file.instruments_array,
-            song_file.softsynths_array,
-            song_file.waveframes_array,
-            song_file.grooves_array,
-            song_file.tables_array,
-            song_file.traces_array,
-        )
+        banks = SongBanks.from_songfile(song_file)
+        song_step_embedder = SongStepEmbedder(k, banks=banks)
         out = song_step_embedder(song_file.song_tokens[0])
-        assert out.shape == (4, 128)
+        assert out.shape == (4, 256)
         assert jnp.linalg.norm(out) > 0
 
 
@@ -542,22 +532,103 @@ class TestSequenceEmbedder:
         seq_emb = SequenceEmbedder(song_step_embedder, KEY)
         tokens = jnp.zeros((32, 4, 21))
         out = seq_emb(tokens)
-        assert out.shape == (32, 4, 128)
+        assert out.shape == (32, 4, 256)
 
     def test_on_real_data(self, song_file):
         k1, k2 = jr.split(jr.PRNGKey(33))
-        step_emb = SongStepEmbedder(
-            k1,
-            song_file.instruments_array,
-            song_file.softsynths_array,
-            song_file.waveframes_array,
-            song_file.grooves_array,
-            song_file.tables_array,
-            song_file.traces_array,
-        )
+        banks = SongBanks.from_songfile(song_file)
+        step_emb = SongStepEmbedder(k1, banks=banks)
         seq_emb = SequenceEmbedder(step_emb, k2)
         # Embed first 32 steps
         tokens = song_file.song_tokens[:32]
         out = seq_emb(tokens)
-        assert out.shape == (32, 4, 128)
+        assert out.shape == (32, 4, 256)
         assert jnp.linalg.norm(out) > 0
+
+
+# ===================================================================
+# Bank swapping
+# ===================================================================
+
+class TestSongBanks:
+
+    def test_default_shapes(self):
+        banks = SongBanks.default()
+        assert banks.instruments.shape == (NUM_INSTRUMENTS, INSTR_WIDTH)
+        assert banks.softsynths.shape == (NUM_SYNTHS, SOFTSYNTH_WIDTH)
+        assert banks.waveframes.shape == (NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE)
+        assert banks.grooves.shape == (NUM_GROOVES, STEPS_PER_GROOVE * 2)
+        assert banks.tables.shape == (NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)
+        assert banks.traces.shape == (NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)
+
+    def test_from_songfile(self, song_file):
+        banks = SongBanks.from_songfile(song_file)
+        assert banks.instruments.shape == (NUM_INSTRUMENTS, INSTR_WIDTH)
+        assert banks.tables.shape == (NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)
+
+
+class TestSetBanks:
+
+    def test_set_banks_changes_output(self, song_step_embedder):
+        """Swapping in non-zero banks should change the embedding output."""
+        seq_emb = SequenceEmbedder(song_step_embedder, KEY)
+        tokens = jnp.zeros((4, 4, 21))
+
+        out_before = seq_emb(tokens)
+
+        # Swap in banks with non-zero data
+        banks = SongBanks(
+            instruments=jnp.ones((NUM_INSTRUMENTS, INSTR_WIDTH)),
+            softsynths=jnp.ones((NUM_SYNTHS, SOFTSYNTH_WIDTH)),
+            waveframes=jnp.ones((NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
+            grooves=jnp.ones((NUM_GROOVES, STEPS_PER_GROOVE * 2)),
+            tables=jnp.ones((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
+            traces=jnp.ones((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
+        )
+        seq_emb2 = seq_emb.with_banks(banks)
+        out_after = seq_emb2(tokens)
+
+        assert not jnp.allclose(out_before, out_after)
+
+    def test_set_banks_matches_direct_construction(self, song_file):
+        """set_banks should produce the same result as constructing with those banks."""
+        k1, k2 = jr.split(jr.PRNGKey(42))
+
+        # Direct construction with song banks
+        banks = SongBanks.from_songfile(song_file)
+        step_direct = SongStepEmbedder(k1, banks=banks)
+        seq_direct = SequenceEmbedder(step_direct, k2)
+
+        # Construction with defaults, then bank swap
+        step_default = SongStepEmbedder(k1)
+        seq_swapped = SequenceEmbedder(step_default, k2).with_banks(banks)
+
+        tokens = song_file.song_tokens[:8]
+        out_direct = seq_direct(tokens)
+        out_swapped = seq_swapped(tokens)
+        assert jnp.allclose(out_direct, out_swapped, atol=1e-5)
+
+    def test_set_banks_preserves_learned_params(self, song_step_embedder):
+        """Bank swapping should not change any learned parameters."""
+        seq_emb = SequenceEmbedder(song_step_embedder, KEY)
+
+        banks = SongBanks(
+            instruments=jnp.ones((NUM_INSTRUMENTS, INSTR_WIDTH)),
+            softsynths=jnp.ones((NUM_SYNTHS, SOFTSYNTH_WIDTH)),
+            waveframes=jnp.ones((NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
+            grooves=jnp.ones((NUM_GROOVES, STEPS_PER_GROOVE * 2)),
+            tables=jnp.ones((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
+            traces=jnp.ones((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
+        )
+        seq_emb2 = seq_emb.with_banks(banks)
+
+        # Channel projections should be identical
+        assert jnp.array_equal(
+            seq_emb.step_embedder.channel_projections,
+            seq_emb2.step_embedder.channel_projections,
+        )
+        # FX cmd embedding weights should be identical
+        assert jnp.array_equal(
+            seq_emb.step_embedder.fx_embedder.embedders['cmd'].projection.weight,
+            seq_emb2.step_embedder.fx_embedder.embedders['cmd'].projection.weight,
+        )

@@ -131,30 +131,36 @@ class EntityEmbedder(BaseEmbedder):
 
 
 def _offsets(embedders):
-    return (0, *accumulate(e.in_dim for e in embedders))
+    """Returns dict mapping embedder name → start position."""
+    pos = 0
+    offsets = {}
+    for name, e in embedders.items():
+        offsets[name] = pos
+        pos += e.in_dim
+    return offsets
 
 
 class SumEmbedder(BaseEmbedder):
     """
     Aggregates embeddings by summing.
     """
-    embedders: list[BaseEmbedder]
-    offsets: tuple
+    embedders: dict[str, BaseEmbedder]
+    offsets: dict
 
-    def __init__(self, embedders: list[BaseEmbedder]):
-        self.embedders = embedders
-        self.offsets = _offsets(embedders)
-        out_dims = [e.out_dim for e in embedders]
+    def __init__(self, embedders: dict[str, BaseEmbedder]):
+        self.embedders = dict(sorted(embedders.items()))
+        self.offsets = _offsets(self.embedders)
+        out_dims = [e.out_dim for e in self.embedders.values()]
         assert all(d == out_dims[0] for d in out_dims), (
             f"SumEmbedder: all sub-embedder out_dims must match, got {out_dims}"
         )
-        self.in_dim = self.offsets[-1]
+        self.in_dim = sum(e.in_dim for e in embedders.values())
         self.out_dim = out_dims[0]
 
     def __call__(self, x):
         embeddings = [
-            e(x[self.offsets[i]:self.offsets[i+1]])
-            for i, e in enumerate(self.embedders)
+            e(x[self.offsets[name]:self.offsets[name] + e.in_dim])
+            for name, e in self.embedders.items()
         ]
         return jax.tree.reduce(jnp.add, embeddings)
 
@@ -163,17 +169,17 @@ class ConcatEmbedder(BaseEmbedder):
     """
     Aggregates embeddings by concatenating, then projects.
     """
-    embedders: list[BaseEmbedder]
-    offsets: tuple
+    embedders: dict[str, BaseEmbedder]
+    offsets: dict
     projection: eqx.nn.Linear
 
-    def __init__(self, key, embedders: list[BaseEmbedder], out_dim: int,
+    def __init__(self, key, embedders: dict[str, BaseEmbedder], out_dim: int,
                  *, _projection=None):
-        self.embedders = embedders
-        self.offsets = _offsets(embedders)
-        self.in_dim = self.offsets[-1]
+        self.embedders = dict(sorted(embedders.items()))
+        self.offsets = _offsets(self.embedders)
+        self.in_dim = sum(e.in_dim for e in self.embedders.values())
         self.out_dim = out_dim
-        concat_dim = sum(e.out_dim for e in embedders)
+        concat_dim = sum(e.out_dim for e in self.embedders.values())
         if _projection is not None:
             self.projection = _projection
         else:
@@ -186,8 +192,8 @@ class ConcatEmbedder(BaseEmbedder):
 
     def __call__(self, x):
         embeddings = jnp.concatenate([
-            e(x[self.offsets[i]:self.offsets[i+1]])
-            for i, e in enumerate(self.embedders)
+            e(x[self.offsets[name]:self.offsets[name] + e.in_dim])
+            for name, e in self.embedders.items()
         ])
         return self.projection(embeddings)
 

@@ -28,6 +28,8 @@ from pe_lsdj.embedding.position import (
     ChannelPositionEmbedder,
 )
 from pe_lsdj.embedding.song import (
+    SongBanks,
     SongStepEmbedder,
     SequenceEmbedder,
+    set_banks,
 )

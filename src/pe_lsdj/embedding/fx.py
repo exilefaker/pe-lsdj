@@ -33,35 +33,36 @@ def build_fx_value_embedders(out_dim, key, groove_embedder):
     """
     Build shared sub-embedders for FX value columns 1..11.
     Column order matches FX_VALUE_KEYS[1:].
+    Returns dict[str, BaseEmbedder].
     """
     keys = jr.split(key, 10)
     ki = iter(range(10))
 
-    return [
-        groove_embedder,                                          # GROOVE_FX (1)
-        GatedNormedEmbedder(out_dim, keys[next(ki)], 1, 0, 255),  # HOP_FX (1)
-        EnumEmbedder(4, out_dim, keys[next(ki)]),                 # PAN_FX (1)
-        GatedNormedEmbedder(out_dim, keys[next(ki)], 2, 0, 0x0F), # CHORD (2)
-        GatedNormedEmbedder(out_dim, keys[next(ki)], 2, 0, 0x0F), # ENV (2)
-        GatedNormedEmbedder(out_dim, keys[next(ki)], 2, 0, 0x0F), # RETRIG (2)
-        GatedNormedEmbedder(out_dim, keys[next(ki)], 2, 0, 0x0F), # VIBRATO (2)
-        GatedNormedEmbedder(out_dim, keys[next(ki)], 1, 0, 255),  # VOLUME_FX (1)
-        EnumEmbedder(4, out_dim, keys[next(ki)]),                 # WAVE_FX (1)
-        GatedNormedEmbedder(out_dim, keys[next(ki)], 2, 0, 0x0F), # RANDOM (2)
-        GatedNormedEmbedder(out_dim, keys[next(ki)], 1, 0, 255),  # CONTINUOUS_FX (1)
-    ]
+    return {
+        'groove': groove_embedder,
+        'hop': GatedNormedEmbedder(out_dim, keys[next(ki)], 1, 0, 255),
+        'pan': EnumEmbedder(4, out_dim, keys[next(ki)]),
+        'chord': GatedNormedEmbedder(out_dim, keys[next(ki)], 2, 0, 0x0F),
+        'env': GatedNormedEmbedder(out_dim, keys[next(ki)], 2, 0, 0x0F),
+        'retrig': GatedNormedEmbedder(out_dim, keys[next(ki)], 2, 0, 0x0F),
+        'vibrato': GatedNormedEmbedder(out_dim, keys[next(ki)], 2, 0, 0x0F),
+        'volume': GatedNormedEmbedder(out_dim, keys[next(ki)], 1, 0, 255),
+        'wave': EnumEmbedder(4, out_dim, keys[next(ki)]),
+        'random': GatedNormedEmbedder(out_dim, keys[next(ki)], 2, 0, 0x0F),
+        'continuous': GatedNormedEmbedder(out_dim, keys[next(ki)], 1, 0, 255),
+    }
 
 
 class FXValueEmbedder(SumEmbedder):
     """
     17-column FX value embedder aligned with FX_VALUE_KEYS.
-    Position 0 (TABLE_FX) is configurable per tier:
+    Position 'table_fx' is configurable per tier:
       - Tier 0: DummyEmbedder (base case, no table lookup)
       - Tier 1: EntityEmbedder over traces bank
       - Phrase: EntityEmbedder over tables bank
     """
     def __init__(self, table_fx_embedder, shared_embedders):
-        super().__init__([table_fx_embedder] + list(shared_embedders))
+        super().__init__({'table_fx': table_fx_embedder, **shared_embedders})
 
 
 class FXEmbedder(ConcatEmbedder):
@@ -70,7 +71,7 @@ class FXEmbedder(ConcatEmbedder):
                  *, _projection=None):
         k1, k2 = jr.split(key)
         cmd_embedder = EnumEmbedder(19, cmd_out_dim, k1)
-        embedders = [cmd_embedder, fx_value_embedder]
+        embedders = {'cmd': cmd_embedder, 'value': fx_value_embedder}
         super().__init__(k2, embedders, out_dim, _projection=_projection)
 
 
@@ -83,12 +84,10 @@ class TableEmbedder(BaseEmbedder):
     Input:  (STEPS_PER_TABLE * TABLE_WIDTH,) = (624,)
     Output: (out_dim,)
     """
-    embedders: list[BaseEmbedder]
-    offsets: tuple
+    embedders: dict[str, BaseEmbedder]
+    offsets: dict
     projection: eqx.nn.Linear
     fx_col_position: EnumEmbedder
-    fx1_idx: int
-    fx2_idx: int
 
     def __init__(self, out_dim, key, fx_embedder, *, _projection=None):
         keys = jr.split(key, 6)
@@ -98,22 +97,19 @@ class TableEmbedder(BaseEmbedder):
             (1, 0, 0x0F),  # env_duration
             (1, 0, 255),   # transpose
         ]
-        env_embedders = [
-            GatedNormedEmbedder(out_dim, keys[idx], *params)
-            for idx, params in enumerate(PARAMS)
-        ]
 
-        embedders = list(env_embedders)
-        self.fx1_idx = len(embedders)
-        embedders.append(fx_embedder)
-        self.fx2_idx = len(embedders)
-        embedders.append(fx_embedder)
+        self.embedders = dict(sorted({
+            'env_volume': GatedNormedEmbedder(out_dim, keys[0], *PARAMS[0]),
+            'env_duration': GatedNormedEmbedder(out_dim, keys[1], *PARAMS[1]),
+            'transpose': GatedNormedEmbedder(out_dim, keys[2], *PARAMS[2]),
+            'fx1': fx_embedder,
+            'fx2': fx_embedder,
+        }.items()))
 
-        self.embedders = embedders
-        self.offsets = _offsets(embedders)
+        self.offsets = _offsets(self.embedders)
         self.fx_col_position = EnumEmbedder(2, fx_embedder.out_dim, keys[3])
 
-        step_concat_dim = sum(e.out_dim for e in embedders)
+        step_concat_dim = sum(e.out_dim for e in self.embedders.values())
         if _projection is None:
             _projection = eqx.nn.Linear(
                 in_features=STEPS_PER_TABLE * step_concat_dim,
@@ -123,17 +119,18 @@ class TableEmbedder(BaseEmbedder):
             )
         self.projection = _projection
 
-        self.in_dim = STEPS_PER_TABLE * self.offsets[-1]
+        step_in_dim = sum(e.in_dim for e in self.embedders.values())
+        self.in_dim = STEPS_PER_TABLE * step_in_dim
         self.out_dim = out_dim
 
     def _embed_step(self, x):
         """Embed one table step (TABLE_WIDTH,) -> (step_concat_dim,)."""
         embeddings = []
-        for i, e in enumerate(self.embedders):
-            emb = e(x[self.offsets[i]:self.offsets[i+1]])
-            if i == self.fx1_idx:
+        for name, e in self.embedders.items():
+            emb = e(x[self.offsets[name]:self.offsets[name] + e.in_dim])
+            if name == 'fx1':
                 emb = emb + self.fx_col_position(jnp.array(0))
-            elif i == self.fx2_idx:
+            elif name == 'fx2':
                 emb = emb + self.fx_col_position(jnp.array(1))
             embeddings.append(emb)
         return jnp.concatenate(embeddings)

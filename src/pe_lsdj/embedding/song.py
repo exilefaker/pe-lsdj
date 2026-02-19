@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import equinox as eqx
+from typing import NamedTuple
 
 from pe_lsdj import SongFile
 from pe_lsdj.constants import *
@@ -28,6 +29,90 @@ from pe_lsdj.embedding.position import (
     ChannelPositionEmbedder,
 )
 from jaxtyping import Array, Key
+
+
+class SongBanks(NamedTuple):
+    """All per-song entity banks needed by the embedding pipeline."""
+    instruments: Array   # (NUM_INSTRUMENTS, INSTR_WIDTH)
+    softsynths: Array    # (NUM_SYNTHS, SOFTSYNTH_WIDTH)
+    waveframes: Array    # (NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE)
+    grooves: Array       # (NUM_GROOVES, STEPS_PER_GROOVE * 2)
+    tables: Array        # (NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)
+    traces: Array        # (NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)
+
+    @classmethod
+    def default(cls):
+        """Zero-filled banks with correct shapes."""
+        return cls(
+            instruments=jnp.zeros((NUM_INSTRUMENTS, INSTR_WIDTH)),
+            softsynths=jnp.zeros((NUM_SYNTHS, SOFTSYNTH_WIDTH)),
+            waveframes=jnp.zeros((NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
+            grooves=jnp.zeros((NUM_GROOVES, STEPS_PER_GROOVE * 2)),
+            tables=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
+            traces=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
+        )
+
+    @classmethod
+    def from_songfile(cls, songfile: SongFile):
+        return cls(
+            instruments=songfile.instruments_array,
+            softsynths=songfile.softsynths_array,
+            waveframes=songfile.waveframes_array,
+            grooves=songfile.grooves_array,
+            tables=songfile.tables_array,
+            traces=songfile.traces_array,
+        )
+
+
+def _prepend_null_row(bank):
+    """Prepend a zero row for null_entry=True entity embedders."""
+    return jnp.concatenate(
+        [jnp.zeros((1, bank.shape[1]), bank.dtype), bank], axis=0
+    )
+
+
+def _augment_instruments(instruments):
+    """Append softsynth_id column as waveframe reference."""
+    waveframe_ref = instruments[:, InstrumentEntityEmbedder.SOFTSYNTH_COL:
+                                   InstrumentEntityEmbedder.SOFTSYNTH_COL + 1]
+    return jnp.concatenate([instruments, waveframe_ref], axis=1)
+
+
+def set_banks(step_embedder, banks: SongBanks):
+    """
+    Swap all per-song entity banks in a SongStepEmbedder.
+
+    Uses id()-based leaf replacement to correctly handle shared references
+    (grooves across tiers, tables between FX/instrument chains, fx1/fx2
+    weight sharing, tier projection sharing, etc.).  Learned params stay
+    shared; each bank is replaced at every occurrence.
+    """
+    # Map old bank id → new array.  Shared banks have the same id(),
+    # so every occurrence in the flattened leaf list gets replaced.
+    replacements = {
+        id(step_embedder.instrument_embedder.entity_bank):
+            _augment_instruments(banks.instruments),
+        id(step_embedder.instrument_embedder.embedder
+           .embedders['softsynth'].entity_bank):
+            _prepend_null_row(banks.softsynths),
+        id(step_embedder.instrument_embedder.embedder
+           .embedders['waveframe'].entity_bank):
+            _prepend_null_row(banks.waveframes),
+        id(step_embedder.fx_embedder.embedders['value']
+           .embedders['table_fx'].entity_bank):
+            banks.tables,
+        id(step_embedder.fx_embedder.embedders['value']
+           .embedders['table_fx'].embedder.embedders['fx1']
+           .embedders['value'].embedders['table_fx'].entity_bank):
+            banks.traces,
+        id(step_embedder.fx_embedder.embedders['value']
+           .embedders['groove'].entity_bank):
+            _prepend_null_row(banks.grooves),
+    }
+
+    leaves, treedef = jax.tree.flatten(step_embedder)
+    new_leaves = [replacements.get(id(leaf), leaf) for leaf in leaves]
+    return treedef.unflatten(new_leaves)
 
 
 class SongStepEmbedder(eqx.Module):
@@ -66,13 +151,9 @@ class SongStepEmbedder(eqx.Module):
     def __init__(
         self,
         key: Key,
-        instruments: Array,
-        softsynths: Array,
-        waveframes: Array,
-        grooves: Array,
-        tables: Array,
-        traces: Array,
-        out_dim: int = 512,
+        *,
+        banks: SongBanks | None = None,
+        out_dim: int = 1024,
         note_dim: int = 128,
         instr_dim: int = 128,
         fx_dim: int = 128,
@@ -82,6 +163,15 @@ class SongStepEmbedder(eqx.Module):
         softsynth_dim: int = 64,
         waveframe_dim: int = 32,
     ):
+        if banks is None:
+            banks = SongBanks.default()
+        instruments = banks.instruments
+        softsynths = banks.softsynths
+        waveframes = banks.waveframes
+        grooves = banks.grooves
+        tables = banks.tables
+        traces = banks.traces
+
         assert out_dim % 4 == 0, f"out_dim must be divisible by 4, got {out_dim}"
         per_ch_dim = out_dim // 4
         self.per_ch_dim = per_ch_dim
@@ -196,13 +286,8 @@ class SongStepEmbedder(eqx.Module):
     def from_songfile(cls, key: Key, songfile: SongFile, **kwargs):
         return cls(
             key,
-            songfile.instruments_array,
-            songfile.softsynths_array,
-            songfile.waveframes_array,
-            songfile.grooves_array,
-            songfile.tables_array,
-            songfile.traces_array,
-            **kwargs
+            banks=SongBanks.from_songfile(songfile),
+            **kwargs,
         )
 
 
@@ -225,6 +310,17 @@ class SequenceEmbedder(eqx.Module):
         self.global_position = SinusoidalPositionEncoding(d)
         self.phrase_position = PhrasePositionEmbedder(d, k1)
         self.channel_position = ChannelPositionEmbedder(d, k2)
+
+    @classmethod
+    def create(cls, key: Key, *, banks: SongBanks | None = None, **step_kwargs):
+        k1, k2 = jr.split(key)
+        step = SongStepEmbedder(k1, banks=banks, **step_kwargs)
+        return cls(step, k2)
+
+    def with_banks(self, banks: SongBanks):
+        """Return a new SequenceEmbedder with swapped entity banks."""
+        new_step = set_banks(self.step_embedder, banks)
+        return eqx.tree_at(lambda m: m.step_embedder, self, new_step)
 
     def __call__(self, song_tokens):
         S = song_tokens.shape[0]
