@@ -91,7 +91,7 @@ def set_banks(step_embedder, banks: SongBanks):
     # so every occurrence in the flattened leaf list gets replaced.
     replacements = {
         id(step_embedder.instrument_embedder.entity_bank):
-            _augment_instruments(banks.instruments),
+            _prepend_null_row(_augment_instruments(banks.instruments)),
         id(step_embedder.instrument_embedder.embedder
            .embedders['softsynth'].entity_bank):
             _prepend_null_row(banks.softsynths),
@@ -218,14 +218,12 @@ class SongStepEmbedder(eqx.Module):
             keys[8],
             softsynths,
             softsynth_dim,
-            null_entry=True,
         )
 
         waveframe_embedder = WaveFrameEntityEmbedder(
             keys[9],
             waveframes,
             waveframe_dim,
-            null_entry=True,
         )
 
         self.instrument_embedder = InstrumentEntityEmbedder(

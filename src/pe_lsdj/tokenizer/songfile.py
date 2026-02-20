@@ -128,7 +128,7 @@ class SongFile(eqx.Module):
 
         phrase_instrument_ids = raw_data[PHRASE_INSTR_ADDR].reshape(
             (NUM_PHRASES, STEPS_PER_PHRASE)
-        ).astype(jnp.uint8)
+        ).astype(jnp.uint8) + 1 # Instruments may be NULL / 255
 
         # Chain level: per channel, find the played chain block
         active_song_chains = []

@@ -56,7 +56,6 @@ class SoftsynthEntityEmbedder(EntityEmbedder):
         enum_out_dim=32,
         sound_param_out_dim=16,
         continuous_out_dim=16,
-        **kwargs
     ):
         super().__init__(
             softsynths,
@@ -67,7 +66,7 @@ class SoftsynthEntityEmbedder(EntityEmbedder):
                 continuous_out_dim,
                 out_dim,
             ),
-            **kwargs
+            null_entry=True,  # 0 = null (non-WAV instruments)
         )
 
 
@@ -89,7 +88,7 @@ class WaveframeEmbedder(BaseEmbedder):
 
 
 class WaveFrameEntityEmbedder(EntityEmbedder):
-    def __init__(self, key, waveframes: Array, out_dim: int, **kwargs):
+    def __init__(self, key, waveframes: Array, out_dim: int):
         super().__init__(
             waveframes,
             WaveframeEmbedder(key, out_dim),
@@ -205,5 +204,6 @@ class InstrumentEntityEmbedder(EntityEmbedder):
                 softsynth_entity_embedder,
                 waveframe_entity_embedder,
                 out_dim=out_dim,
-            )
+            ),
+            null_entry=True,
         )

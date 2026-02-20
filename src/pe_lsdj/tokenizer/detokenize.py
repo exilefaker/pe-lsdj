@@ -538,8 +538,8 @@ def repack_song(
     # Phrase FX commands: repack to raw bytes
     fx_cmd_bytes = fx_cmd_flat.astype(jnp.uint8).tolist()
 
-    # Phrase instruments: raw byte values (no +1 offset in song_tokens)
-    phrase_instr_bytes = phrase_instr_out.ravel().tolist()
+    # Phrase instruments: raw byte values - 1 for offset
+    phrase_instr_bytes = (phrase_instr_out - 1).ravel().tolist()
 
     # 8. Set allocation tables
     phrase_alloc = np.zeros(32, dtype=np.uint8)
