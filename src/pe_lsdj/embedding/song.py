@@ -44,12 +44,12 @@ class SongBanks(NamedTuple):
     def default(cls):
         """Zero-filled banks with correct shapes."""
         return cls(
-            instruments=jnp.zeros((NUM_INSTRUMENTS, INSTR_WIDTH)),
-            softsynths=jnp.zeros((NUM_SYNTHS, SOFTSYNTH_WIDTH)),
-            waveframes=jnp.zeros((NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
-            grooves=jnp.zeros((NUM_GROOVES, STEPS_PER_GROOVE * 2)),
-            tables=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
-            traces=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
+            instruments=jnp.zeros((NUM_INSTRUMENTS, INSTR_WIDTH), dtype=jnp.uint8),
+            softsynths=jnp.zeros((NUM_SYNTHS, SOFTSYNTH_WIDTH), dtype=jnp.uint8),
+            waveframes=jnp.zeros((NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE), dtype=jnp.uint8),
+            grooves=jnp.zeros((NUM_GROOVES, STEPS_PER_GROOVE * 2), dtype=jnp.uint8),
+            tables=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH), dtype=jnp.uint8),
+            traces=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH), dtype=jnp.uint8),
         )
 
     @classmethod

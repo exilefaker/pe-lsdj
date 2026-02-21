@@ -10,6 +10,7 @@ authors = [
 urls = { repository = "..." }
 
 dependencies = [
+    "bitstring>=4.3.1",
     "equinox>=0.11.2",
     "jaxtyping>=0.2.23",
     "rich>=14.2.0",

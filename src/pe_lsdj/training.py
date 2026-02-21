@@ -97,7 +97,7 @@ def train(
     samples random crops, and runs one gradient step.
     """
     optimizer = optax.adam(lr)
-    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
 
     checkpoint_manager = ocp.CheckpointManager(
         checkpoint_path, 
