@@ -14,6 +14,7 @@ dependencies = [
     "jaxtyping>=0.2.23",
     "rich>=14.2.0",
     "numpy>=2.4.1",
+    "orbax>=0.1.9",
     "optax>=0.2.5",
 ]
 
@@ -24,6 +25,7 @@ testing = [
 ]
 
 examples = [
+    "ipykernel>=7.2.0",
     "jupyter>=1.0",
     "matplotlib>=3.7.1",
     "Pillow>=12.1.0",

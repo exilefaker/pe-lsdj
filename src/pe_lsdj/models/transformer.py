@@ -181,6 +181,9 @@ class AxialTransformerBlock(eqx.Module):
       1. Temporal self-attention (causal, per channel)
       2. Cross-channel self-attention (full, per timestep)
       3. Position-wise MLP
+
+      Axial attention:
+        https://arxiv.org/abs/1912.12180
     """
     temporal_attn: eqx.nn.MultiheadAttention
     channel_attn: eqx.nn.MultiheadAttention

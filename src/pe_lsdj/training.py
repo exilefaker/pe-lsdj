@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import equinox as eqx
+import orbax.checkpoint as ocp
 import optax
 from jaxtyping import Array, Key
 
@@ -87,6 +88,7 @@ def train(
     lr: float = 3e-4,
     key: Key,
     log_every: int = 50,
+    checkpoint_path: str | None = None,
 ):
     """
     Per-song batching training loop.
@@ -96,6 +98,14 @@ def train(
     """
     optimizer = optax.adam(lr)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+
+    checkpoint_manager = ocp.CheckpointManager(
+        checkpoint_path, 
+        options=ocp.CheckpointManagerOptions(
+            max_to_keep=3, 
+            create=True
+        )
+    ) if checkpoint_path is not None else None
 
     # Pre-compute banks for each song
     all_banks = [SongBanks.from_songfile(sf) for sf in songs]
@@ -122,5 +132,10 @@ def train(
 
         if step % log_every == 0:
             print(f"step {step:5d} | song {song_idx} | loss {loss:.4f}")
+            if checkpoint_manager is not None:
+                checkpoint_manager.save(
+                    step, 
+                    args=ocp.args.StandardSave(model)
+                )
 
     return model, opt_state
