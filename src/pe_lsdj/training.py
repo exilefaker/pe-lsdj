@@ -1,8 +1,8 @@
+import os
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import equinox as eqx
-import orbax.checkpoint as ocp
 import optax
 from jaxtyping import Array, Key
 
@@ -14,6 +14,14 @@ from pe_lsdj.models.transformer import hard_targets
 def load_songs(song_paths: list[str]) -> list[SongFile]:
     """Load all .lsdsng files upfront."""
     return [SongFile(p) for p in song_paths]
+
+
+def load_weights(reference_model, filepath):
+    """
+    Load checkpointed model weights, given an isomorphic model 'skeleton'
+    i.e., first initialize a model with the same hyperparams
+    """
+    return eqx.tree_deserialise_leaves(filepath, like=reference_model)  
 
 
 def sample_crops(song_tokens: Array, crop_len: int, batch_size: int, key: Key):
@@ -99,13 +107,8 @@ def train(
     optimizer = optax.adam(lr)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
 
-    checkpoint_manager = ocp.CheckpointManager(
-        checkpoint_path, 
-        options=ocp.CheckpointManagerOptions(
-            max_to_keep=3, 
-            create=True
-        )
-    ) if checkpoint_path is not None else None
+    if checkpoint_path is not None:
+        os.makedirs(checkpoint_path, exist_ok=True)
 
     # Pre-compute banks for each song
     all_banks = [SongBanks.from_songfile(sf) for sf in songs]
@@ -132,10 +135,8 @@ def train(
 
         if step % log_every == 0:
             print(f"step {step:5d} | song {song_idx} | loss {loss:.4f}")
-            if checkpoint_manager is not None:
-                checkpoint_manager.save(
-                    step, 
-                    args=ocp.args.StandardSave(model)
-                )
+            if checkpoint_path is not None:
+                ckpt_file = os.path.join(checkpoint_path, f"step_{step:06d}.eqx")
+                eqx.tree_serialise_leaves(ckpt_file, model)
 
     return model, opt_state
