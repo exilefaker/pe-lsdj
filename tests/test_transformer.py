@@ -13,6 +13,7 @@ from pe_lsdj.models.transformer import (
     hard_targets,
     token_loss,
 )
+from pe_lsdj.constants import NUM_NOTES
 
 
 KEY = jr.PRNGKey(0)
@@ -177,7 +178,7 @@ class TestLSDJTransformer:
         )
         out = model(jnp.zeros((4, 4, 21)))
         assert 'note' in out
-        assert out['note'].shape == (4, 4, 158)
+        assert out['note'].shape == (4, 4, NUM_NOTES)
 
     def test_entity_heads_present(self, model):
         """Entity reference heads should appear in output."""

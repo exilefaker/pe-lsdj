@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import bread
 from typing import NamedTuple
 from pylsdj.blockutils import BlockWriter, BlockFactory
-from jaxtyping import Array
+from jaxtyping import Array, Int
 from pe_lsdj.tokenizer.tokenize import (
     parse_grooves,
     parse_instruments,
@@ -67,9 +67,13 @@ class Settings(NamedTuple):
     settings_bytes: Array
 
 
+def _parse_name(name_bytes):
+    return name_bytes.rstrip(b'\x00').decode('utf-8')
+
+
 class SongFile(eqx.Module):
     name: str
-    tempo: jnp.int32
+    tempo: Int[Array, "1"]
     song_tokens: Array # Song structure
     settings: Settings
 
@@ -86,7 +90,10 @@ class SongFile(eqx.Module):
             self._load_from_raw(raw_bytes, name)
         elif filename is not None:
             pylsdj_project = load_lsdsng(filename)
-            self._load_from_raw(pylsdj_project._raw_bytes, pylsdj_project.name)
+            self._load_from_raw(
+                pylsdj_project._raw_bytes, 
+                _parse_name(pylsdj_project.name)
+            )
         else:
             raise ValueError("Must provide either filename or raw_bytes")
 

@@ -1,4 +1,6 @@
 import os
+import json
+import datetime
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -49,7 +51,7 @@ def sample_crops(song_tokens: Array, crop_len: int, batch_size: int, key: Key):
 
 def sequence_loss(model, input_tokens: Array, target_tokens: Array):
     """
-    Teacher-forcing CE loss for one sequence.
+    Teacher-forcing cross-entropy loss for one sequence.
 
     input_tokens:  (L, 4, 21)
     target_tokens: (L, 4, 21)
@@ -104,11 +106,49 @@ def train(
     Each step picks a song (round-robin), swaps entity banks,
     samples random crops, and runs one gradient step.
     """
-    optimizer = optax.adam(lr)
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=lr,
+        warmup_steps=num_steps // 20,
+        decay_steps=num_steps,
+    )
+    # optimizer = optax.adam(lr)
+    # Trying a schedule to mitigate some oscillation
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adam(schedule),
+    )
     opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
 
+    # Optionally set up model checkpointing + logging
     if checkpoint_path is not None:
-        os.makedirs(checkpoint_path, exist_ok=True)
+
+        def write_train_params(filepath):
+            with open(filepath, "w") as f:
+                f.write(json.dumps({
+                    "num_steps": num_steps,
+                    "crop_len": crop_len,
+                    "batch_size": batch_size,
+                    "lr": lr,
+                    "key": key.tolist(),
+                }))
+
+        session_path = os.path.join(
+            checkpoint_path, 
+            str(datetime.datetime.now())
+            .replace(' ', '_')
+            .replace('.', '_')
+        )
+        os.makedirs(session_path, exist_ok=True)
+        if hasattr(model, "write_metadata"):
+            model.write_metadata(
+                os.path.join(session_path, "model_hyperparams.json")
+            )
+        write_train_params(
+            os.path.join(session_path, "train_params.json")
+        )
+        g = open(os.path.join(session_path, "losses.txt"), "w")
+        g.write("step,song,loss\n")
 
     # Pre-compute banks for each song
     all_banks = [SongBanks.from_songfile(sf) for sf in songs]
@@ -134,9 +174,11 @@ def train(
         )
 
         if step % log_every == 0:
-            print(f"step {step:5d} | song {song_idx} | loss {loss:.4f}")
+            song_name = songs[song_idx].name
+            print(f"step {step:5d} | song {song_name} | loss {loss:.4f}")
             if checkpoint_path is not None:
-                ckpt_file = os.path.join(checkpoint_path, f"step_{step:06d}.eqx")
+                ckpt_file = os.path.join(session_path, f"step_{step:06d}.eqx")
                 eqx.tree_serialise_leaves(ckpt_file, model)
+                g.write(f"{step:5d},{song_name},{loss:.4f}\n") # TODO maybe log (step, loss) as csv?
 
     return model, opt_state

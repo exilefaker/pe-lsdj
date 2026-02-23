@@ -10,7 +10,7 @@ def _nibble_merge(high: Array, low: Array) -> Array:
 
 # TODO: Do we want to preserve the `tokens_dict` thing?
 def repack_notes(tokens_dict: dict[str, Array]) -> Array:
-    return (tokens_dict[PHRASE_NOTES] - 1).ravel().tolist()
+    return tokens_dict[PHRASE_NOTES].ravel().tolist()
 
 def repack_grooves(groove_tokens: Array) -> list[int]:
     """Reverse of parse_grooves. Input shape: (NUM_GROOVES, STEPS_PER_GROOVE, 2)"""
@@ -432,16 +432,31 @@ def repack_song(
     # Per-channel list of (phrase_id, transpose) in song order
     phrase_ids_per_channel = [[] for _ in range(NUM_CHANNELS)]
 
+    # For each channel, find active_len: one past the last phrase block that has
+    # any non-zero token. Phrase blocks beyond this are trailing sentinel padding
+    # (shorter channels padded to the song length). Blocks with all-zero tokens
+    # BEFORE active_len are real silence (e.g. all "---" notes) and are included.
+    def _active_len(ch):
+        for p in range(num_phrase_blocks - 1, -1, -1):
+            block = np.concatenate([
+                notes_by_phrase[p, :, ch],
+                instr_by_phrase[p, :, ch],
+                fx_cmd_by_phrase[p, :, ch],
+                fx_val_by_phrase[p, :, ch, :].ravel(),
+                tr_by_phrase[p, :, ch],
+            ])
+            if np.any(block != 0):
+                return p + 1
+        return 0
+
+    active_lens = [_active_len(ch) for ch in range(NUM_CHANNELS)]
+
     for ch in range(NUM_CHANNELS):
-        for p in range(num_phrase_blocks):
+        for p in range(active_lens[ch]):
             p_notes = notes_by_phrase[p, :, ch]
             p_instr = instr_by_phrase[p, :, ch]
             p_fx_cmd = fx_cmd_by_phrase[p, :, ch]
             p_fx_val = fx_val_by_phrase[p, :, ch, :]
-
-            # Skip empty phrase blocks (all notes are 0 = NULL)
-            if np.all(p_notes == 0) and np.all(p_fx_cmd == 0):
-                continue
 
             # Fingerprint: tuple of all phrase data
             fp = (
@@ -508,8 +523,7 @@ def repack_song(
             song_chains_out[i, ch] = cid
 
     # 7. Repack entities using existing functions
-    # Notes: repack_notes expects {PHRASE_NOTES: (255, 16)} with +1 offset
-    # phrase_notes_out already has +1 offset from song_tokens
+    # Notes: no offset — token 0 = "---", tokens 1..NUM_NOTES-1 = playable notes
     notes_bytes = repack_notes({PHRASE_NOTES: jnp.array(phrase_notes_out)})
 
     # Instruments (from SongFile entity tensors)

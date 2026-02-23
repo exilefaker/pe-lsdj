@@ -1,3 +1,4 @@
+import json
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -5,10 +6,11 @@ import jax.random as jr
 from jaxtyping import Array, Bool, Key
 
 from pe_lsdj.embedding.song import SequenceEmbedder, SongBanks
+from pe_lsdj.constants import NUM_NOTES
 
 # Logit groups: direct softmax heads (same-vocab members batched).
 LOGIT_GROUPS = {
-    'note': [('note', 0, 158)],
+    'note': [('note', 0, NUM_NOTES)],
     'fx_cmd': [('fx_cmd', 2, 19)],
     'byte_fx': [('hop_fx', 5, 257), ('volume_fx', 15, 257), ('continuous_fx', 19, 257)],
     'small_enum_fx': [('pan_fx', 6, 5), ('wave_fx', 16, 5)],
@@ -248,6 +250,7 @@ class LSDJTransformer(eqx.Module):
     final_norm: eqx.nn.LayerNorm
     output_heads: OutputHeads
     d_model: int
+    metadata: dict
 
     def __init__(
         self,
@@ -260,6 +263,18 @@ class LSDJTransformer(eqx.Module):
         banks: SongBanks | None = None,
         **embedder_kwargs,
     ):
+        self.metadata = {
+            "d_model": d_model,
+            "num_heads_t": num_heads_t,
+            "num_heads_c": num_heads_c,
+            "num_blocks": num_blocks,
+            "embedder": { 
+                k: v 
+                for k, v in embedder_kwargs.items() 
+                if isinstance(v, int) 
+            }
+        }
+
         keys = jr.split(key, num_blocks + 3)
 
         self.d_model = d_model
@@ -305,3 +320,7 @@ class LSDJTransformer(eqx.Module):
         return eqx.tree_at(
             lambda m: m.output_heads.entity_bank_embs, model, new_bank_embs
         )
+    
+    def write_metadata(self, filepath):
+        with open(filepath, "w") as f:
+            f.write(json.dumps(self.metadata))

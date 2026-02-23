@@ -9,12 +9,11 @@ from pe_lsdj.constants import *
 
 
 def parse_notes(data_bytes: Array) -> Array:
+    # Raw 0 = "---" (no note); 1..NUM_NOTES-1 = playable notes. No +1 offset needed.
     raw_data = data_bytes.reshape(
         (NUM_PHRASES, STEPS_PER_PHRASE)
-    ).astype(jnp.uint8) + 1
-    # 0 is NULL
-
-    return raw_data * ~(raw_data > NUM_NOTES) # Set invalid notes to NULL
+    ).astype(jnp.uint8)
+    return raw_data * ~(raw_data >= NUM_NOTES)  # Set invalid bytes to 0
 
 
 # TODO: Decide how best to integrate
