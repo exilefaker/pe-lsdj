@@ -554,17 +554,17 @@ class TestSongBanks:
 
     def test_default_shapes(self):
         banks = SongBanks.default()
-        assert banks.instruments.shape == (NUM_INSTRUMENTS, INSTR_WIDTH)
-        assert banks.softsynths.shape == (NUM_SYNTHS, SOFTSYNTH_WIDTH)
-        assert banks.waveframes.shape == (NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE)
-        assert banks.grooves.shape == (NUM_GROOVES, STEPS_PER_GROOVE * 2)
-        assert banks.tables.shape == (NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)
-        assert banks.traces.shape == (NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)
+        assert banks.instruments.shape == (NUM_INSTRUMENTS + 1, INSTR_WIDTH)
+        assert banks.softsynths.shape == (NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)
+        assert banks.waveframes.shape == (NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)
+        assert banks.grooves.shape == (NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)
+        assert banks.tables.shape == (NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)
+        assert banks.traces.shape == (NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)
 
     def test_from_songfile(self, song_file):
         banks = SongBanks.from_songfile(song_file)
-        assert banks.instruments.shape == (NUM_INSTRUMENTS, INSTR_WIDTH)
-        assert banks.tables.shape == (NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)
+        assert banks.instruments.shape == (NUM_INSTRUMENTS + 1, INSTR_WIDTH)
+        assert banks.tables.shape == (NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)
 
 
 class TestSetBanks:
@@ -578,12 +578,12 @@ class TestSetBanks:
 
         # Swap in banks with non-zero data
         banks = SongBanks(
-            instruments=jnp.ones((NUM_INSTRUMENTS, INSTR_WIDTH)),
-            softsynths=jnp.ones((NUM_SYNTHS, SOFTSYNTH_WIDTH)),
-            waveframes=jnp.ones((NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
-            grooves=jnp.ones((NUM_GROOVES, STEPS_PER_GROOVE * 2)),
-            tables=jnp.ones((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
-            traces=jnp.ones((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
+            instruments=jnp.ones((NUM_INSTRUMENTS + 1, INSTR_WIDTH)),
+            softsynths=jnp.ones((NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)),
+            waveframes=jnp.ones((NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
+            grooves=jnp.ones((NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)),
+            tables=jnp.ones((NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)),
+            traces=jnp.ones((NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)),
         )
         seq_emb2 = seq_emb.with_banks(banks)
         out_after = seq_emb2(tokens)
@@ -613,12 +613,12 @@ class TestSetBanks:
         seq_emb = SequenceEmbedder(song_step_embedder, KEY)
 
         banks = SongBanks(
-            instruments=jnp.ones((NUM_INSTRUMENTS, INSTR_WIDTH)),
-            softsynths=jnp.ones((NUM_SYNTHS, SOFTSYNTH_WIDTH)),
-            waveframes=jnp.ones((NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
-            grooves=jnp.ones((NUM_GROOVES, STEPS_PER_GROOVE * 2)),
-            tables=jnp.ones((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
-            traces=jnp.ones((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)),
+            instruments=jnp.ones((NUM_INSTRUMENTS + 1, INSTR_WIDTH)),
+            softsynths=jnp.ones((NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)),
+            waveframes=jnp.ones((NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
+            grooves=jnp.ones((NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)),
+            tables=jnp.ones((NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)),
+            traces=jnp.ones((NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)),
         )
         seq_emb2 = seq_emb.with_banks(banks)
 

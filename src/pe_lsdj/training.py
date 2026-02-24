@@ -10,7 +10,9 @@ from jaxtyping import Array, Key
 
 from pe_lsdj import SongFile
 from pe_lsdj.embedding.song import SongBanks
-from pe_lsdj.models.transformer import hard_targets
+from pe_lsdj.models.transformer import (
+    TOKEN_HEADS, ENTITY_HEAD_SPECS, hard_targets, entity_loss,
+)
 
 
 def load_songs(song_paths: list[str]) -> list[SongFile]:
@@ -49,39 +51,51 @@ def sample_crops(song_tokens: Array, crop_len: int, batch_size: int, key: Key):
     return inputs, targets
 
 
-def sequence_loss(model, input_tokens: Array, target_tokens: Array):
+def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongBanks):
     """
-    Teacher-forcing cross-entropy loss for one sequence.
+    Teacher-forcing loss for one sequence: logit-group CE + entity param CE.
 
     input_tokens:  (L, 4, 21)
     target_tokens: (L, 4, 21)
-    Returns: scalar — mean CE per (channel × timestep)
+    banks:         SongBanks for the current song (null rows pre-included)
+    Returns: scalar — mean loss per (channel × timestep)
     """
-    logits = model(input_tokens)  # dict of (L, 4, vocab_i)
-    targets = jax.vmap(jax.vmap(hard_targets))(target_tokens)  # dict of (L, 4, vocab_i)
+    logits = model(input_tokens)   # dict of (L, 4, ...)
 
-    total = 0.0
-    for name in logits:
+    # Logit-group cross-entropy
+    targets = jax.vmap(jax.vmap(hard_targets))(target_tokens)
+    token_ce = 0.0
+    for name in TOKEN_HEADS:
         log_probs = jax.nn.log_softmax(logits[name], axis=-1)
-        total -= jnp.sum(targets[name] * log_probs)
+        token_ce -= jnp.sum(targets[name] * log_probs)
+
+    # Entity parameter cross-entropy: vmap entity_param_loss over (L, 4)
+    # in_axes=(0, None, 0): batch over first axis of logit dicts and target_tokens,
+    # keep banks constant (not batched).
+    entity_logits = {name: logits[name] for name in ENTITY_HEAD_SPECS}
+    _per_step_channel = jax.vmap(
+        jax.vmap(entity_loss, in_axes=(0, None, 0)),
+        in_axes=(0, None, 0),
+    )
+    entity_ce = jnp.sum(_per_step_channel(entity_logits, banks, target_tokens))
 
     L = input_tokens.shape[0]
-    return total / (L * 4)
+    return (token_ce + entity_ce) / (L * 4)
 
 
-def batch_loss(model, input_batch: Array, target_batch: Array):
+def batch_loss(model, input_batch: Array, target_batch: Array, banks: SongBanks):
     """Mean loss over a batch of sequences."""
-    losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0))(
-        model, input_batch, target_batch
+    losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, None))(
+        model, input_batch, target_batch, banks
     )
     return jnp.mean(losses)
 
 
 @eqx.filter_jit
-def train_step(model, opt_state, optimizer, input_batch, target_batch):
+def train_step(model, opt_state, optimizer, input_batch, target_batch, banks):
     """One gradient step. Returns (model, opt_state, loss)."""
     loss, grads = eqx.filter_value_and_grad(batch_loss)(
-        model, input_batch, target_batch
+        model, input_batch, target_batch, banks
     )
     updates, opt_state = optimizer.update(grads, opt_state, model)
     model = eqx.apply_updates(model, updates)
@@ -170,7 +184,7 @@ def train(
 
         # Gradient step
         model, opt_state, loss = train_step(
-            model, opt_state, optimizer, inputs, targets
+            model, opt_state, optimizer, inputs, targets, banks
         )
 
         if step % log_every == 0:

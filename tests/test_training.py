@@ -11,6 +11,7 @@ from pe_lsdj.training import (
     train_step,
 )
 from pe_lsdj.models.transformer import LSDJTransformer
+from pe_lsdj.embedding.song import SongBanks
 
 
 KEY = jr.PRNGKey(0)
@@ -21,6 +22,11 @@ def model():
     return LSDJTransformer(
         KEY, d_model=64, num_heads_t=2, num_heads_c=2, num_blocks=1,
     )
+
+
+@pytest.fixture(scope="module")
+def banks():
+    return SongBanks.default()
 
 
 @pytest.fixture(scope="module")
@@ -63,16 +69,16 @@ class TestSampleCrops:
 
 class TestSequenceLoss:
 
-    def test_finite(self, model):
+    def test_finite(self, model, banks):
         tokens = jr.randint(jr.PRNGKey(10), (16, 4, 21), 0, 10).astype(jnp.float32)
-        loss = sequence_loss(model, tokens[:-1], tokens[1:])
+        loss = sequence_loss(model, tokens[:-1], tokens[1:], banks)
         assert jnp.isfinite(loss)
         assert loss > 0
 
-    def test_has_gradients(self, model):
+    def test_has_gradients(self, model, banks):
         tokens = jr.randint(jr.PRNGKey(10), (16, 4, 21), 0, 10).astype(jnp.float32)
         grad_fn = eqx.filter_value_and_grad(sequence_loss)
-        loss, grads = grad_fn(model, tokens[:-1], tokens[1:])
+        loss, grads = grad_fn(model, tokens[:-1], tokens[1:], banks)
         # At least some gradients should be non-zero
         flat_grads = jax.tree.leaves(grads)
         has_nonzero = any(
@@ -83,24 +89,24 @@ class TestSequenceLoss:
 
 class TestBatchLoss:
 
-    def test_matches_mean(self, model):
+    def test_matches_mean(self, model, banks):
         """batch_loss should equal mean of individual sequence losses."""
         B, L = 3, 8
         tokens = jr.randint(jr.PRNGKey(2), (B, L + 1, 4, 21), 0, 10).astype(jnp.float32)
         inputs = tokens[:, :-1]
         targets = tokens[:, 1:]
 
-        bl = batch_loss(model, inputs, targets)
+        bl = batch_loss(model, inputs, targets, banks)
 
         individual = jnp.array([
-            sequence_loss(model, inputs[i], targets[i]) for i in range(B)
+            sequence_loss(model, inputs[i], targets[i], banks) for i in range(B)
         ])
         assert jnp.allclose(bl, individual.mean(), atol=1e-5)
 
 
 class TestTrainStep:
 
-    def test_updates_params(self, model):
+    def test_updates_params(self, model, banks):
         """One training step should change model parameters."""
         import optax
         optimizer = optax.adam(1e-3)
@@ -111,7 +117,7 @@ class TestTrainStep:
         targets = tokens[:, 1:]
 
         new_model, new_opt_state, loss = train_step(
-            model, opt_state, optimizer, inputs, targets,
+            model, opt_state, optimizer, inputs, targets, banks,
         )
 
         # Parameters should have changed

@@ -10,9 +10,13 @@ from pe_lsdj.models.transformer import (
     TOKEN_HEADS,
     LOGIT_GROUPS,
     ENTITY_HEADS,
+    ENTITY_HEAD_SPECS,
+    ENTITY_HEAD_TOTAL_VOCAB,
     hard_targets,
     token_loss,
+    entity_param_loss,
 )
+from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.constants import NUM_NOTES
 
 
@@ -37,14 +41,12 @@ class TestAxialTransformerBlock:
         mask = jnp.tril(jnp.ones((S, S), dtype=bool))
 
         x1 = jr.normal(jr.PRNGKey(1), (S, 4, d))
-        x2 = x1.at[5].set(jr.normal(jr.PRNGKey(2), (4, d)))  # modify step 5
+        x2 = x1.at[5].set(jr.normal(jr.PRNGKey(2), (4, d)))
 
         out1 = block(x1, mask)
         out2 = block(x2, mask)
 
-        # Steps 0-4 should be identical (they can't see step 5)
         assert jnp.allclose(out1[:5], out2[:5], atol=1e-5)
-        # Step 5+ should differ
         assert not jnp.allclose(out1[5:], out2[5:])
 
 
@@ -55,13 +57,13 @@ class TestOutputHeads:
         return OutputHeads(64, KEY)
 
     def test_output_keys(self, heads):
-        """All 21 head names should be present in the output."""
+        """All logit-group and entity head names should appear in output."""
         x = jnp.ones(64)
         out = heads(x)
-        assert set(out.keys()) == set(TOKEN_HEADS.keys())
+        assert set(out.keys()) == set(TOKEN_HEADS.keys()) | set(ENTITY_HEADS.keys())
 
-    def test_output_shapes(self, heads):
-        """Each head's output should match its vocab size."""
+    def test_logit_group_shapes(self, heads):
+        """Each logit-group head should have its declared vocab size."""
         x = jnp.ones(64)
         out = heads(x)
         for name, (pos, vocab) in TOKEN_HEADS.items():
@@ -69,32 +71,34 @@ class TestOutputHeads:
                 f"{name}: expected ({vocab},), got {out[name].shape}"
             )
 
-    def test_log_probs_sum_to_one(self, heads):
-        """log_probs should be valid log-probabilities (exp sums to ~1)."""
+    def test_entity_head_shapes(self, heads):
+        """Each entity head should output total_field_vocab logits."""
+        x = jnp.ones(64)
+        out = heads(x)
+        for name, total_vocab in ENTITY_HEAD_TOTAL_VOCAB.items():
+            assert out[name].shape == (total_vocab,), (
+                f"{name}: expected ({total_vocab},), got {out[name].shape}"
+            )
+
+    def test_log_probs_logit_groups(self, heads):
+        """log_probs should return valid log-probabilities for logit-group heads."""
         x = jr.normal(jr.PRNGKey(1), (64,))
         lp = heads.log_probs(x)
+        assert set(lp.keys()) == set(TOKEN_HEADS.keys())
         for name, logp in lp.items():
             assert jnp.allclose(jnp.exp(logp).sum(), 1.0, atol=1e-5), name
 
     def test_logit_group_weight_shapes(self, heads):
-        """Each logit group weight matrix should be (N, vocab, d_model)."""
+        """Each logit-group weight matrix should be (N, vocab, d_model)."""
         for group_name, members in LOGIT_GROUPS.items():
             n = len(members)
             vocab = members[0][2]
             assert heads.weights[group_name].shape == (n, vocab, 64), group_name
 
-    def test_entity_projection_shapes(self, heads):
-        """Each entity projection should be (query_dim, d_model)."""
-        default_dims = {'instr_id': 128, 'table_id': 64, 'groove_id': 64}
-        for name, q_dim in default_dims.items():
-            assert heads.entity_projections[name].shape == (q_dim, 64), name
-
-    def test_entity_bank_emb_shapes(self, heads):
-        """Each entity bank embedding should be (vocab, query_dim)."""
-        default_dims = {'instr_id': 128, 'table_id': 64, 'groove_id': 64}
-        for name, (pos, vocab) in ENTITY_HEADS.items():
-            q_dim = default_dims[name]
-            assert heads.entity_bank_embs[name].shape == (vocab, q_dim), name
+    def test_entity_weight_shapes(self, heads):
+        """Each entity weight matrix should be (total_field_vocab, d_model)."""
+        for name, total_vocab in ENTITY_HEAD_TOTAL_VOCAB.items():
+            assert heads.entity_weights[name].shape == (total_vocab, 64), name
 
 
 class TestHardTargetsAndLoss:
@@ -102,6 +106,7 @@ class TestHardTargetsAndLoss:
     def test_hard_targets_shapes(self):
         tokens = jnp.zeros(21, dtype=jnp.int32)
         targets = hard_targets(tokens)
+        assert set(targets.keys()) == set(TOKEN_HEADS.keys())
         for name, (pos, vocab) in TOKEN_HEADS.items():
             assert targets[name].shape == (vocab,), name
 
@@ -122,22 +127,40 @@ class TestHardTargetsAndLoss:
         assert loss > 0
 
     def test_soft_targets_lower_loss(self):
-        """Soft targets that match the logits should produce lower loss."""
+        """Soft targets matching the model's own logit-group predictions → lower loss."""
         heads = OutputHeads(64, KEY)
         x = jr.normal(jr.PRNGKey(1), (64,))
         logits = heads(x)
 
-        # Soft targets from the model's own predictions (should be low loss)
         soft_targets = {
             name: jax.nn.softmax(logits[name])
-            for name in logits
+            for name in TOKEN_HEADS
         }
         loss_soft = token_loss(logits, soft_targets)
-
-        # Hard targets at index 0 (arbitrary, likely high loss)
         loss_hard = token_loss(logits, hard_targets(jnp.zeros(21, dtype=jnp.int32)))
-
         assert loss_soft < loss_hard
+
+    def test_entity_param_loss_finite(self):
+        """entity_param_loss should return a finite scalar."""
+        heads = OutputHeads(64, KEY)
+        x = jr.normal(jr.PRNGKey(1), (64,))
+        out = heads(x)
+        entity_logits = {name: out[name] for name in ENTITY_HEAD_SPECS}
+        banks = SongBanks.default()
+        tokens = jnp.zeros(21, dtype=jnp.int32)
+        loss = entity_param_loss(entity_logits, banks, tokens)
+        assert jnp.isfinite(loss)
+
+    def test_entity_param_loss_null_tokens(self):
+        """All-zero tokens (NULL entity IDs) should still produce finite loss."""
+        heads = OutputHeads(64, KEY)
+        x = jr.normal(jr.PRNGKey(2), (64,))
+        out = heads(x)
+        entity_logits = {name: out[name] for name in ENTITY_HEAD_SPECS}
+        banks = SongBanks.default()
+        tokens = jnp.zeros(21, dtype=jnp.int32)
+        loss = entity_param_loss(entity_logits, banks, tokens)
+        assert jnp.isfinite(loss)
 
 
 class TestLSDJTransformer:
@@ -152,13 +175,13 @@ class TestLSDJTransformer:
             num_blocks=2,
         )
 
-    def test_output_is_logits_dict(self, model):
+    def test_output_keys(self, model):
         tokens = jnp.zeros((8, 4, 21))
         out = model(tokens)
         assert isinstance(out, dict)
-        assert set(out.keys()) == set(TOKEN_HEADS.keys())
+        assert set(out.keys()) == set(TOKEN_HEADS.keys()) | set(ENTITY_HEADS.keys())
 
-    def test_output_shapes(self, model):
+    def test_logit_group_output_shapes(self, model):
         S = 8
         tokens = jnp.zeros((S, 4, 21))
         out = model(tokens)
@@ -167,8 +190,16 @@ class TestLSDJTransformer:
                 f"{name}: expected ({S}, 4, {vocab}), got {out[name].shape}"
             )
 
+    def test_entity_head_output_shapes(self, model):
+        S = 8
+        tokens = jnp.zeros((S, 4, 21))
+        out = model(tokens)
+        for name, total_vocab in ENTITY_HEAD_TOTAL_VOCAB.items():
+            assert out[name].shape == (S, 4, total_vocab), (
+                f"{name}: expected ({S}, 4, {total_vocab}), got {out[name].shape}"
+            )
+
     def test_default_banks(self):
-        """Model constructable with just a key."""
         model = LSDJTransformer(
             jr.PRNGKey(42),
             d_model=64,
@@ -180,9 +211,9 @@ class TestLSDJTransformer:
         assert 'note' in out
         assert out['note'].shape == (4, 4, NUM_NOTES)
 
-    def test_entity_heads_present(self, model):
-        """Entity reference heads should appear in output."""
-        out = model(jnp.zeros((4, 4, 21)))
-        for name, (pos, vocab) in ENTITY_HEADS.items():
-            assert name in out
-            assert out[name].shape == (4, 4, vocab), name
+    def test_with_banks_no_crash(self, model):
+        """with_banks should return a valid model that still produces output."""
+        banks = SongBanks.default()
+        new_model = model.with_banks(banks)
+        out = new_model(jnp.zeros((4, 4, 21)))
+        assert out['note'].shape == (4, 4, NUM_NOTES)

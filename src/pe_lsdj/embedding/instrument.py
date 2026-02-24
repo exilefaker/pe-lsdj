@@ -66,7 +66,7 @@ class SoftsynthEntityEmbedder(EntityEmbedder):
                 continuous_out_dim,
                 out_dim,
             ),
-            null_entry=True,  # 0 = null (non-WAV instruments)
+            null_entry=False,
         )
 
 
@@ -92,7 +92,7 @@ class WaveFrameEntityEmbedder(EntityEmbedder):
         super().__init__(
             waveframes,
             WaveframeEmbedder(key, out_dim),
-            null_entry=True,  # 0 = null (non-WAV instruments)
+            null_entry=False,
         )
 
 
@@ -205,5 +205,5 @@ class InstrumentEntityEmbedder(EntityEmbedder):
                 waveframe_entity_embedder,
                 out_dim=out_dim,
             ),
-            null_entry=True,
+            null_entry=False,
         )

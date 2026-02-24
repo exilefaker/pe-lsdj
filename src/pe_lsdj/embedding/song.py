@@ -32,47 +32,53 @@ from jaxtyping import Array, Key
 
 
 class SongBanks(NamedTuple):
-    """All per-song entity banks needed by the embedding pipeline."""
-    instruments: Array   # (NUM_INSTRUMENTS, INSTR_WIDTH)
-    softsynths: Array    # (NUM_SYNTHS, SOFTSYNTH_WIDTH)
-    waveframes: Array    # (NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE)
-    grooves: Array       # (NUM_GROOVES, STEPS_PER_GROOVE * 2)
-    tables: Array        # (NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)
-    traces: Array        # (NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)
+    """
+    All per-song entity banks needed by the embedding pipeline.
+
+    All banks are null-prepended: index 0 is a zero sentinel row so that
+    token IDs (0=NULL, 1..N=entity) can index directly without an offset.
+    This is consistent across all entity types and simplifies both the
+    embedders and the entity parameter loss.
+    """
+    instruments: Array   # (NUM_INSTRUMENTS + 1, INSTR_WIDTH)
+    softsynths: Array    # (NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)
+    waveframes: Array    # (NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)
+    grooves: Array       # (NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)
+    tables: Array        # (NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)
+    traces: Array        # (NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)
 
     @classmethod
     def default(cls):
-        """Zero-filled banks with correct shapes."""
+        """Zero-filled banks with correct shapes (null rows included)."""
+        def _z(n, w):
+            return jnp.zeros((n + 1, w), dtype=jnp.uint8)
         return cls(
-            instruments=jnp.zeros((NUM_INSTRUMENTS, INSTR_WIDTH), dtype=jnp.uint8),
-            softsynths=jnp.zeros((NUM_SYNTHS, SOFTSYNTH_WIDTH), dtype=jnp.uint8),
-            waveframes=jnp.zeros((NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE), dtype=jnp.uint8),
-            grooves=jnp.zeros((NUM_GROOVES, STEPS_PER_GROOVE * 2), dtype=jnp.uint8),
-            tables=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH), dtype=jnp.uint8),
-            traces=jnp.zeros((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH), dtype=jnp.uint8),
+            instruments=_z(NUM_INSTRUMENTS, INSTR_WIDTH),
+            softsynths=_z(NUM_SYNTHS, SOFTSYNTH_WIDTH),
+            waveframes=_z(NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE),
+            grooves=_z(NUM_GROOVES, STEPS_PER_GROOVE * 2),
+            tables=_z(NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH),
+            traces=_z(NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH),
         )
 
     @classmethod
     def from_songfile(cls, songfile: SongFile):
+        def _prepend(arr):
+            return jnp.concatenate(
+                [jnp.zeros((1, arr.shape[1]), arr.dtype), arr], axis=0
+            )
         return cls(
-            instruments=songfile.instruments_array,
-            softsynths=songfile.softsynths_array,
-            waveframes=songfile.waveframes_array,
-            grooves=songfile.grooves_array,
-            tables=songfile.tables_array,
-            traces=songfile.traces_array,
+            instruments=_prepend(songfile.instruments_array),
+            softsynths=_prepend(songfile.softsynths_array),
+            waveframes=_prepend(songfile.waveframes_array),
+            grooves=_prepend(songfile.grooves_array),
+            tables=_prepend(songfile.tables_array),
+            traces=_prepend(songfile.traces_array),
         )
 
 
-def _prepend_null_row(bank):
-    """Prepend a zero row for null_entry=True entity embedders."""
-    return jnp.concatenate(
-        [jnp.zeros((1, bank.shape[1]), bank.dtype), bank], axis=0
-    )
-
-
 def _augment_instruments(instruments):
-    """Append softsynth_id column as waveframe reference."""
+    """Append softsynth_id column as waveframe reference (null row preserved)."""
     waveframe_ref = instruments[:, InstrumentEntityEmbedder.SOFTSYNTH_COL:
                                    InstrumentEntityEmbedder.SOFTSYNTH_COL + 1]
     return jnp.concatenate([instruments, waveframe_ref], axis=1)
@@ -82,22 +88,23 @@ def set_banks(step_embedder, banks: SongBanks):
     """
     Swap all per-song entity banks in a SongStepEmbedder.
 
+    All banks in SongBanks are already null-prepended (index 0 = NULL
+    sentinel), so no further augmentation is needed here.
+
     Uses id()-based leaf replacement to correctly handle shared references
     (grooves across tiers, tables between FX/instrument chains, fx1/fx2
     weight sharing, tier projection sharing, etc.).  Learned params stay
     shared; each bank is replaced at every occurrence.
     """
-    # Map old bank id → new array.  Shared banks have the same id(),
-    # so every occurrence in the flattened leaf list gets replaced.
     replacements = {
         id(step_embedder.instrument_embedder.entity_bank):
-            _prepend_null_row(_augment_instruments(banks.instruments)),
+            _augment_instruments(banks.instruments),
         id(step_embedder.instrument_embedder.embedder
            .embedders['softsynth'].entity_bank):
-            _prepend_null_row(banks.softsynths),
+            banks.softsynths,
         id(step_embedder.instrument_embedder.embedder
            .embedders['waveframe'].entity_bank):
-            _prepend_null_row(banks.waveframes),
+            banks.waveframes,
         id(step_embedder.fx_embedder.embedders['value']
            .embedders['table_fx'].entity_bank):
             banks.tables,
@@ -107,7 +114,7 @@ def set_banks(step_embedder, banks: SongBanks):
             banks.traces,
         id(step_embedder.fx_embedder.embedders['value']
            .embedders['groove'].entity_bank):
-            _prepend_null_row(banks.grooves),
+            banks.grooves,
     }
 
     leaves, treedef = jax.tree.flatten(step_embedder)
@@ -190,7 +197,6 @@ class SongStepEmbedder(eqx.Module):
             value_out_dim,
             keys[1],
             grooves,
-            null_entry=True,
         )
         shared_embedders = build_fx_value_embedders(value_out_dim, keys[2], groove_embedder)
 
