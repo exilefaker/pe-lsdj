@@ -195,4 +195,6 @@ def train(
                 eqx.tree_serialise_leaves(ckpt_file, model)
                 g.write(f"{step:5d},{song_name},{loss:.4f}\n") # TODO maybe log (step, loss) as csv?
 
+    if checkpoint_path is not None:
+        g.close()
     return model, opt_state

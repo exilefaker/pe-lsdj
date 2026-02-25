@@ -5,6 +5,7 @@ import jax.random as jr
 
 from pe_lsdj.models.transformer import (
     AxialTransformerBlock,
+    EntityDecoder,
     LSDJTransformer,
     OutputHeads,
     TOKEN_HEADS,
@@ -14,7 +15,7 @@ from pe_lsdj.models.transformer import (
     ENTITY_HEAD_TOTAL_VOCAB,
     hard_targets,
     token_loss,
-    entity_param_loss,
+    entity_loss,
 )
 from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.constants import NUM_NOTES
@@ -52,9 +53,12 @@ class TestAxialTransformerBlock:
 
 class TestOutputHeads:
 
+    D_MODEL   = 64
+    ENTITY_DIM = 32
+
     @pytest.fixture(scope="class")
     def heads(self):
-        return OutputHeads(64, KEY)
+        return OutputHeads(self.D_MODEL, self.ENTITY_DIM, KEY)
 
     def test_output_keys(self, heads):
         """All logit-group and entity head names should appear in output."""
@@ -95,10 +99,12 @@ class TestOutputHeads:
             vocab = members[0][2]
             assert heads.weights[group_name].shape == (n, vocab, 64), group_name
 
-    def test_entity_weight_shapes(self, heads):
-        """Each entity weight matrix should be (total_field_vocab, d_model)."""
+    def test_entity_decoder_shapes(self, heads):
+        """Each entity decoder should have correct layer shapes."""
         for name, total_vocab in ENTITY_HEAD_TOTAL_VOCAB.items():
-            assert heads.entity_weights[name].shape == (total_vocab, 64), name
+            dec = heads.entity_decoders[name]
+            assert dec.linear_in.weight.shape  == (self.ENTITY_DIM, self.D_MODEL), name
+            assert dec.linear_out.weight.shape == (total_vocab, self.ENTITY_DIM),  name
 
 
 class TestHardTargetsAndLoss:
@@ -117,7 +123,7 @@ class TestHardTargetsAndLoss:
         assert targets['note'].sum() == 1.0
 
     def test_token_loss_finite(self):
-        heads = OutputHeads(64, KEY)
+        heads = OutputHeads(64, 32, KEY)
         x = jr.normal(jr.PRNGKey(1), (64,))
         logits = heads(x)
         tokens = jnp.zeros(21, dtype=jnp.int32)
@@ -128,7 +134,7 @@ class TestHardTargetsAndLoss:
 
     def test_soft_targets_lower_loss(self):
         """Soft targets matching the model's own logit-group predictions → lower loss."""
-        heads = OutputHeads(64, KEY)
+        heads = OutputHeads(64, 32, KEY)
         x = jr.normal(jr.PRNGKey(1), (64,))
         logits = heads(x)
 
@@ -140,26 +146,26 @@ class TestHardTargetsAndLoss:
         loss_hard = token_loss(logits, hard_targets(jnp.zeros(21, dtype=jnp.int32)))
         assert loss_soft < loss_hard
 
-    def test_entity_param_loss_finite(self):
-        """entity_param_loss should return a finite scalar."""
-        heads = OutputHeads(64, KEY)
+    def test_entity_loss_finite(self):
+        """entity_loss should return a finite scalar."""
+        heads = OutputHeads(64, 32, KEY)
         x = jr.normal(jr.PRNGKey(1), (64,))
         out = heads(x)
         entity_logits = {name: out[name] for name in ENTITY_HEAD_SPECS}
         banks = SongBanks.default()
         tokens = jnp.zeros(21, dtype=jnp.int32)
-        loss = entity_param_loss(entity_logits, banks, tokens)
+        loss = entity_loss(entity_logits, banks, tokens)
         assert jnp.isfinite(loss)
 
-    def test_entity_param_loss_null_tokens(self):
+    def test_entity_loss_null_tokens(self):
         """All-zero tokens (NULL entity IDs) should still produce finite loss."""
-        heads = OutputHeads(64, KEY)
+        heads = OutputHeads(64, 32, KEY)
         x = jr.normal(jr.PRNGKey(2), (64,))
         out = heads(x)
         entity_logits = {name: out[name] for name in ENTITY_HEAD_SPECS}
         banks = SongBanks.default()
         tokens = jnp.zeros(21, dtype=jnp.int32)
-        loss = entity_param_loss(entity_logits, banks, tokens)
+        loss = entity_loss(entity_logits, banks, tokens)
         assert jnp.isfinite(loss)
 
 
@@ -170,6 +176,7 @@ class TestLSDJTransformer:
         return LSDJTransformer(
             KEY,
             d_model=64,
+            entity_dim=32,
             num_heads_t=2,
             num_heads_c=2,
             num_blocks=2,

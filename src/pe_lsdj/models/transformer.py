@@ -201,22 +201,47 @@ def entity_loss(entity_logits_dict, banks: SongBanks, target_tokens):
 # Model components
 # ---------------------------------------------------------------------------
 
+class EntityDecoder(eqx.Module):
+    """
+    Two-layer MLP: d_model → entity_dim → total_field_vocab.
+
+    The entity_dim latent is exposed via encode() for cosine-similarity
+    matching at inference time (before the non-linearity is applied to
+    the entity_dim output, it serves as the latent interface between
+    the transformer and a future reconstruction-based entity model).
+    """
+    linear_in:  eqx.nn.Linear   # d_model    → entity_dim
+    linear_out: eqx.nn.Linear   # entity_dim → total_field_vocab
+
+    def __init__(self, d_model, entity_dim, total_field_vocab, key):
+        k1, k2 = jr.split(key)
+        self.linear_in  = eqx.nn.Linear(d_model, entity_dim, use_bias=False, key=k1)
+        self.linear_out = eqx.nn.Linear(entity_dim, total_field_vocab, use_bias=False, key=k2)
+
+    def __call__(self, x):
+        return self.linear_out(jax.nn.gelu(self.linear_in(x)))
+
+    def encode(self, x):
+        """Project d_model → entity_dim (for cosine-similarity entity matching)."""
+        return self.linear_in(x)
+
+
 class OutputHeads(eqx.Module):
     """
     Output heads mapping d_model → per-token logits.
 
     Logit heads:  grouped linear projections (batched by vocab size).
-    Entity heads: single linear projection d_model → total_field_vocab,
+    Entity heads: two-layer MLP d_model → entity_dim → total_field_vocab,
                   producing flat logits split by ENTITY_HEAD_SPECS.
 
     __call__ returns dict[str, array]:
       logit-group heads → (vocab,)
       entity heads      → (total_field_vocab,)  [split via ENTITY_HEAD_SPECS]
     """
-    weights:        dict[str, Array]   # group_name → (N, vocab, d_model)
-    entity_weights: dict[str, Array]   # entity_name → (total_field_vocab, d_model)
+    weights:         dict[str, Array]          # group_name → (N, vocab, d_model)
+    entity_decoders: dict[str, EntityDecoder]  # entity_name → MLP
 
-    def __init__(self, d_model, key):
+    def __init__(self, d_model, entity_dim, key):
         keys = jr.split(key, len(LOGIT_GROUPS) + len(ENTITY_HEAD_SPECS))
 
         weights = {}
@@ -228,14 +253,13 @@ class OutputHeads(eqx.Module):
             )
         self.weights = weights
 
-        entity_weights = {}
+        entity_decoders = {}
         offset = len(LOGIT_GROUPS)
         for j, (name, total_vocab) in enumerate(ENTITY_HEAD_TOTAL_VOCAB.items()):
-            entity_weights[name] = (
-                jr.normal(keys[offset + j], (total_vocab, d_model))
-                / jnp.sqrt(d_model)
+            entity_decoders[name] = EntityDecoder(
+                d_model, entity_dim, total_vocab, keys[offset + j]
             )
-        self.entity_weights = entity_weights
+        self.entity_decoders = entity_decoders
 
     def __call__(self, x):
         """x: (d_model,) → dict[str, array] logit arrays."""
@@ -245,7 +269,7 @@ class OutputHeads(eqx.Module):
             for i, (head_name, _, _) in enumerate(members):
                 result[head_name] = logits[i]
         for name in ENTITY_HEAD_SPECS:
-            result[name] = self.entity_weights[name] @ x  # (total_field_vocab,)
+            result[name] = self.entity_decoders[name](x)  # (total_field_vocab,)
         return result
 
     def log_probs(self, x):
@@ -321,6 +345,7 @@ class LSDJTransformer(eqx.Module):
         key: Key,
         *,
         d_model: int = 256,
+        entity_dim: int = 128,
         num_heads_t: int = 4,
         num_heads_c: int = 2,
         num_blocks: int = 6,
@@ -329,6 +354,7 @@ class LSDJTransformer(eqx.Module):
     ):
         self.metadata = {
             "d_model": d_model,
+            "entity_dim": entity_dim,
             "num_heads_t": num_heads_t,
             "num_heads_c": num_heads_c,
             "num_blocks": num_blocks,
@@ -346,7 +372,7 @@ class LSDJTransformer(eqx.Module):
             for i in range(num_blocks)
         ]
         self.final_norm  = eqx.nn.LayerNorm(d_model)
-        self.output_heads = OutputHeads(d_model, keys[-1])
+        self.output_heads = OutputHeads(d_model, entity_dim, keys[-1])
 
     def __call__(self, song_tokens: Array):
         """song_tokens: (S, 4, 21) → dict[str, (S, 4, ...)] logit arrays"""
