@@ -11,7 +11,7 @@ from jaxtyping import Array, Key
 from pe_lsdj import SongFile
 from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.models.transformer import (
-    TOKEN_HEADS, ENTITY_HEAD_SPECS, hard_targets, entity_loss,
+    TOKEN_HEADS, ENTITY_OUTPUT_HEADS, hard_targets, entity_loss,
 )
 
 
@@ -72,7 +72,7 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
     # Entity parameter cross-entropy: vmap entity_param_loss over (L, 4)
     # in_axes=(0, None, 0): batch over first axis of logit dicts and target_tokens,
     # keep banks constant (not batched).
-    entity_logits = {name: logits[name] for name in ENTITY_HEAD_SPECS}
+    entity_logits = {name: logits[name] for name in ENTITY_OUTPUT_HEADS}
     _per_step_channel = jax.vmap(
         jax.vmap(entity_loss, in_axes=(0, None, 0)),
         in_axes=(0, None, 0),

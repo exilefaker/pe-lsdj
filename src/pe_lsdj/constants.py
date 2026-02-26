@@ -261,6 +261,7 @@ SOFTSYNTH_END_VERTICAL_SHIFT = "Softsynth end vertical shift"
 
 # Model wave frames along with instruments
 WAVEFRAME_ID = "Wave frame ID"
+WAVEFRAME_DIM = WAVES_PER_SYNTH * FRAMES_PER_WAVE
 
 # Utilities / misc
 INSTRUMENT_SIZE = 0x10

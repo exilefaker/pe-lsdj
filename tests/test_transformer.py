@@ -13,6 +13,9 @@ from pe_lsdj.models.transformer import (
     ENTITY_HEADS,
     ENTITY_HEAD_SPECS,
     ENTITY_HEAD_TOTAL_VOCAB,
+    ENTITY_OUTPUT_HEADS,
+    WAVEFRAME_DIM,
+    _CONT_N,
     hard_targets,
     token_loss,
     entity_loss,
@@ -37,23 +40,19 @@ class TestAxialTransformerBlock:
         assert out.shape == (16, 4, 64)
 
     def test_causal(self, block):
-        """Changing a future timestep should not affect past outputs."""
         S, d = 8, 64
         mask = jnp.tril(jnp.ones((S, S), dtype=bool))
-
         x1 = jr.normal(jr.PRNGKey(1), (S, 4, d))
         x2 = x1.at[5].set(jr.normal(jr.PRNGKey(2), (4, d)))
-
         out1 = block(x1, mask)
         out2 = block(x2, mask)
-
         assert jnp.allclose(out1[:5], out2[:5], atol=1e-5)
         assert not jnp.allclose(out1[5:], out2[5:])
 
 
 class TestOutputHeads:
 
-    D_MODEL   = 64
+    D_MODEL    = 64
     ENTITY_DIM = 32
 
     @pytest.fixture(scope="class")
@@ -61,22 +60,18 @@ class TestOutputHeads:
         return OutputHeads(self.D_MODEL, self.ENTITY_DIM, KEY)
 
     def test_output_keys(self, heads):
-        """All logit-group and entity head names should appear in output."""
         x = jnp.ones(64)
         out = heads(x)
-        assert set(out.keys()) == set(TOKEN_HEADS.keys()) | set(ENTITY_HEADS.keys())
+        assert set(out.keys()) == set(TOKEN_HEADS.keys()) | set(ENTITY_OUTPUT_HEADS)
 
     def test_logit_group_shapes(self, heads):
-        """Each logit-group head should have its declared vocab size."""
         x = jnp.ones(64)
         out = heads(x)
         for name, (pos, vocab) in TOKEN_HEADS.items():
-            assert out[name].shape == (vocab,), (
-                f"{name}: expected ({vocab},), got {out[name].shape}"
-            )
+            assert out[name].shape == (vocab,), f"{name}: expected ({vocab},)"
 
-    def test_entity_head_shapes(self, heads):
-        """Each entity head should output total_field_vocab logits."""
+    def test_cat_entity_head_shapes(self, heads):
+        """Each CE entity head should output total_field_vocab logits."""
         x = jnp.ones(64)
         out = heads(x)
         for name, total_vocab in ENTITY_HEAD_TOTAL_VOCAB.items():
@@ -84,8 +79,22 @@ class TestOutputHeads:
                 f"{name}: expected ({total_vocab},), got {out[name].shape}"
             )
 
+    def test_cont_entity_head_shapes(self, heads):
+        """Each regression head should output n_cont_fields values."""
+        x = jnp.ones(64)
+        out = heads(x)
+        for name, n_cont in _CONT_N.items():
+            key = f'{name}_cont'
+            assert out[key].shape == (n_cont,), (
+                f"{key}: expected ({n_cont},), got {out[key].shape}"
+            )
+
+    def test_waveframe_head_shape(self, heads):
+        x = jnp.ones(64)
+        out = heads(x)
+        assert out['instr_waveframes'].shape == (WAVEFRAME_DIM,)
+
     def test_log_probs_logit_groups(self, heads):
-        """log_probs should return valid log-probabilities for logit-group heads."""
         x = jr.normal(jr.PRNGKey(1), (64,))
         lp = heads.log_probs(x)
         assert set(lp.keys()) == set(TOKEN_HEADS.keys())
@@ -93,18 +102,27 @@ class TestOutputHeads:
             assert jnp.allclose(jnp.exp(logp).sum(), 1.0, atol=1e-5), name
 
     def test_logit_group_weight_shapes(self, heads):
-        """Each logit-group weight matrix should be (N, vocab, d_model)."""
         for group_name, members in LOGIT_GROUPS.items():
-            n = len(members)
+            n    = len(members)
             vocab = members[0][2]
             assert heads.weights[group_name].shape == (n, vocab, 64), group_name
 
-    def test_entity_decoder_shapes(self, heads):
-        """Each entity decoder should have correct layer shapes."""
+    def test_cat_decoder_shapes(self, heads):
         for name, total_vocab in ENTITY_HEAD_TOTAL_VOCAB.items():
-            dec = heads.entity_decoders[name]
+            dec = heads.cat_decoders[name]
             assert dec.linear_in.weight.shape  == (self.ENTITY_DIM, self.D_MODEL), name
-            assert dec.linear_out.weight.shape == (total_vocab, self.ENTITY_DIM),  name
+            assert dec.linear_out.weight.shape == (total_vocab,  self.ENTITY_DIM), name
+
+    def test_cont_decoder_shapes(self, heads):
+        for name, n_cont in _CONT_N.items():
+            dec = heads.cont_decoders[name]
+            assert dec.linear_in.weight.shape  == (self.ENTITY_DIM, self.D_MODEL), name
+            assert dec.linear_out.weight.shape == (n_cont, self.ENTITY_DIM), name
+
+    def test_waveframe_decoder_shapes(self, heads):
+        dec = heads.waveframe_decoder
+        assert dec.linear_in.weight.shape  == (self.ENTITY_DIM, self.D_MODEL)
+        assert dec.linear_out.weight.shape == (WAVEFRAME_DIM, self.ENTITY_DIM)
 
 
 class TestHardTargetsAndLoss:
@@ -127,45 +145,31 @@ class TestHardTargetsAndLoss:
         x = jr.normal(jr.PRNGKey(1), (64,))
         logits = heads(x)
         tokens = jnp.zeros(21, dtype=jnp.int32)
-        targets = hard_targets(tokens)
-        loss = token_loss(logits, targets)
+        loss = token_loss(logits, hard_targets(tokens))
         assert jnp.isfinite(loss)
         assert loss > 0
 
     def test_soft_targets_lower_loss(self):
-        """Soft targets matching the model's own logit-group predictions → lower loss."""
         heads = OutputHeads(64, 32, KEY)
         x = jr.normal(jr.PRNGKey(1), (64,))
         logits = heads(x)
-
-        soft_targets = {
-            name: jax.nn.softmax(logits[name])
-            for name in TOKEN_HEADS
-        }
-        loss_soft = token_loss(logits, soft_targets)
-        loss_hard = token_loss(logits, hard_targets(jnp.zeros(21, dtype=jnp.int32)))
-        assert loss_soft < loss_hard
+        soft = {name: jax.nn.softmax(logits[name]) for name in TOKEN_HEADS}
+        assert token_loss(logits, soft) < token_loss(logits, hard_targets(jnp.zeros(21, dtype=jnp.int32)))
 
     def test_entity_loss_finite(self):
-        """entity_loss should return a finite scalar."""
-        heads = OutputHeads(64, 32, KEY)
-        x = jr.normal(jr.PRNGKey(1), (64,))
-        out = heads(x)
-        entity_logits = {name: out[name] for name in ENTITY_HEAD_SPECS}
-        banks = SongBanks.default()
-        tokens = jnp.zeros(21, dtype=jnp.int32)
-        loss = entity_loss(entity_logits, banks, tokens)
+        heads  = OutputHeads(64, 32, KEY)
+        x      = jr.normal(jr.PRNGKey(1), (64,))
+        out    = heads(x)
+        logits = {name: out[name] for name in ENTITY_OUTPUT_HEADS}
+        loss   = entity_loss(logits, SongBanks.default(), jnp.zeros(21, dtype=jnp.int32))
         assert jnp.isfinite(loss)
 
     def test_entity_loss_null_tokens(self):
-        """All-zero tokens (NULL entity IDs) should still produce finite loss."""
-        heads = OutputHeads(64, 32, KEY)
-        x = jr.normal(jr.PRNGKey(2), (64,))
-        out = heads(x)
-        entity_logits = {name: out[name] for name in ENTITY_HEAD_SPECS}
-        banks = SongBanks.default()
-        tokens = jnp.zeros(21, dtype=jnp.int32)
-        loss = entity_loss(entity_logits, banks, tokens)
+        heads  = OutputHeads(64, 32, KEY)
+        x      = jr.normal(jr.PRNGKey(2), (64,))
+        out    = heads(x)
+        logits = {name: out[name] for name in ENTITY_OUTPUT_HEADS}
+        loss   = entity_loss(logits, SongBanks.default(), jnp.zeros(21, dtype=jnp.int32))
         assert jnp.isfinite(loss)
 
 
@@ -174,53 +178,43 @@ class TestLSDJTransformer:
     @pytest.fixture(scope="class")
     def model(self):
         return LSDJTransformer(
-            KEY,
-            d_model=64,
-            entity_dim=32,
-            num_heads_t=2,
-            num_heads_c=2,
-            num_blocks=2,
+            KEY, d_model=64, entity_dim=32, num_heads_t=2, num_heads_c=2, num_blocks=2,
         )
 
     def test_output_keys(self, model):
         tokens = jnp.zeros((8, 4, 21))
         out = model(tokens)
-        assert isinstance(out, dict)
-        assert set(out.keys()) == set(TOKEN_HEADS.keys()) | set(ENTITY_HEADS.keys())
+        assert set(out.keys()) == set(TOKEN_HEADS.keys()) | set(ENTITY_OUTPUT_HEADS)
 
     def test_logit_group_output_shapes(self, model):
         S = 8
-        tokens = jnp.zeros((S, 4, 21))
-        out = model(tokens)
+        out = model(jnp.zeros((S, 4, 21)))
         for name, (pos, vocab) in TOKEN_HEADS.items():
-            assert out[name].shape == (S, 4, vocab), (
-                f"{name}: expected ({S}, 4, {vocab}), got {out[name].shape}"
-            )
+            assert out[name].shape == (S, 4, vocab), f"{name}: expected ({S},4,{vocab})"
 
-    def test_entity_head_output_shapes(self, model):
+    def test_cat_entity_output_shapes(self, model):
         S = 8
-        tokens = jnp.zeros((S, 4, 21))
-        out = model(tokens)
+        out = model(jnp.zeros((S, 4, 21)))
         for name, total_vocab in ENTITY_HEAD_TOTAL_VOCAB.items():
-            assert out[name].shape == (S, 4, total_vocab), (
-                f"{name}: expected ({S}, 4, {total_vocab}), got {out[name].shape}"
-            )
+            assert out[name].shape == (S, 4, total_vocab), f"{name}: expected ({S},4,{total_vocab})"
+
+    def test_cont_entity_output_shapes(self, model):
+        S = 8
+        out = model(jnp.zeros((S, 4, 21)))
+        for name, n_cont in _CONT_N.items():
+            key = f'{name}_cont'
+            assert out[key].shape == (S, 4, n_cont), f"{key}: expected ({S},4,{n_cont})"
+
+    def test_waveframe_output_shape(self, model):
+        out = model(jnp.zeros((8, 4, 21)))
+        assert out['instr_waveframes'].shape == (8, 4, WAVEFRAME_DIM)
 
     def test_default_banks(self):
-        model = LSDJTransformer(
-            jr.PRNGKey(42),
-            d_model=64,
-            num_heads_t=2,
-            num_heads_c=1,
-            num_blocks=1,
-        )
+        model = LSDJTransformer(jr.PRNGKey(42), d_model=64, num_heads_t=2, num_heads_c=1, num_blocks=1)
         out = model(jnp.zeros((4, 4, 21)))
-        assert 'note' in out
         assert out['note'].shape == (4, 4, NUM_NOTES)
 
     def test_with_banks_no_crash(self, model):
-        """with_banks should return a valid model that still produces output."""
-        banks = SongBanks.default()
-        new_model = model.with_banks(banks)
+        new_model = model.with_banks(SongBanks.default())
         out = new_model(jnp.zeros((4, 4, 21)))
         assert out['note'].shape == (4, 4, NUM_NOTES)
