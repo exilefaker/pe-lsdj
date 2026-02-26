@@ -255,48 +255,24 @@ _TABLE_SCALAR_CAT_GROUPS = _build_cat_groups(TABLE_SCALAR_CAT_SPECS, TABLE_SCALA
 _SOFTSYNTH_CAT_GROUPS    = _build_cat_groups(SOFTSYNTH_CAT_SPECS,    SOFTSYNTH_CAT_COL_INDICES)
 
 # ---------------------------------------------------------------------------
-# Hierarchical entity head specs.
-#
-# ENTITY_HEAD_SPECS: CE heads — only entity types that have discrete fields.
-# _CONT_N:           continuous field counts — all entity head types.
-# Outputs named as `{head}` (CE) and `{head}_cont` (regression).
+# Vocab totals for decoder output sizes.
 # ---------------------------------------------------------------------------
 
-ENTITY_HEAD_SPECS = {
-    'instr_scalar':      INSTR_SCALAR_CAT_SPECS,
-    'instr_table':       TABLE_SCALAR_CAT_SPECS,
-    'instr_table_trace': TABLE_SCALAR_CAT_SPECS,
-    'instr_softsynth':   SOFTSYNTH_CAT_SPECS,
-    'table_scalar':      TABLE_SCALAR_CAT_SPECS,
-    'table_trace':       TABLE_SCALAR_CAT_SPECS,
-}
+TABLE_SCALAR_CAT_TOTAL_VOCAB = sum(v for _, v in TABLE_SCALAR_CAT_SPECS)
+INSTR_SCALAR_CAT_TOTAL_VOCAB = sum(v for _, v in INSTR_SCALAR_CAT_SPECS)
+SOFTSYNTH_CAT_TOTAL_VOCAB    = sum(v for _, v in SOFTSYNTH_CAT_SPECS)
 
-ENTITY_HEAD_TOTAL_VOCAB = {
-    name: sum(v for _, v in specs)
-    for name, specs in ENTITY_HEAD_SPECS.items()
-}
+N_TABLE_SLOTS  = len(TABLE_FX_COL_INDICES)   # 32 — TABLE_FX slots per table
+N_GROOVE_SLOTS = len(GROOVE_FX_COL_INDICES)  # 32 — GROOVE_FX slots per table
 
-# All entity head names that have a continuous (regression) decoder.
-_CONT_N = {
-    'instr_scalar':             INSTR_SCALAR_CONT_N,
-    'instr_table':              TABLE_SCALAR_CONT_N,
-    'instr_table_groove':       GROOVE_CONT_N,
-    'instr_table_trace':        TABLE_SCALAR_CONT_N,
-    'instr_table_trace_groove': GROOVE_CONT_N,
-    'instr_softsynth':          SOFTSYNTH_CONT_N,
-    'table_scalar':             TABLE_SCALAR_CONT_N,
-    'table_groove':             GROOVE_CONT_N,
-    'table_trace':              TABLE_SCALAR_CONT_N,
-    'table_trace_groove':       GROOVE_CONT_N,
-    'groove_id':                GROOVE_CONT_N,
-}
-
-# All entity output head names: CE heads + regression heads + waveframes.
-ENTITY_OUTPUT_HEADS = (
-    list(ENTITY_HEAD_SPECS.keys())
-    + [f'{n}_cont' for n in _CONT_N]
-    + ['instr_waveframes']
-)
+# Mask for trace cat_out: A (CMD_A=1) and H (CMD_H=7) commands are invalid in traces.
+# Applied to all 19-vocab fx_cmd fields in TABLE_SCALAR_CAT logits.
+_TABLE_CAT_TRACE_MASK = jnp.zeros(TABLE_SCALAR_CAT_TOTAL_VOCAB, dtype=bool)
+for _vocab, _starts, _cols in _TABLE_SCALAR_CAT_GROUPS:
+    if _vocab == 19:
+        for _cmd in (CMD_A, CMD_H):
+            _TABLE_CAT_TRACE_MASK = _TABLE_CAT_TRACE_MASK.at[_starts + _cmd].set(True)
+del _vocab, _starts, _cols, _cmd
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +294,7 @@ def token_loss(logits_dict, target_dists):
     return total
 
 
-def _cat_ce_grouped(flat_logits, row, groups):
+def _ce_loss_grouped(flat_logits, row, groups):
     """
     Vectorized CE over categorical fields, grouped by vocab size.
 
@@ -337,183 +313,108 @@ def _cat_ce_grouped(flat_logits, row, groups):
     return total / n_total
 
 
-def _cont_mse(cont_logits, row, cont_cols_array, max_vals_array):
+def _mse_loss(cont_logits, row, cont_cols_array, max_vals_array):
     """Vectorized MSE regression for continuous fields (single bank row)."""
     targets = row[cont_cols_array].astype(jnp.float32) / max_vals_array
     preds   = jax.nn.sigmoid(cont_logits)
     return jnp.mean((preds - targets) ** 2)
 
 
-def _groove_mse_batch(cont_logits, groove_rows):
+def _table_loss(preds, table_row, banks):
     """
-    MSE regression for a batch of groove rows against the same logits.
-
-    groove_rows: (N, 32) — N groove rows
-    cont_logits: (32,)   — broadcast over all N rows
+    Loss components for one table (or trace) prediction.
+    Returns a Python list of scalar losses — 6 components:
+      scalar cat, scalar cont, groove slots, trace cat, trace cont, trace groove slots.
+    Called for both instrument's table and phrase-level table.
     """
-    targets = groove_rows.astype(jnp.float32) / _GROOVE_CONT_MAX
-    preds   = jax.nn.sigmoid(cont_logits)
-    return jnp.mean((preds - targets) ** 2)
+    losses = []
+
+    # Table scalar fields
+    losses.append(_ce_loss_grouped(preds['cat'], table_row, _TABLE_SCALAR_CAT_GROUPS))
+    losses.append(_mse_loss(preds['cont'], table_row,
+                            _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES))
+
+    # Per-slot groove predictions: preds['grooves'] is (N_GROOVE_SLOTS, GROOVE_CONT_N)
+    groove_ids   = table_row[_GROOVE_FX_COLS_ARRAY]          # (N_GROOVE_SLOTS,)
+    groove_rows  = banks.grooves[groove_ids]                  # (N_GROOVE_SLOTS, GROOVE_CONT_N)
+    groove_tgts  = groove_rows.astype(jnp.float32) / _GROOVE_CONT_MAX
+    losses.append(jnp.mean((jax.nn.sigmoid(preds['grooves']) - groove_tgts) ** 2))
+
+    # Per-slot trace predictions: preds['traces'] is a dict of batched arrays
+    trace_ids  = table_row[_TABLE_FX_COLS_ARRAY]             # (N_TABLE_SLOTS,)
+    trace_rows = banks.traces[trace_ids]                     # (N_TABLE_SLOTS, TABLE_WIDTH)
+    tp = preds['traces']
+
+    # Trace cat — vmap over N_TABLE_SLOTS
+    def _trace_cat(p, row):
+        return _ce_loss_grouped(p, row, _TABLE_SCALAR_CAT_GROUPS)
+    losses.append(jax.vmap(_trace_cat)(tp['cat'], trace_rows).mean())
+
+    # Trace cont — batched MSE
+    trace_cont_tgts = (
+        trace_rows[:, _TABLE_SCALAR_CONT_COLS_ARRAY].astype(jnp.float32)
+        / _TABLE_SCALAR_CONT_MAX_VALUES
+    )
+    losses.append(jnp.mean((jax.nn.sigmoid(tp['cont']) - trace_cont_tgts) ** 2))
+
+    # Trace groove slots — 3D gather, no vmap needed
+    trace_groove_ids  = trace_rows[:, _GROOVE_FX_COLS_ARRAY]   # (N_TABLE_SLOTS, N_GROOVE_SLOTS)
+    trace_groove_rows = banks.grooves[trace_groove_ids]         # (N_TABLE_SLOTS, N_GROOVE_SLOTS, GROOVE_CONT_N)
+    trace_groove_tgts = trace_groove_rows.astype(jnp.float32) / _GROOVE_CONT_MAX
+    losses.append(jnp.mean((jax.nn.sigmoid(tp['grooves']) - trace_groove_tgts) ** 2))
+
+    return losses
 
 
-def entity_loss(entity_logits_dict, banks: SongBanks, target_tokens):
+def entity_loss(entity_preds, banks: SongBanks, target_tokens):
     """
-    Hierarchical loss for one (step, channel).
+    Hierarchical entity loss for one (step, channel).
 
-    CE loss over discrete entity fields + MSE regression over continuous fields.
-    Grooves are purely regression (no discrete fields). Trace-groove lookups
-    use batched 3-D indexing — no nested vmap required.
-
-    Returns scalar = sum of 18 components / 18.
+    entity_preds: nested dict from OutputHeads.__call__() — keys 'instr', 'table', 'groove'.
+    Returns scalar = mean of 18 loss components.
     """
     target_tokens = jnp.int32(target_tokens)
+    losses = []
 
     # ─── Instrument ──────────────────────────────────────────────────────────
     instr_id  = target_tokens[ENTITY_HEADS['instr_id']]
-    instr_row = banks.instruments[instr_id]                      # (INSTR_WIDTH,)
+    instr_row = banks.instruments[instr_id]
+    p = entity_preds['instr']
 
-    instr_scalar_cat = _cat_ce_grouped(
-        entity_logits_dict['instr_scalar'], instr_row,
-        _INSTR_SCALAR_CAT_GROUPS,
-    )
-    instr_scalar_cont = _cont_mse(
-        entity_logits_dict['instr_scalar_cont'], instr_row,
-        _INSTR_SCALAR_CONT_COLS_ARRAY, _INSTR_SCALAR_CONT_MAX_VALUES,
-    )
+    losses.append(_ce_loss_grouped(p['cat'], instr_row, _INSTR_SCALAR_CAT_GROUPS))
+    losses.append(_mse_loss(p['cont'], instr_row,
+                            _INSTR_SCALAR_CONT_COLS_ARRAY, _INSTR_SCALAR_CONT_MAX_VALUES))
 
     # Instrument's table
-    it_row = banks.tables[instr_row[_INSTR_TABLE_COL]]           # (624,)
-
-    instr_table_cat = _cat_ce_grouped(
-        entity_logits_dict['instr_table'], it_row,
-        _TABLE_SCALAR_CAT_GROUPS,
-    )
-    instr_table_cont = _cont_mse(
-        entity_logits_dict['instr_table_cont'], it_row,
-        _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES,
-    )
-
-    # Instrument's table → grooves (32 refs, batch MSE — no vmap)
-    it_groove_rows = banks.grooves[it_row[_GROOVE_FX_COLS_ARRAY]]  # (32, 32)
-    instr_table_groove = _groove_mse_batch(
-        entity_logits_dict['instr_table_groove_cont'], it_groove_rows,
-    )
-
-    # Instrument's table → traces (32 refs)
-    it_trace_rows = banks.traces[it_row[_TABLE_FX_COLS_ARRAY]]     # (32, 624)
-
-    def _it_trace_cat(trace_row):
-        return _cat_ce_grouped(
-            entity_logits_dict['instr_table_trace'], trace_row,
-            _TABLE_SCALAR_CAT_GROUPS,
-        )
-    instr_table_trace_cat = jax.vmap(_it_trace_cat)(it_trace_rows).mean()
-
-    # Batch regression over 32 traces (no vmap)
-    it_trace_cont_tgts = (
-        it_trace_rows[:, _TABLE_SCALAR_CONT_COLS_ARRAY].astype(jnp.float32)
-        / _TABLE_SCALAR_CONT_MAX_VALUES
-    )
-    instr_table_trace_cont = jnp.mean(
-        (jax.nn.sigmoid(entity_logits_dict['instr_table_trace_cont'])
-         - it_trace_cont_tgts) ** 2
-    )
-
-    # Instrument's table → traces → grooves (3-D gather, no vmap)
-    it_tg_rows = banks.grooves[it_trace_rows[:, _GROOVE_FX_COLS_ARRAY]]  # (32, 32, 32)
-    instr_table_trace_groove = jnp.mean(
-        (jax.nn.sigmoid(entity_logits_dict['instr_table_trace_groove_cont'])
-         - it_tg_rows.astype(jnp.float32) / _GROOVE_CONT_MAX) ** 2
-    )
+    it_row = banks.tables[instr_row[_INSTR_TABLE_COL]]
+    losses.extend(_table_loss(p['table'], it_row, banks))
 
     # Instrument's softsynth
-    synth_id   = instr_row[_INSTR_SOFTSYNTH_COL]
-    synth_row  = banks.softsynths[synth_id]                      # (SOFTSYNTH_WIDTH,)
+    synth_id  = instr_row[_INSTR_SOFTSYNTH_COL]
+    synth_row = banks.softsynths[synth_id]
+    ps = p['softsynth']
+    losses.append(_ce_loss_grouped(ps['cat'], synth_row, _SOFTSYNTH_CAT_GROUPS))
+    losses.append(_mse_loss(ps['cont'], synth_row,
+                            _SOFTSYNTH_CONT_COLS_ARRAY, _SOFTSYNTH_CONT_MAX_VALUES))
 
-    instr_softsynth_cat = _cat_ce_grouped(
-        entity_logits_dict['instr_softsynth'], synth_row,
-        _SOFTSYNTH_CAT_GROUPS,
-    )
-    instr_softsynth_cont = _cont_mse(
-        entity_logits_dict['instr_softsynth_cont'], synth_row,
-        _SOFTSYNTH_CONT_COLS_ARRAY, _SOFTSYNTH_CONT_MAX_VALUES,
-    )
-
-    # Instrument's waveframes (regression, MSE)
-    wf_row  = banks.waveframes[synth_id]                         # (WAVEFRAME_DIM,)
-    wf_tgts = wf_row.astype(jnp.float32) / 15.0
-    instr_waveframe_mse = jnp.mean(
-        (jax.nn.sigmoid(entity_logits_dict['instr_waveframes']) - wf_tgts) ** 2
-    )
+    # Waveframes
+    wf_row = banks.waveframes[synth_id]
+    losses.append(jnp.mean(
+        (jax.nn.sigmoid(ps['waveframes']) - wf_row.astype(jnp.float32) / 15.0) ** 2
+    ))
 
     # ─── Phrase-level table ──────────────────────────────────────────────────
-    pt_row = banks.tables[target_tokens[ENTITY_HEADS['table_id']]]  # (624,)
-
-    table_scalar_cat = _cat_ce_grouped(
-        entity_logits_dict['table_scalar'], pt_row,
-        _TABLE_SCALAR_CAT_GROUPS,
-    )
-    table_scalar_cont = _cont_mse(
-        entity_logits_dict['table_scalar_cont'], pt_row,
-        _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES,
-    )
-
-    pt_groove_rows = banks.grooves[pt_row[_GROOVE_FX_COLS_ARRAY]]   # (32, 32)
-    table_groove = _groove_mse_batch(
-        entity_logits_dict['table_groove_cont'], pt_groove_rows,
-    )
-
-    pt_trace_rows = banks.traces[pt_row[_TABLE_FX_COLS_ARRAY]]      # (32, 624)
-
-    def _pt_trace_cat(trace_row):
-        return _cat_ce_grouped(
-            entity_logits_dict['table_trace'], trace_row,
-            _TABLE_SCALAR_CAT_GROUPS,
-        )
-    table_trace_cat = jax.vmap(_pt_trace_cat)(pt_trace_rows).mean()
-
-    pt_trace_cont_tgts = (
-        pt_trace_rows[:, _TABLE_SCALAR_CONT_COLS_ARRAY].astype(jnp.float32)
-        / _TABLE_SCALAR_CONT_MAX_VALUES
-    )
-    table_trace_cont = jnp.mean(
-        (jax.nn.sigmoid(entity_logits_dict['table_trace_cont'])
-         - pt_trace_cont_tgts) ** 2
-    )
-
-    pt_tg_rows = banks.grooves[pt_trace_rows[:, _GROOVE_FX_COLS_ARRAY]]  # (32, 32, 32)
-    table_trace_groove = jnp.mean(
-        (jax.nn.sigmoid(entity_logits_dict['table_trace_groove_cont'])
-         - pt_tg_rows.astype(jnp.float32) / _GROOVE_CONT_MAX) ** 2
-    )
+    pt_row = banks.tables[target_tokens[ENTITY_HEADS['table_id']]]
+    losses.extend(_table_loss(entity_preds['table'], pt_row, banks))
 
     # ─── Phrase-level groove ─────────────────────────────────────────────────
-    groove_row = banks.grooves[target_tokens[ENTITY_HEADS['groove_id']]]  # (32,)
-    groove_id_cont = jnp.mean(
-        (jax.nn.sigmoid(entity_logits_dict['groove_id_cont'])
+    groove_row = banks.grooves[target_tokens[ENTITY_HEADS['groove_id']]]
+    losses.append(jnp.mean(
+        (jax.nn.sigmoid(entity_preds['groove'])
          - groove_row.astype(jnp.float32) / _GROOVE_CONT_MAX) ** 2
-    )
+    ))
 
-    return (
-        instr_scalar_cat
-        + instr_scalar_cont
-        + instr_table_cat
-        + instr_table_cont
-        + instr_table_groove
-        + instr_table_trace_cat
-        + instr_table_trace_cont
-        + instr_table_trace_groove
-        + instr_softsynth_cat
-        + instr_softsynth_cont
-        + instr_waveframe_mse
-        + table_scalar_cat
-        + table_scalar_cont
-        + table_groove
-        + table_trace_cat
-        + table_trace_cont
-        + table_trace_groove
-        + groove_id_cont
-    ) / 18
+    return jnp.mean(jnp.array(losses))
 
 
 # ---------------------------------------------------------------------------
@@ -538,61 +439,269 @@ class EntityDecoder(eqx.Module):
         return self.linear_in(x)
 
 
-class OutputHeads(eqx.Module):
+class GrooveDecoder(eqx.Module):
     """
-    Output projection heads.
+    Predicts one groove (GROOVE_CONT_N fields) per slot.
 
-    weights:          logit-group linear heads (shared-vocab batching)
-    cat_decoders:     CE entity heads (discrete fields only)
-    cont_decoders:    regression heads (continuous fields, pre-sigmoid)
-    waveframe_decoder: 512-dim regression head for softsynth waveframes
+    Slot embeddings (shape: N_GROOVE_SLOTS × entity_dim) are added to the
+    entity_dim context before decoding. Shared across all groove slot levels
+    (table and trace) — context distinguishes the level, slot_embeds
+    distinguish position within the level.
     """
-    weights:           dict[str, Array]
-    cat_decoders:      dict[str, EntityDecoder]
-    cont_decoders:     dict[str, EntityDecoder]
-    waveframe_decoder: EntityDecoder
+    slot_embeds: Array          # (N_GROOVE_SLOTS, entity_dim)
+    linear_in:   eqx.nn.Linear  # entity_dim → entity_dim
+    linear_out:  eqx.nn.Linear  # entity_dim → GROOVE_CONT_N
+
+    def __init__(self, entity_dim, key):
+        k1, k2, k3 = jr.split(key, 3)
+        self.slot_embeds = jr.normal(k1, (N_GROOVE_SLOTS, entity_dim)) * 0.02
+        self.linear_in   = eqx.nn.Linear(entity_dim, entity_dim,   use_bias=False, key=k2)
+        self.linear_out  = eqx.nn.Linear(entity_dim, GROOVE_CONT_N, use_bias=False, key=k3)
+
+    def __call__(self, context, slot_idx):
+        """context: (entity_dim,) → (GROOVE_CONT_N,) groove logits."""
+        h = jax.nn.gelu(self.linear_in(context + self.slot_embeds[slot_idx]))
+        return self.linear_out(h)
+
+    def all_slots(self, context):
+        """Predict all N_GROOVE_SLOTS grooves: (N_GROOVE_SLOTS, GROOVE_CONT_N)."""
+        # context: (entity_dim,); slot_embeds: (N, entity_dim) — broadcasts
+        h = jax.nn.gelu(jax.vmap(self.linear_in)(context + self.slot_embeds))
+        return jax.vmap(self.linear_out)(h)
+
+    def encode(self, context, slot_idx):
+        """entity_dim latent for cosine-similarity bank matching."""
+        return self.linear_in(context + self.slot_embeds[slot_idx])
+
+
+class TableDecoder(eqx.Module):
+    """
+    Unified table/trace decoder.
+
+    Tables and traces have identical structure and share all weights.
+    The only structural difference: traces mask CMD_A (TABLE) and CMD_H (HOP)
+    command logits to −∞, preventing further table chaining.
+
+    Slot embeddings distinguish which of the N_TABLE_SLOTS trace sub-slots is
+    being predicted. Added to the entity_dim context before sub-decoding.
+
+    Shared GrooveDecoder instance handles GROOVE_FX slot predictions at all depths.
+    sub_table_decoder=None at trace level (explicit depth cap).
+    """
+    is_trace:          bool = eqx.field(static=True)
+    slot_embeds:       Array            # (N_TABLE_SLOTS, entity_dim) — for trace sub-slots
+    linear_in:         eqx.nn.Linear   # entity_dim → entity_dim
+    cat_out:           eqx.nn.Linear   # entity_dim → TABLE_SCALAR_CAT_TOTAL_VOCAB
+    cont_out:          eqx.nn.Linear   # entity_dim → TABLE_SCALAR_CONT_N
+    groove_decoder:    GrooveDecoder
+    sub_table_decoder: 'TableDecoder | None'
+
+    def __init__(self, entity_dim, is_trace, groove_decoder, key, *,
+                 sub_table_decoder=None,
+                 _slot_embeds=None, _linear_in=None, _cat_out=None, _cont_out=None):
+        k1, k2, k3, k4 = jr.split(key, 4)
+        self.is_trace = is_trace
+        self.slot_embeds = (
+            _slot_embeds if _slot_embeds is not None
+            else jr.normal(k1, (N_TABLE_SLOTS, entity_dim)) * 0.02
+        )
+        self.linear_in = (
+            _linear_in if _linear_in is not None
+            else eqx.nn.Linear(entity_dim, entity_dim, use_bias=False, key=k2)
+        )
+        self.cat_out = (
+            _cat_out if _cat_out is not None
+            else eqx.nn.Linear(entity_dim, TABLE_SCALAR_CAT_TOTAL_VOCAB, use_bias=False, key=k3)
+        )
+        self.cont_out = (
+            _cont_out if _cont_out is not None
+            else eqx.nn.Linear(entity_dim, TABLE_SCALAR_CONT_N, use_bias=False, key=k4)
+        )
+        self.groove_decoder    = groove_decoder
+        self.sub_table_decoder = sub_table_decoder
+
+    def __call__(self, context):
+        """
+        context: (entity_dim,) → nested dict:
+          {
+            'cat':    (TABLE_SCALAR_CAT_TOTAL_VOCAB,)  [A/H masked if is_trace]
+            'cont':   (TABLE_SCALAR_CONT_N,)
+            'grooves':(N_GROOVE_SLOTS, GROOVE_CONT_N)
+            'traces': {                                 [only if sub_table_decoder set]
+              'cat':    (N_TABLE_SLOTS, TABLE_SCALAR_CAT_TOTAL_VOCAB)
+              'cont':   (N_TABLE_SLOTS, TABLE_SCALAR_CONT_N)
+              'grooves':(N_TABLE_SLOTS, N_GROOVE_SLOTS, GROOVE_CONT_N)
+            }
+          }
+        """
+        h = jax.nn.gelu(self.linear_in(context))
+
+        cat_logits = self.cat_out(h)
+        if self.is_trace:
+            cat_logits = jnp.where(_TABLE_CAT_TRACE_MASK, -jnp.inf, cat_logits)
+
+        preds = {
+            'cat':    cat_logits,
+            'cont':   self.cont_out(h),
+            'grooves': self.groove_decoder.all_slots(h),
+        }
+
+        if self.sub_table_decoder is not None:
+            # Each trace slot: h + slot_embed[i] as context
+            trace_contexts = h + self.slot_embeds   # (N_TABLE_SLOTS, entity_dim)
+            preds['traces'] = jax.vmap(self.sub_table_decoder)(trace_contexts)
+
+        return preds
+
+    def encode(self, context):
+        """entity_dim latent for cosine-similarity bank matching."""
+        return self.linear_in(context)
+
+
+class SoftSynthDecoder(eqx.Module):
+    """
+    Softsynth + waveframe decoder.
+    Conditions on instrument entity_dim latent (subordinate — not backbone x directly).
+    """
+    linear_in:     eqx.nn.Linear   # entity_dim → entity_dim
+    cat_out:       eqx.nn.Linear   # entity_dim → SOFTSYNTH_CAT_TOTAL_VOCAB
+    cont_out:      eqx.nn.Linear   # entity_dim → SOFTSYNTH_CONT_N
+    waveframe_out: eqx.nn.Linear   # entity_dim → WAVEFRAME_DIM
+
+    def __init__(self, entity_dim, key):
+        k1, k2, k3, k4 = jr.split(key, 4)
+        self.linear_in     = eqx.nn.Linear(entity_dim, entity_dim,           use_bias=False, key=k1)
+        self.cat_out       = eqx.nn.Linear(entity_dim, SOFTSYNTH_CAT_TOTAL_VOCAB, use_bias=False, key=k2)
+        self.cont_out      = eqx.nn.Linear(entity_dim, SOFTSYNTH_CONT_N,     use_bias=False, key=k3)
+        self.waveframe_out = eqx.nn.Linear(entity_dim, WAVEFRAME_DIM,        use_bias=False, key=k4)
+
+    def __call__(self, instr_h):
+        """instr_h: (entity_dim,) GELU'd instrument latent."""
+        h = jax.nn.gelu(self.linear_in(instr_h))
+        return {
+            'cat':        self.cat_out(h),
+            'cont':       self.cont_out(h),
+            'waveframes': self.waveframe_out(h),
+        }
+
+    def encode(self, instr_h):
+        return self.linear_in(instr_h)
+
+
+class InstrumentDecoder(eqx.Module):
+    """
+    Phrase-level instrument decoder. Conditions on backbone x (d_model).
+    Instrument's table uses the shared table_decoder with instrument latent as context.
+    Softsynth/waveframes condition on instrument entity_dim latent (subordinate).
+    """
+    linear_in:         eqx.nn.Linear    # d_model → entity_dim
+    cat_out:           eqx.nn.Linear    # entity_dim → INSTR_SCALAR_CAT_TOTAL_VOCAB
+    cont_out:          eqx.nn.Linear    # entity_dim → INSTR_SCALAR_CONT_N
+    softsynth_decoder: SoftSynthDecoder
 
     def __init__(self, d_model, entity_dim, key):
-        n_keys = len(LOGIT_GROUPS) + len(ENTITY_HEAD_SPECS) + len(_CONT_N) + 1
-        keys   = jr.split(key, n_keys)
-        ki     = 0
+        k1, k2, k3, k4 = jr.split(key, 4)
+        self.linear_in         = eqx.nn.Linear(d_model,     entity_dim,              use_bias=False, key=k1)
+        self.cat_out           = eqx.nn.Linear(entity_dim,  INSTR_SCALAR_CAT_TOTAL_VOCAB, use_bias=False, key=k2)
+        self.cont_out          = eqx.nn.Linear(entity_dim,  INSTR_SCALAR_CONT_N,     use_bias=False, key=k3)
+        self.softsynth_decoder = SoftSynthDecoder(entity_dim, k4)
 
-        # Logit-group heads
+    def __call__(self, x):
+        """
+        x: (d_model,) backbone repr.
+        Returns (preds_dict, h) where h is the GELU'd entity_dim latent.
+        preds_dict has keys 'cat', 'cont', 'softsynth'.
+        Instrument's 'table' is added by OutputHeads using the shared table_decoder.
+        """
+        h = jax.nn.gelu(self.linear_in(x))
+        return {
+            'cat':       self.cat_out(h),
+            'cont':      self.cont_out(h),
+            'softsynth': self.softsynth_decoder(h),
+        }, h
+
+    def encode(self, x):
+        """entity_dim latent for cosine-similarity bank matching."""
+        return self.linear_in(x)
+
+
+class OutputHeads(eqx.Module):
+    """
+    All output projection heads.
+
+    weights:           logit-group linear heads (TOKEN_HEADS, shared-vocab batching)
+    groove_decoder:    shared GrooveDecoder — used at ALL depths (table and trace groove slots)
+    table_decoder:     shared TableDecoder — phrase-level table AND instrument's table
+                       (table_decoder.sub_table_decoder is the trace decoder, sharing weights)
+    instr_decoder:     InstrumentDecoder (instrument scalars + softsynth)
+    table_proj:        d_model → entity_dim projection for phrase-level table context
+    phrase_groove_dec: simple EntityDecoder for phrase-level groove (no slot conditioning)
+    """
+    weights:           dict[str, Array]
+    groove_decoder:    GrooveDecoder
+    table_decoder:     TableDecoder
+    instr_decoder:     InstrumentDecoder
+    table_proj:        eqx.nn.Linear
+    phrase_groove_dec: EntityDecoder
+
+    def __init__(self, d_model, entity_dim, key):
+        keys = jr.split(key, 7)
+
+        # Logit-group heads (unchanged)
         weights = {}
         for group_name, members in LOGIT_GROUPS.items():
             n     = len(members)
             vocab = members[0][2]
-            weights[group_name] = jr.normal(keys[ki], (n, vocab, d_model)) / jnp.sqrt(d_model)
-            ki += 1
+            weights[group_name] = jr.normal(keys[0], (n, vocab, d_model)) / jnp.sqrt(d_model)
         self.weights = weights
 
-        # CE decoders (discrete fields)
-        cat_decoders = {}
-        for name, total_vocab in ENTITY_HEAD_TOTAL_VOCAB.items():
-            cat_decoders[name] = EntityDecoder(d_model, entity_dim, total_vocab, keys[ki])
-            ki += 1
-        self.cat_decoders = cat_decoders
+        # Shared GrooveDecoder
+        groove_dec = GrooveDecoder(entity_dim, keys[1])
+        self.groove_decoder = groove_dec
 
-        # Regression decoders (continuous fields)
-        cont_decoders = {}
-        for name, n_cont in _CONT_N.items():
-            cont_decoders[name] = EntityDecoder(d_model, entity_dim, n_cont, keys[ki])
-            ki += 1
-        self.cont_decoders = cont_decoders
+        # Trace decoder (is_trace=True, depth cap — no sub_table_decoder)
+        trace_dec = TableDecoder(entity_dim, is_trace=True,
+                                 groove_decoder=groove_dec, key=keys[2])
 
-        self.waveframe_decoder = EntityDecoder(d_model, entity_dim, WAVEFRAME_DIM, keys[ki])
+        # Table decoder — shares all weights with trace_dec except is_trace flag
+        table_dec = TableDecoder(entity_dim, is_trace=False,
+                                 groove_decoder=groove_dec, key=keys[3],
+                                 sub_table_decoder=trace_dec,
+                                 _slot_embeds=trace_dec.slot_embeds,
+                                 _linear_in=trace_dec.linear_in,
+                                 _cat_out=trace_dec.cat_out,
+                                 _cont_out=trace_dec.cont_out)
+        self.table_decoder = table_dec
+
+        # Instrument decoder
+        self.instr_decoder = InstrumentDecoder(d_model, entity_dim, keys[4])
+
+        # Phrase-level projections
+        self.table_proj        = eqx.nn.Linear(d_model, entity_dim, use_bias=False, key=keys[5])
+        self.phrase_groove_dec = EntityDecoder(d_model, entity_dim, GROOVE_CONT_N, keys[6])
 
     def __call__(self, x):
+        """x: (d_model,) → nested output dict."""
         result = {}
+
+        # Token heads
         for group_name, members in LOGIT_GROUPS.items():
             logits = self.weights[group_name] @ x
-            for i, (head_name, _, _) in enumerate(members):
-                result[head_name] = logits[i]
-        for name in ENTITY_HEAD_SPECS:
-            result[name] = self.cat_decoders[name](x)
-        for name in _CONT_N:
-            result[f'{name}_cont'] = self.cont_decoders[name](x)
-        result['instr_waveframes'] = self.waveframe_decoder(x)
+            for i, (name, _, _) in enumerate(members):
+                result[name] = logits[i]
+
+        # Phrase-level table
+        table_ctx = jax.nn.gelu(self.table_proj(x))
+        result['table'] = self.table_decoder(table_ctx)
+
+        # Phrase-level groove
+        result['groove'] = self.phrase_groove_dec(x)
+
+        # Instrument
+        instr_preds, instr_h = self.instr_decoder(x)
+        instr_preds['table'] = self.table_decoder(instr_h)  # shared weights, instr latent as context
+        result['instr'] = instr_preds
+
         return result
 
     def log_probs(self, x):
