@@ -224,8 +224,35 @@ _SOFTSYNTH_CONT_COLS_ARRAY      = jnp.array(_synth_cont_cols, dtype=jnp.int32)
 _SOFTSYNTH_CONT_MAX_VALUES      = jnp.array(_synth_cont_maxs, dtype=jnp.float32)
 
 # Grooves: all continuous (no cat fields).
-GROOVE_CONT_N        = len(GROOVE_FIELD_SPECS)   # 32
-_GROOVE_CONT_MAX = 16.0                       # all vocab=17 → max token = 16
+GROOVE_CONT_N    = len(GROOVE_FIELD_SPECS)   # 32
+_GROOVE_CONT_MAX = 16.0                      # all vocab=17 → max token = 16
+
+# ---------------------------------------------------------------------------
+# Cat CE groups: fields grouped by vocab size for vectorized loss.
+#
+# Instead of a Python loop over N fields, we loop over D distinct vocab sizes
+# (D ≤ 3 for all entity types) and do a batched (n_fields, vocab) operation
+# per group. Precomputed at module load time; used as static data in JIT.
+# ---------------------------------------------------------------------------
+
+def _build_cat_groups(cat_specs, col_indices):
+    """Return [(vocab, starts_array, cols_array)] sorted by vocab, one entry per distinct vocab."""
+    offset   = 0
+    by_vocab = {}
+    for k, (_, vocab) in enumerate(cat_specs):
+        if vocab not in by_vocab:
+            by_vocab[vocab] = ([], [])
+        by_vocab[vocab][0].append(offset)
+        by_vocab[vocab][1].append(col_indices[k])
+        offset += vocab
+    return [
+        (v, jnp.array(starts, dtype=jnp.int32), jnp.array(cols, dtype=jnp.int32))
+        for v, (starts, cols) in sorted(by_vocab.items())
+    ]
+
+_INSTR_SCALAR_CAT_GROUPS = _build_cat_groups(INSTR_SCALAR_CAT_SPECS, INSTR_SCALAR_CAT_COL_INDICES)
+_TABLE_SCALAR_CAT_GROUPS = _build_cat_groups(TABLE_SCALAR_CAT_SPECS, TABLE_SCALAR_CAT_COL_INDICES)
+_SOFTSYNTH_CAT_GROUPS    = _build_cat_groups(SOFTSYNTH_CAT_SPECS,    SOFTSYNTH_CAT_COL_INDICES)
 
 # ---------------------------------------------------------------------------
 # Hierarchical entity head specs.
@@ -291,15 +318,23 @@ def token_loss(logits_dict, target_dists):
     return total
 
 
-def _cat_ce(flat_logits, row, col_indices, cat_specs):
-    """CE loss over discrete (categorical) fields. col_indices and cat_specs are Python lists."""
-    offset = 0
-    total = 0.0
-    for k, (_, vocab) in enumerate(cat_specs):
-        lp = jax.nn.log_softmax(flat_logits[offset:offset + vocab])
-        total += -lp[row[col_indices[k]]]
-        offset += vocab
-    return total / len(cat_specs)
+def _cat_ce_grouped(flat_logits, row, groups):
+    """
+    Vectorized CE over categorical fields, grouped by vocab size.
+
+    groups: [(vocab, starts_array, cols_array)] — precomputed by _build_cat_groups.
+    Python loop has ≤3 iterations (one per distinct vocab); inner ops are batched.
+    """
+    total   = 0.0
+    n_total = 0
+    for vocab, starts, cols in groups:
+        indices      = starts[:, None] + jnp.arange(vocab)[None, :]  # (n, vocab)
+        logits_block = flat_logits[indices]                           # (n, vocab)
+        lp           = jax.nn.log_softmax(logits_block, axis=-1)
+        targets      = row[cols]                                      # (n,)
+        total       += -jnp.sum(lp[jnp.arange(cols.shape[0]), targets])
+        n_total     += cols.shape[0]
+    return total / n_total
 
 
 def _cont_mse(cont_logits, row, cont_cols_array, max_vals_array):
@@ -329,7 +364,7 @@ def entity_loss(entity_logits_dict, banks: SongBanks, target_tokens):
     Grooves are purely regression (no discrete fields). Trace-groove lookups
     use batched 3-D indexing — no nested vmap required.
 
-    Returns scalar = sum of 12 components / 12.
+    Returns scalar = sum of 18 components / 18.
     """
     target_tokens = jnp.int32(target_tokens)
 
@@ -337,9 +372,9 @@ def entity_loss(entity_logits_dict, banks: SongBanks, target_tokens):
     instr_id  = target_tokens[ENTITY_HEADS['instr_id']]
     instr_row = banks.instruments[instr_id]                      # (INSTR_WIDTH,)
 
-    instr_scalar_cat = _cat_ce(
+    instr_scalar_cat = _cat_ce_grouped(
         entity_logits_dict['instr_scalar'], instr_row,
-        INSTR_SCALAR_CAT_COL_INDICES, INSTR_SCALAR_CAT_SPECS,
+        _INSTR_SCALAR_CAT_GROUPS,
     )
     instr_scalar_cont = _cont_mse(
         entity_logits_dict['instr_scalar_cont'], instr_row,
@@ -349,9 +384,9 @@ def entity_loss(entity_logits_dict, banks: SongBanks, target_tokens):
     # Instrument's table
     it_row = banks.tables[instr_row[_INSTR_TABLE_COL]]           # (624,)
 
-    instr_table_cat = _cat_ce(
+    instr_table_cat = _cat_ce_grouped(
         entity_logits_dict['instr_table'], it_row,
-        TABLE_SCALAR_CAT_COL_INDICES, TABLE_SCALAR_CAT_SPECS,
+        _TABLE_SCALAR_CAT_GROUPS,
     )
     instr_table_cont = _cont_mse(
         entity_logits_dict['instr_table_cont'], it_row,
@@ -368,9 +403,9 @@ def entity_loss(entity_logits_dict, banks: SongBanks, target_tokens):
     it_trace_rows = banks.traces[it_row[_TABLE_FX_COLS_ARRAY]]     # (32, 624)
 
     def _it_trace_cat(trace_row):
-        return _cat_ce(
+        return _cat_ce_grouped(
             entity_logits_dict['instr_table_trace'], trace_row,
-            TABLE_SCALAR_CAT_COL_INDICES, TABLE_SCALAR_CAT_SPECS,
+            _TABLE_SCALAR_CAT_GROUPS,
         )
     instr_table_trace_cat = jax.vmap(_it_trace_cat)(it_trace_rows).mean()
 
@@ -395,9 +430,9 @@ def entity_loss(entity_logits_dict, banks: SongBanks, target_tokens):
     synth_id   = instr_row[_INSTR_SOFTSYNTH_COL]
     synth_row  = banks.softsynths[synth_id]                      # (SOFTSYNTH_WIDTH,)
 
-    instr_softsynth_cat = _cat_ce(
+    instr_softsynth_cat = _cat_ce_grouped(
         entity_logits_dict['instr_softsynth'], synth_row,
-        SOFTSYNTH_CAT_COL_INDICES, SOFTSYNTH_CAT_SPECS,
+        _SOFTSYNTH_CAT_GROUPS,
     )
     instr_softsynth_cont = _cont_mse(
         entity_logits_dict['instr_softsynth_cont'], synth_row,
@@ -414,9 +449,9 @@ def entity_loss(entity_logits_dict, banks: SongBanks, target_tokens):
     # ─── Phrase-level table ──────────────────────────────────────────────────
     pt_row = banks.tables[target_tokens[ENTITY_HEADS['table_id']]]  # (624,)
 
-    table_scalar_cat = _cat_ce(
+    table_scalar_cat = _cat_ce_grouped(
         entity_logits_dict['table_scalar'], pt_row,
-        TABLE_SCALAR_CAT_COL_INDICES, TABLE_SCALAR_CAT_SPECS,
+        _TABLE_SCALAR_CAT_GROUPS,
     )
     table_scalar_cont = _cont_mse(
         entity_logits_dict['table_scalar_cont'], pt_row,
@@ -431,9 +466,9 @@ def entity_loss(entity_logits_dict, banks: SongBanks, target_tokens):
     pt_trace_rows = banks.traces[pt_row[_TABLE_FX_COLS_ARRAY]]      # (32, 624)
 
     def _pt_trace_cat(trace_row):
-        return _cat_ce(
+        return _cat_ce_grouped(
             entity_logits_dict['table_trace'], trace_row,
-            TABLE_SCALAR_CAT_COL_INDICES, TABLE_SCALAR_CAT_SPECS,
+            _TABLE_SCALAR_CAT_GROUPS,
         )
     table_trace_cat = jax.vmap(_pt_trace_cat)(pt_trace_rows).mean()
 
