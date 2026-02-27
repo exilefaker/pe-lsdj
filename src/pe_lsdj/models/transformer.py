@@ -150,74 +150,60 @@ def entity_loss(entity_preds, banks: SongBanks, target_tokens):
 # predictions for every sequence position.
 # ---------------------------------------------------------------------------
 
-def _cond_groove_scan(groove_decoder, table_h, table_row, groove_rows):
+def _groove_loss_vmap(groove_decoder, table_h, table_row, groove_rows):
     """
-    Scan over N_GROOVE_SLOTS. For each slot, if groove_id != 0 (non-null),
-    predict one groove and compute MSE loss vs the pre-fetched target row.
+    Predict losses for all N_GROOVE_SLOTS in parallel via vmap.
+    Null slots (groove_id == 0) contribute 0 via jnp.where masking.
 
-    groove_rows: (N_GROOVE_SLOTS, GROOVE_CONT_N) — bank rows pre-fetched
-                 outside any lax.scan to avoid dynamic gathers in the graph.
+    Replaces the previous lax.scan+lax.cond approach: nested scans caused XLA
+    to track per-step AD state across all three nesting levels simultaneously,
+    producing enormous intermediate buffers (~818 GB for reverse-mode AD).
+    vmap computes all slots in one parallel batch — no sequential dependency chain.
+
+    groove_rows: (N_GROOVE_SLOTS, GROOVE_CONT_N) — pre-fetched bank rows.
     Returns scalar = sum of active groove losses.
     """
     groove_ids = table_row[_GROOVE_FX_COLS_ARRAY]  # (N_GROOVE_SLOTS,)
 
-    def step(carry, xs):
-        slot_idx, groove_id, groove_row = xs
+    def groove_step(slot_idx, groove_id, groove_row):
+        logits = groove_decoder(table_h, slot_idx)
+        tgt = groove_row.astype(jnp.float32) / _GROOVE_CONT_MAX
+        loss = jnp.mean((jax.nn.sigmoid(logits) - tgt) ** 2)
+        return jnp.where(groove_id != 0, loss, jnp.float32(0.0))
 
-        def active(args):
-            slot_idx, groove_row = args
-            logits = groove_decoder(table_h, slot_idx)
-            tgt = groove_row.astype(jnp.float32) / _GROOVE_CONT_MAX
-            return jnp.mean((jax.nn.sigmoid(logits) - tgt) ** 2)
-
-        def null(_):
-            return jnp.float32(0.0)
-
-        return carry, jax.lax.cond(groove_id != 0, active, null, (slot_idx, groove_row))
-
-    _, losses = jax.lax.scan(
-        step, None,
-        (jnp.arange(N_GROOVE_SLOTS, dtype=jnp.int32), groove_ids, groove_rows),
+    losses = jax.vmap(groove_step)(
+        jnp.arange(N_GROOVE_SLOTS, dtype=jnp.int32), groove_ids, groove_rows,
     )
     return jnp.sum(losses)
 
 
-def _cond_trace_scan(table_decoder, groove_decoder, table_h, table_row, trace_rows, trace_groove_rows):
+def _trace_loss_vmap(table_decoder, groove_decoder, table_h, table_row, trace_rows, trace_groove_rows):
     """
-    Scan over N_TABLE_SLOTS. For each slot, if trace_id != 0 (non-null):
-      - compute trace scalar cat + cont loss (using table_decoder weights)
-      - compute trace groove losses via nested _cond_groove_scan
-    A/H commands are masked to -inf for trace cat logits.
+    Predict losses for all N_TABLE_SLOTS in parallel via vmap.
+    Null slots (trace_id == 0) contribute 0 via jnp.where masking.
+    A/H FX commands are masked to -inf in trace cat logits.
 
-    trace_rows:        (N_TABLE_SLOTS, table_bank_width) — pre-fetched trace bank rows.
+    trace_rows:        (N_TABLE_SLOTS, table_bank_w) — pre-fetched trace bank rows.
     trace_groove_rows: (N_TABLE_SLOTS, N_GROOVE_SLOTS, GROOVE_CONT_N) — pre-fetched.
     Returns scalar = sum of active trace losses.
     """
     trace_ids = table_row[_TABLE_FX_COLS_ARRAY]  # (N_TABLE_SLOTS,)
 
-    def step(carry, xs):
-        slot_idx, trace_id, trace_row, trace_gr_rows = xs
+    def trace_step(slot_idx, trace_id, trace_row, trace_gr_rows):
+        trace_ctx = table_h + table_decoder.slot_embeds[slot_idx]
+        trace_h   = jax.nn.gelu(table_decoder.linear_in(trace_ctx))
 
-        def active(args):
-            slot_idx, trace_row, trace_gr_rows = args
-            trace_ctx = table_h + table_decoder.slot_embeds[slot_idx]
-            trace_h   = jax.nn.gelu(table_decoder.linear_in(trace_ctx))
+        cat_logits = jnp.where(_TABLE_CAT_TRACE_MASK, -jnp.inf, table_decoder.cat_out(trace_h))
+        cat_loss   = _ce_loss_grouped(cat_logits, trace_row, _TABLE_SCALAR_CAT_GROUPS)
+        cont_loss  = _mse_loss(table_decoder.cont_out(trace_h), trace_row,
+                               _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES)
+        groove_loss = _groove_loss_vmap(groove_decoder, trace_h, trace_row, trace_gr_rows)
 
-            cat_logits = jnp.where(_TABLE_CAT_TRACE_MASK, -jnp.inf, table_decoder.cat_out(trace_h))
-            cat_loss   = _ce_loss_grouped(cat_logits, trace_row, _TABLE_SCALAR_CAT_GROUPS)
-            cont_loss  = _mse_loss(table_decoder.cont_out(trace_h), trace_row,
-                                   _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES)
-            groove_loss = _cond_groove_scan(groove_decoder, trace_h, trace_row, trace_gr_rows)
-            return cat_loss + cont_loss + groove_loss
+        total_loss = cat_loss + cont_loss + groove_loss
+        return jnp.where(trace_id != 0, total_loss, jnp.float32(0.0))
 
-        def null(_):
-            return jnp.float32(0.0)
-
-        return carry, jax.lax.cond(trace_id != 0, active, null, (slot_idx, trace_row, trace_gr_rows))
-
-    _, losses = jax.lax.scan(
-        step, None,
-        (jnp.arange(N_TABLE_SLOTS, dtype=jnp.int32), trace_ids, trace_rows, trace_groove_rows),
+    losses = jax.vmap(trace_step)(
+        jnp.arange(N_TABLE_SLOTS, dtype=jnp.int32), trace_ids, trace_rows, trace_groove_rows,
     )
     return jnp.sum(losses)
 
@@ -282,16 +268,16 @@ def cond_entity_scan_loss(heads, hiddens, target_tokens, banks):
         instr_h = jax.nn.gelu(heads.instr_decoder.linear_in(h_bb))
         it_h    = jax.nn.gelu(heads.table_decoder.linear_in(instr_h))
 
-        it_groove = _cond_groove_scan(heads.groove_decoder, it_h, it_row, it_gr_rows)
-        it_trace  = _cond_trace_scan(heads.table_decoder, heads.groove_decoder,
+        it_groove = _groove_loss_vmap(heads.groove_decoder, it_h, it_row, it_gr_rows)
+        it_trace  = _trace_loss_vmap(heads.table_decoder, heads.groove_decoder,
                                       it_h, it_row, it_tr_rows, it_tr_gr_rows)
 
         # ── Phrase-level table grooves + traces ──────────────────────────────
         pt_ctx = jax.nn.gelu(heads.table_proj(h_bb))
         pt_h   = jax.nn.gelu(heads.table_decoder.linear_in(pt_ctx))
 
-        pt_groove = _cond_groove_scan(heads.groove_decoder, pt_h, pt_row, pt_gr_rows)
-        pt_trace  = _cond_trace_scan(heads.table_decoder, heads.groove_decoder,
+        pt_groove = _groove_loss_vmap(heads.groove_decoder, pt_h, pt_row, pt_gr_rows)
+        pt_trace  = _trace_loss_vmap(heads.table_decoder, heads.groove_decoder,
                                       pt_h, pt_row, pt_tr_rows, pt_tr_gr_rows)
 
         total = it_groove + it_trace + pt_groove + pt_trace
