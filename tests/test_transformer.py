@@ -5,8 +5,6 @@ import jax.random as jr
 
 from pe_lsdj.models.transformer import (
     AxialTransformerBlock,
-    EntityDecoder,
-    GrooveDecoder,
     TableDecoder,
     SoftSynthDecoder,
     InstrumentDecoder,
@@ -28,7 +26,9 @@ from pe_lsdj.models.transformer import (
     hard_targets,
     token_loss,
     entity_loss,
+    cond_entity_scan_loss,
 )
+from pe_lsdj.models.decoders import GrooveDecoder
 from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.constants import NUM_NOTES
 
@@ -72,102 +72,44 @@ class TestGrooveDecoder:
         out = dec(ctx, 0)
         assert out.shape == (GROOVE_CONT_N,)
 
-    def test_all_slots_shape(self, dec):
-        ctx = jnp.ones(ENTITY_DIM)
-        out = dec.all_slots(ctx)
-        assert out.shape == (N_GROOVE_SLOTS, GROOVE_CONT_N)
-
     def test_encode_shape(self, dec):
         ctx = jnp.ones(ENTITY_DIM)
         latent = dec.encode(ctx, 0)
         assert latent.shape == (ENTITY_DIM,)
 
-    def test_slots_differ(self, dec):
+    def test_phrase_slot_shape(self, dec):
+        """Slot index N_GROOVE_SLOTS is the phrase-level slot."""
+        ctx = jnp.ones(ENTITY_DIM)
+        out = dec(ctx, N_GROOVE_SLOTS)
+        assert out.shape == (GROOVE_CONT_N,)
+
+    def test_phrase_slot_differs_from_table_slots(self, dec):
         ctx = jr.normal(KEY, (ENTITY_DIM,))
-        out = dec.all_slots(ctx)
-        # Different slots should give different outputs (slot embeddings distinguish them)
-        assert not jnp.allclose(out[0], out[1])
+        phrase_out = dec(ctx, N_GROOVE_SLOTS)
+        slot0_out  = dec(ctx, 0)
+        assert not jnp.allclose(phrase_out, slot0_out)
 
 
 class TestTableDecoder:
 
     @pytest.fixture(scope="class")
-    def groove_dec(self):
-        return GrooveDecoder(ENTITY_DIM, KEY)
+    def table_dec(self):
+        return TableDecoder(ENTITY_DIM, key=jr.PRNGKey(1))
 
-    @pytest.fixture(scope="class")
-    def trace_dec(self, groove_dec):
-        return TableDecoder(ENTITY_DIM, is_trace=True, groove_decoder=groove_dec,
-                            key=jr.PRNGKey(1))
-
-    @pytest.fixture(scope="class")
-    def table_dec(self, groove_dec, trace_dec):
-        return TableDecoder(ENTITY_DIM, is_trace=False, groove_decoder=groove_dec,
-                            key=jr.PRNGKey(2), sub_table_decoder=trace_dec,
-                            _slot_embeds=trace_dec.slot_embeds,
-                            _linear_in=trace_dec.linear_in,
-                            _cat_out=trace_dec.cat_out,
-                            _cont_out=trace_dec.cont_out)
-
-    def test_trace_output_keys(self, trace_dec):
-        out = trace_dec(jnp.ones(ENTITY_DIM))
-        assert set(out.keys()) == {'cat', 'cont', 'grooves'}
-
-    def test_table_output_keys(self, table_dec):
+    def test_output_keys(self, table_dec):
         out = table_dec(jnp.ones(ENTITY_DIM))
-        assert set(out.keys()) == {'cat', 'cont', 'grooves', 'traces'}
+        assert set(out.keys()) == {'cat', 'cont'}
 
-    def test_trace_cat_shape(self, trace_dec):
-        out = trace_dec(jnp.ones(ENTITY_DIM))
+    def test_cat_shape(self, table_dec):
+        out = table_dec(jnp.ones(ENTITY_DIM))
         assert out['cat'].shape == (TABLE_SCALAR_CAT_TOTAL_VOCAB,)
 
-    def test_trace_cont_shape(self, trace_dec):
-        out = trace_dec(jnp.ones(ENTITY_DIM))
+    def test_cont_shape(self, table_dec):
+        out = table_dec(jnp.ones(ENTITY_DIM))
         assert out['cont'].shape == (TABLE_SCALAR_CONT_N,)
 
-    def test_trace_grooves_shape(self, trace_dec):
-        out = trace_dec(jnp.ones(ENTITY_DIM))
-        assert out['grooves'].shape == (N_GROOVE_SLOTS, GROOVE_CONT_N)
-
-    def test_table_traces_cat_shape(self, table_dec):
-        out = table_dec(jnp.ones(ENTITY_DIM))
-        assert out['traces']['cat'].shape == (N_TABLE_SLOTS, TABLE_SCALAR_CAT_TOTAL_VOCAB)
-
-    def test_table_traces_cont_shape(self, table_dec):
-        out = table_dec(jnp.ones(ENTITY_DIM))
-        assert out['traces']['cont'].shape == (N_TABLE_SLOTS, TABLE_SCALAR_CONT_N)
-
-    def test_table_traces_grooves_shape(self, table_dec):
-        out = table_dec(jnp.ones(ENTITY_DIM))
-        assert out['traces']['grooves'].shape == (N_TABLE_SLOTS, N_GROOVE_SLOTS, GROOVE_CONT_N)
-
-    def test_trace_masks_invalid_cmds(self, trace_dec):
-        """A and H command logits should be -inf in trace cat output."""
-        from pe_lsdj.models.transformer import _TABLE_SCALAR_CAT_GROUPS
-        from pe_lsdj.constants import CMD_A, CMD_H
-        out = trace_dec(jr.normal(KEY, (ENTITY_DIM,)))
-        for vocab, starts, cols in _TABLE_SCALAR_CAT_GROUPS:
-            if vocab == 19:
-                for cmd in (CMD_A, CMD_H):
-                    assert jnp.all(out['cat'][starts + cmd] == -jnp.inf), \
-                        f"cmd {cmd} should be -inf in trace cat"
-
-    def test_table_does_not_mask_cmds(self, table_dec):
-        """A and H should NOT be -inf in top-level table cat output."""
-        from pe_lsdj.models.transformer import _TABLE_SCALAR_CAT_GROUPS
-        from pe_lsdj.constants import CMD_A, CMD_H
-        out = table_dec(jr.normal(KEY, (ENTITY_DIM,)))
-        for vocab, starts, cols in _TABLE_SCALAR_CAT_GROUPS:
-            if vocab == 19:
-                for cmd in (CMD_A, CMD_H):
-                    assert jnp.all(jnp.isfinite(out['cat'][starts + cmd])), \
-                        f"cmd {cmd} should be finite in table cat"
-
-    def test_shared_weights(self, table_dec, trace_dec):
-        """table_dec and trace_dec must share linear_in, cat_out, cont_out."""
-        assert table_dec.linear_in is trace_dec.linear_in
-        assert table_dec.cat_out   is trace_dec.cat_out
-        assert table_dec.cont_out  is trace_dec.cont_out
+    def test_slot_embeds_shape(self, table_dec):
+        assert table_dec.slot_embeds.shape == (N_TABLE_SLOTS, ENTITY_DIM)
 
 
 class TestOutputHeads:
@@ -211,12 +153,9 @@ class TestOutputHeads:
     def test_instr_table_shape(self, heads):
         out = heads(jnp.ones(D_MODEL))
         t = out['instr']['table']
-        assert t['cat'].shape    == (TABLE_SCALAR_CAT_TOTAL_VOCAB,)
-        assert t['cont'].shape   == (TABLE_SCALAR_CONT_N,)
-        assert t['grooves'].shape == (N_GROOVE_SLOTS, GROOVE_CONT_N)
-        assert t['traces']['cat'].shape    == (N_TABLE_SLOTS, TABLE_SCALAR_CAT_TOTAL_VOCAB)
-        assert t['traces']['cont'].shape   == (N_TABLE_SLOTS, TABLE_SCALAR_CONT_N)
-        assert t['traces']['grooves'].shape == (N_TABLE_SLOTS, N_GROOVE_SLOTS, GROOVE_CONT_N)
+        assert set(t.keys()) == {'cat', 'cont'}
+        assert t['cat'].shape  == (TABLE_SCALAR_CAT_TOTAL_VOCAB,)
+        assert t['cont'].shape == (TABLE_SCALAR_CONT_N,)
 
     def test_softsynth_shapes(self, heads):
         out = heads(jnp.ones(D_MODEL))
@@ -228,14 +167,18 @@ class TestOutputHeads:
     def test_phrase_table_shape(self, heads):
         out = heads(jnp.ones(D_MODEL))
         t = out['table']
-        assert t['cat'].shape    == (TABLE_SCALAR_CAT_TOTAL_VOCAB,)
-        assert t['cont'].shape   == (TABLE_SCALAR_CONT_N,)
-        assert t['grooves'].shape == (N_GROOVE_SLOTS, GROOVE_CONT_N)
-        assert 'traces' in t
+        assert set(t.keys()) == {'cat', 'cont'}
+        assert t['cat'].shape  == (TABLE_SCALAR_CAT_TOTAL_VOCAB,)
+        assert t['cont'].shape == (TABLE_SCALAR_CONT_N,)
 
     def test_phrase_groove_shape(self, heads):
         out = heads(jnp.ones(D_MODEL))
         assert out['groove'].shape == (GROOVE_CONT_N,)
+
+    def test_phrase_groove_uses_shared_decoder(self, heads):
+        """Phrase groove must route through the shared GrooveDecoder (phrase slot)."""
+        assert hasattr(heads, 'phrase_groove_proj')
+        assert heads.groove_decoder.slot_embeds.shape == (N_GROOVE_SLOTS + 1, ENTITY_DIM)
 
     def test_log_probs(self, heads):
         x = jr.normal(jr.PRNGKey(1), (D_MODEL,))
@@ -273,6 +216,13 @@ class TestHardTargetsAndLoss:
         assert jnp.isfinite(loss)
         assert loss > 0
 
+    def test_soft_targets_lower_loss(self):
+        heads = OutputHeads(D_MODEL, ENTITY_DIM, KEY)
+        x = jr.normal(jr.PRNGKey(1), (D_MODEL,))
+        out = heads(x)
+        soft = {name: jax.nn.softmax(out[name]) for name in TOKEN_HEADS}
+        assert token_loss(out, soft) < token_loss(out, hard_targets(jnp.zeros(21, dtype=jnp.int32)))
+
     def test_entity_loss_finite(self):
         heads  = OutputHeads(D_MODEL, ENTITY_DIM, KEY)
         x      = jr.normal(jr.PRNGKey(1), (D_MODEL,))
@@ -288,6 +238,31 @@ class TestHardTargetsAndLoss:
         entity_preds = {k: out[k] for k in ('instr', 'table', 'groove')}
         loss   = entity_loss(entity_preds, SongBanks.default(), jnp.zeros(21, dtype=jnp.int32))
         assert jnp.isfinite(loss)
+
+    def test_cond_entity_scan_loss_finite(self):
+        """cond_entity_scan_loss should run and return a finite scalar."""
+        model  = LSDJTransformer(KEY, d_model=D_MODEL, entity_dim=ENTITY_DIM,
+                                 num_heads_t=2, num_heads_c=2, num_blocks=1)
+        L = 4
+        tokens  = jnp.zeros((L, 4, 21), dtype=jnp.float32)
+        hiddens = model.encode(tokens)                  # (L, 4, D_MODEL)
+        loss    = cond_entity_scan_loss(
+            model.output_heads, hiddens, tokens, SongBanks.default()
+        )
+        assert jnp.isfinite(loss)
+
+    def test_cond_entity_scan_loss_zero_for_null_banks(self):
+        """With all-null tokens, all groove/trace ids are 0 — cond loss should be 0."""
+        model  = LSDJTransformer(KEY, d_model=D_MODEL, entity_dim=ENTITY_DIM,
+                                 num_heads_t=2, num_heads_c=2, num_blocks=1)
+        L = 4
+        tokens  = jnp.zeros((L, 4, 21), dtype=jnp.float32)
+        hiddens = model.encode(tokens)
+        loss    = cond_entity_scan_loss(
+            model.output_heads, hiddens, tokens, SongBanks.default()
+        )
+        # Default banks have null (all-zero) rows; groove/trace ids in null rows are 0
+        assert loss == 0.0
 
 
 class TestLSDJTransformer:
@@ -321,17 +296,13 @@ class TestLSDJTransformer:
         out = model(jnp.zeros((S, 4, 21)))
         assert out['instr']['cat'].shape == (S, 4, INSTR_SCALAR_CAT_TOTAL_VOCAB)
 
-    def test_instr_table_grooves_shape(self, model):
+    def test_instr_table_shape(self, model):
         S = 8
         out = model(jnp.zeros((S, 4, 21)))
-        assert out['instr']['table']['grooves'].shape == (S, 4, N_GROOVE_SLOTS, GROOVE_CONT_N)
-
-    def test_instr_table_traces_shape(self, model):
-        S = 8
-        out = model(jnp.zeros((S, 4, 21)))
-        traces = out['instr']['table']['traces']
-        assert traces['cat'].shape    == (S, 4, N_TABLE_SLOTS, TABLE_SCALAR_CAT_TOTAL_VOCAB)
-        assert traces['grooves'].shape == (S, 4, N_TABLE_SLOTS, N_GROOVE_SLOTS, GROOVE_CONT_N)
+        t = out['instr']['table']
+        assert set(t.keys()) == {'cat', 'cont'}
+        assert t['cat'].shape  == (S, 4, TABLE_SCALAR_CAT_TOTAL_VOCAB)
+        assert t['cont'].shape == (S, 4, TABLE_SCALAR_CONT_N)
 
     def test_phrase_groove_shape(self, model):
         S = 8
@@ -353,3 +324,7 @@ class TestLSDJTransformer:
         new_model = model.with_banks(SongBanks.default())
         out = new_model(jnp.zeros((4, 4, 21)))
         assert out['note'].shape == (4, 4, NUM_NOTES)
+
+    def test_encode_shape(self, model):
+        hiddens = model.encode(jnp.zeros((8, 4, 21)))
+        assert hiddens.shape == (8, 4, D_MODEL)

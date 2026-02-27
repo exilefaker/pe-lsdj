@@ -11,7 +11,7 @@ from jaxtyping import Array, Key
 from pe_lsdj import SongFile
 from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.models.transformer import (
-    TOKEN_HEADS, hard_targets, entity_loss,
+    TOKEN_HEADS, hard_targets, entity_loss, cond_entity_scan_loss,
 )
 
 
@@ -53,34 +53,37 @@ def sample_crops(song_tokens: Array, crop_len: int, batch_size: int, key: Key):
 
 def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongBanks):
     """
-    Teacher-forcing loss for one sequence: logit-group CE + entity param CE.
+    Teacher-forcing loss for one sequence: token CE + scalar entity CE + conditional entity CE.
 
     input_tokens:  (L, 4, 21)
     target_tokens: (L, 4, 21)
     banks:         SongBanks for the current song (null rows pre-included)
     Returns: scalar — mean loss per (channel × timestep)
     """
-    logits = model(input_tokens)   # dict of (L, 4, ...)
+    hiddens = model.encode(input_tokens)                          # (L, 4, d_model)
+    logits  = jax.vmap(jax.vmap(model.output_heads))(hiddens)    # dict of (L, 4, ...)
 
-    # Logit-group cross-entropy
-    targets = jax.vmap(jax.vmap(hard_targets))(target_tokens)
+    # Token cross-entropy (note, fx_cmd, fx values, transpose)
+    targets  = jax.vmap(jax.vmap(hard_targets))(target_tokens)
     token_ce = 0.0
     for name in TOKEN_HEADS:
-        log_probs = jax.nn.log_softmax(logits[name], axis=-1)
-        token_ce -= jnp.sum(targets[name] * log_probs)
+        log_probs  = jax.nn.log_softmax(logits[name], axis=-1)
+        token_ce  -= jnp.sum(targets[name] * log_probs)
 
-    # Entity parameter cross-entropy: vmap entity_param_loss over (L, 4)
-    # in_axes=(0, None, 0): batch over first axis of logit dicts and target_tokens,
-    # keep banks constant (not batched).
+    # Scalar entity loss (vmapped): instrument scalars, table scalars, phrase groove.
+    # Groove-slot and trace sub-entity losses are handled below.
     entity_preds = {k: logits[k] for k in ('instr', 'table', 'groove')}
     _per_step_channel = jax.vmap(
         jax.vmap(entity_loss, in_axes=(0, None, 0)),
         in_axes=(0, None, 0),
     )
-    entity_ce = jnp.sum(_per_step_channel(entity_preds, banks, target_tokens))
+    scalar_ce = jnp.sum(_per_step_channel(entity_preds, banks, target_tokens))
+
+    # Conditional groove + trace loss (scanned): only computed for active entity slots.
+    cond_ce = cond_entity_scan_loss(model.output_heads, hiddens, target_tokens, banks)
 
     L = input_tokens.shape[0]
-    return (token_ce + entity_ce) / (L * 4)
+    return (token_ce + scalar_ce + cond_ce) / (L * 4)
 
 
 def batch_loss(model, input_batch: Array, target_batch: Array, banks: SongBanks):
