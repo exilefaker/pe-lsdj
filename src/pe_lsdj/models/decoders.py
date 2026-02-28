@@ -353,7 +353,10 @@ class TableDecoder(eqx.Module):
         self.cont_out    = eqx.nn.Linear(entity_dim, TABLE_SCALAR_CONT_N,      use_bias=False, key=k4)
 
     def __call__(self, context):
-        """context: (entity_dim,) → {'cat': (TABLE_SCALAR_CAT_TOTAL_VOCAB,), 'cont': (TABLE_SCALAR_CONT_N,)}"""
+        """context: (entity_dim,) → {
+            'cat': (TABLE_SCALAR_CAT_TOTAL_VOCAB,), 
+            'cont': (TABLE_SCALAR_CONT_N,)
+        }"""
         h = jax.nn.gelu(self.linear_in(context))
         return {'cat': self.cat_out(h), 'cont': self.cont_out(h)}
 
@@ -437,7 +440,7 @@ class OutputHeads(eqx.Module):
     groove_decoder:     shared GrooveDecoder — phrase-level groove + cond scan losses
                         (slot index N_GROOVE_SLOTS = phrase-level slot)
     table_decoder:      TableDecoder — phrase-level table AND instrument's table scalar preds;
-                        its weights are also reused for trace scalar preds in cond scan loss
+                        its weights are also reused for trace scalar preds in conditional loss
     instr_decoder:      InstrumentDecoder (instrument scalars + softsynth)
     table_proj:         d_model → entity_dim projection for phrase-level table context
     phrase_groove_proj: d_model → entity_dim projection for phrase-level groove context
@@ -473,13 +476,14 @@ class OutputHeads(eqx.Module):
         # Phrase-level projections
         self.table_proj         = eqx.nn.Linear(d_model, entity_dim, use_bias=False, key=keys[4])
         self.phrase_groove_proj = eqx.nn.Linear(d_model, entity_dim, use_bias=False, key=keys[5])
+    
+
 
     def __call__(self, x):
         """
         x: (d_model,) → nested output dict.
         Produces token heads, instrument/table scalar predictions, and phrase-level groove.
-        Groove-slot and trace sub-entity losses are computed separately in
-        cond_entity_scan_loss using lax.scan + lax.cond.
+        Groove-slot and trace sub-entity losses are computed separately in cond_entity_loss.
         """
         result = {}
 

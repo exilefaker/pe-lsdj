@@ -278,6 +278,44 @@ def conditional_entity_loss(heads, hiddens, target_tokens, banks):
     return it_groove_total + pt_groove_total + it_trace_total + pt_trace_total
 
 
+def instr_alignment_loss(model, hiddens, target_tokens):
+    """
+    Contrastive alignment loss between instrument embedder and decoder.
+
+    Pulls instr_decoder.encode(backbone_h) toward instrument_embedder(bank_row)
+    in entity_dim space using 1 - cosine_similarity as the loss.
+
+    This ensures the two representations live in the same metric space, making
+    cosine-similarity bank matching reliable at generation time (e.g. detecting
+    when a predicted instrument is novel enough to warrant a new bank slot).
+
+    Requires: instrument_embedder.out_dim == instr_decoder.linear_in.out_features
+    (both default to entity_dim=128 in LSDJTransformer).
+    Null instruments (instr_id == 0) contribute zero.
+    Returns a sum (not mean) to be normalised alongside other loss terms in sequence_loss.
+    """
+    L = hiddens.shape[0]
+    T = L * 4
+    hiddens_flat = hiddens.reshape(T, hiddens.shape[-1])        # (T, d_model)
+    targets_flat = jnp.int32(target_tokens).reshape(T, 21)      # (T, 21)
+    instr_ids    = targets_flat[:, ENTITY_HEADS['instr_id']]    # (T,)
+
+    # Decoder side: d_model → entity_dim (pre-GELU; see decoders.py InstrumentDecoder.encode)
+    decoder_qs = jax.vmap(model.output_heads.instr_decoder.encode)(hiddens_flat)  # (T, entity_dim)
+
+    # Embedder side: instr_id → instr_dim (must equal entity_dim)
+    instr_emb   = model.embedder.step_embedder.instrument_embedder
+    embedder_ks = jax.vmap(instr_emb)(instr_ids)                # (T, instr_dim)
+
+    def _cos_loss(a, b):
+        sim = jnp.dot(a, b) / (jnp.linalg.norm(a) + 1e-8) / (jnp.linalg.norm(b) + 1e-8)
+        return jnp.float32(1.0) - sim
+
+    losses = jax.vmap(_cos_loss)(decoder_qs, embedder_ks)       # (T,)
+    valid  = instr_ids != 0
+    return jnp.sum(jnp.where(valid, losses, jnp.float32(0.0)))
+
+
 # ---------------------------------------------------------------------------
 # Transformer
 # ---------------------------------------------------------------------------
@@ -353,6 +391,11 @@ class LSDJTransformer(eqx.Module):
         ]
         self.final_norm   = eqx.nn.LayerNorm(d_model)
         self.output_heads = OutputHeads(d_model, entity_dim, keys[-1])
+        instr_emb_dim = self.embedder.step_embedder.instrument_embedder.out_dim
+        assert instr_emb_dim == entity_dim, (
+            f"instr_dim ({instr_emb_dim}) must equal entity_dim ({entity_dim}). "
+            f"Pass instr_dim={entity_dim} explicitly, or omit it to use the default."
+        )
 
     def encode(self, song_tokens: Array) -> Array:
         x = self.embedder(song_tokens)

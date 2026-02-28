@@ -12,6 +12,7 @@ from pe_lsdj import SongFile
 from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.models.transformer import (
     TOKEN_HEADS, hard_targets, entity_loss, conditional_entity_loss,
+    instr_alignment_loss,
 )
 
 
@@ -79,11 +80,14 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
     )
     scalar_ce = jnp.sum(_per_step_channel(entity_preds, banks, target_tokens))
 
-    # Conditional groove + trace loss (scanned): only computed for active entity slots.
+    # Conditional groove + trace loss: only computed for active entity slots.
     cond_ce = conditional_entity_loss(model.output_heads, hiddens, target_tokens, banks)
 
+    # Alignment loss: pull instr_decoder latent toward instrument_embedder latent.
+    align_loss = instr_alignment_loss(model, hiddens, target_tokens)
+
     L = input_tokens.shape[0]
-    return (token_ce + scalar_ce + cond_ce) / (L * 4)
+    return (token_ce + scalar_ce + cond_ce + align_loss) / (L * 4)
 
 
 def batch_loss(model, input_batch: Array, target_batch: Array, banks: SongBanks):
