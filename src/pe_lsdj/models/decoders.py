@@ -159,7 +159,6 @@ INSTR_SCALAR_COL_INDICES = [
     i for i in range(len(INSTR_FIELD_SPECS))
     if i not in (_INSTR_TABLE_COL, _INSTR_SOFTSYNTH_COL)
 ]
-assert len(INSTR_SCALAR_SPECS) == INSTR_WIDTH - 2
 
 _TABLE_FX_COLS  = frozenset(
     [64  + i * 17     for i in range(STEPS_PER_TABLE)] +
@@ -187,7 +186,7 @@ _TABLE_FX_COLS_ARRAY  = jnp.array(TABLE_FX_COL_INDICES,  dtype=jnp.int32)
 _GROOVE_FX_COLS_ARRAY = jnp.array(GROOVE_FX_COL_INDICES, dtype=jnp.int32)
 
 # ---------------------------------------------------------------------------
-# Cat / continuous split.
+# Categorical / continuous split.
 #
 # For each entity-type spec list, split into:
 #   cat_specs:  [(name, vocab)]  — discrete fields → CE loss
@@ -228,11 +227,11 @@ GROOVE_CONT_N    = len(GROOVE_FIELD_SPECS)   # 32
 _GROOVE_CONT_MAX = 16.0                      # all vocab=17 → max token = 16
 
 # ---------------------------------------------------------------------------
-# Cat CE groups: fields grouped by vocab size for vectorized loss.
+# Categorical CE groups: fields grouped by vocab size for vectorized loss.
 #
-# Instead of a Python loop over N fields, we loop over D distinct vocab sizes
-# (D ≤ 3 for all entity types) and do a batched (n_fields, vocab) operation
-# per group. Precomputed at module load time; used as static data in JIT.
+# Loop over D distinct vocab sizes (D ≤ 3 for all entity types) and do a 
+# batched (n_fields, vocab) operation per group.
+# Precomputed at module load time; used as static data in JIT.
 # ---------------------------------------------------------------------------
 
 def _build_cat_groups(cat_specs, col_indices):

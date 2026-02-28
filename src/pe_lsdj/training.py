@@ -11,7 +11,7 @@ from jaxtyping import Array, Key
 from pe_lsdj import SongFile
 from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.models.transformer import (
-    TOKEN_HEADS, hard_targets, entity_loss, cond_entity_scan_loss,
+    TOKEN_HEADS, hard_targets, entity_loss, conditional_entity_loss,
 )
 
 
@@ -70,7 +70,7 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
         log_probs  = jax.nn.log_softmax(logits[name], axis=-1)
         token_ce  -= jnp.sum(targets[name] * log_probs)
 
-    # Scalar entity loss (vmapped): instrument scalars, table scalars, phrase groove.
+    # Scalar entity loss: instrument scalars, table scalars, phrase groove.
     # Groove-slot and trace sub-entity losses are handled below.
     entity_preds = {k: logits[k] for k in ('instr', 'table', 'groove')}
     _per_step_channel = jax.vmap(
@@ -80,7 +80,7 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
     scalar_ce = jnp.sum(_per_step_channel(entity_preds, banks, target_tokens))
 
     # Conditional groove + trace loss (scanned): only computed for active entity slots.
-    cond_ce = cond_entity_scan_loss(model.output_heads, hiddens, target_tokens, banks)
+    cond_ce = conditional_entity_loss(model.output_heads, hiddens, target_tokens, banks)
 
     L = input_tokens.shape[0]
     return (token_ce + scalar_ce + cond_ce) / (L * 4)

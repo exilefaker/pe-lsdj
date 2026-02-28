@@ -172,3 +172,11 @@ cython_debug/
 
 # Mac OS files
 .DS_Store
+
+# My stuff
+_old
+_sketches
+_notes
+_advice
+data/*
+pylsdj/_*.py

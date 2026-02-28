@@ -26,7 +26,7 @@ from pe_lsdj.models.transformer import (
     hard_targets,
     token_loss,
     entity_loss,
-    cond_entity_scan_loss,
+    conditional_entity_loss,
 )
 from pe_lsdj.models.decoders import GrooveDecoder
 from pe_lsdj.embedding.song import SongBanks
@@ -246,7 +246,7 @@ class TestHardTargetsAndLoss:
         L = 4
         tokens  = jnp.zeros((L, 4, 21), dtype=jnp.float32)
         hiddens = model.encode(tokens)                  # (L, 4, D_MODEL)
-        loss    = cond_entity_scan_loss(
+        loss    = conditional_entity_loss(
             model.output_heads, hiddens, tokens, SongBanks.default()
         )
         assert jnp.isfinite(loss)
@@ -258,7 +258,7 @@ class TestHardTargetsAndLoss:
         L = 4
         tokens  = jnp.zeros((L, 4, 21), dtype=jnp.float32)
         hiddens = model.encode(tokens)
-        loss    = cond_entity_scan_loss(
+        loss    = conditional_entity_loss(
             model.output_heads, hiddens, tokens, SongBanks.default()
         )
         # Default banks have null (all-zero) rows; groove/trace ids in null rows are 0

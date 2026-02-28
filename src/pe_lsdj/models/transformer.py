@@ -177,21 +177,21 @@ def _groove_loss_vmap(groove_decoder, table_h, table_row, groove_rows):
     return jnp.sum(losses)
 
 
-def cond_entity_scan_loss(heads, hiddens, target_tokens, banks):
+def conditional_entity_loss(heads, hiddens, target_tokens, banks):
     """
     Conditional groove and trace entity losses for a full sequence.
 
-    Memory-efficient design:
+    Memory-efficient design (of necessity):
       - All bank lookups pre-fetched into dense arrays before any vmap.
       - Context vectors (it_h, pt_h) computed once for all T=L*4 positions.
       - Direct groove losses: vmap over T×N_GROOVE_SLOTS (small; masked nulls ok).
       - Trace losses: jnp.nonzero gathers only non-null slots before vmap, so
         memory is O(active_traces) not O(T × N_TABLE_SLOTS).
 
-    MAX_ACTIVE_TRACES caps the gather size. It must be >= the true number of
+    MAX_ACTIVE_TRACES caps gather size. It must be >= the true number of
     non-null trace IDs in the sequence; silent truncation causes incorrect
     gradients. Default T = L*4 handles ~1 active trace slot per position on
-    average — generous for typical LSDJ songs. Increase if needed.
+    average — generous for typical LSDJ tracks.
 
     heads:         OutputHeads
     hiddens:       (L, 4, d_model) backbone representations
@@ -228,7 +228,7 @@ def cond_entity_scan_loss(heads, hiddens, target_tokens, banks):
     pt_tgr_ids  = pt_trace_rows[:, :, _GROOVE_FX_COLS_ARRAY].astype(jnp.int32)
     pt_tgr_rows = banks.grooves[pt_tgr_ids]
 
-    # ── Context vectors for all T positions (one vmap, no scan) ───────────
+    # ── Context vectors for all T positions ───────────────────────────────
     instr_h_all = jax.vmap(lambda h: jax.nn.gelu(heads.instr_decoder.linear_in(h)))(hiddens_flat)
     it_h_all    = jax.vmap(lambda h: jax.nn.gelu(heads.table_decoder.linear_in(h)))(instr_h_all)
     pt_ctx_all  = jax.vmap(lambda h: jax.nn.gelu(heads.table_proj(h)))(hiddens_flat)
