@@ -44,8 +44,8 @@ class SongBanks(NamedTuple):
     softsynths: Array    # (NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)
     waveframes: Array    # (NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)
     grooves: Array       # (NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)
-    tables: Array        # (NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)
-    traces: Array        # (NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)
+    tables: Array        # (NUM_TABLES + 1, TABLE_WIDTH)
+    traces: Array        # (NUM_TABLES + 1, TABLE_WIDTH)
 
     @classmethod
     def default(cls):
@@ -57,8 +57,8 @@ class SongBanks(NamedTuple):
             softsynths=_z(NUM_SYNTHS, SOFTSYNTH_WIDTH),
             waveframes=_z(NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE),
             grooves=_z(NUM_GROOVES, STEPS_PER_GROOVE * 2),
-            tables=_z(NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH),
-            traces=_z(NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH),
+            tables=_z(NUM_TABLES, TABLE_WIDTH),
+            traces=_z(NUM_TABLES, TABLE_WIDTH),
         )
 
     @classmethod

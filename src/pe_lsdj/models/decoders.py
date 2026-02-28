@@ -2,12 +2,14 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-from jaxtyping import Array, Key
+from jaxtyping import Array
 
 from pe_lsdj.constants import *
 
+
 # ---------------------------------------------------------------------------
 # Logit groups: direct softmax heads, same-vocab members batched.
+#    { group: [ (name, token position, vocab size), ...] }
 # ---------------------------------------------------------------------------
 LOGIT_GROUPS = {
     'note':          [('note',             0, NUM_NOTES)],
@@ -38,7 +40,7 @@ ENTITY_HEADS = {
 }
 
 # ---------------------------------------------------------------------------
-# Entity parameter field specs — 3-tuples: (name, vocab, is_continuous).
+# Entity parameter field specs: (name, vocab, is_continuous).
 #
 # is_continuous mirrors the embedder:
 #   True  → GatedNormedEmbedder (byte/nibble ordinal; use MSE regression)
@@ -47,40 +49,40 @@ ENTITY_HEADS = {
 
 INSTR_FIELD_SPECS = [
     (TYPE_ID,            5, False),  # enum: PU/WAV/KIT/NOI
-    (TABLE,             33, False),  # entity ref  ← index 1
+    (TABLE,             33, False),  # entity reference  ← index 1
     (TABLE_ON_OFF,       2, False),  # bool
     (TABLE_AUTOMATE,     2, False),  # bool
     (AUTOMATE_2,         2, False),  # bool
     (PAN,                5, False),  # enum: Off/L/R/LR
-    (VIBRATO_TYPE,       5, False),  # enum: HF/saw/sine/square
-    (VIBRATO_DIRECTION,  3, False),  # enum: down/up
-    (ENV_VOLUME,        17, True),   # nibble: envelope volume
-    (ENV_FADE,          17, True),   # nibble: fade duration
-    (LENGTH,            65, True),   # 6-bit: note duration
-    (LENGTH_LIMITED,     3, False),  # bool
-    (SWEEP,            257, True),   # byte: sweep intensity
-    (VOLUME,             5, False),  # enum: predefined output levels
-    (PHASE_TRANSPOSE,  257, True),   # byte: pitch offset
-    (WAVE,               5, False),  # enum: duty cycle
-    (PHASE_FINETUNE,    17, True),   # nibble: finetune
-    (SOFTSYNTH_ID,      17, False),  # entity ref  ← index 17
-    (REPEAT,            17, True),   # nibble: repeat count
-    (PLAY_TYPE,          5, False),  # enum: once/loop/pingpong/manual
-    (WAVE_LENGTH,       17, True),   # nibble: waveform length
-    (SPEED,             17, True),   # nibble: playback speed
-    (KEEP_ATTACK_1,      3, False),  # bool
-    (KEEP_ATTACK_2,      3, False),  # bool
-    (KIT_1_ID,          65, True),   # 6-bit: sample index (ordinal)
-    (KIT_2_ID,          65, True),   # 6-bit: sample index
-    (LENGTH_KIT_1,     257, True),   # byte: sample length
-    (LENGTH_KIT_2,     257, True),   # byte
-    (LOOP_KIT_1,         3, False),  # bool
-    (LOOP_KIT_2,         3, False),  # bool
-    (OFFSET_KIT_1,     257, True),   # byte: playback offset
-    (OFFSET_KIT_2,     257, True),   # byte
-    (HALF_SPEED,         3, False),  # bool
-    (PITCH,            257, True),   # byte: pitch
-    (DISTORTION_TYPE,    5, False),  # enum: clip/shape/shape2/wrap
+    (VIBRATO_TYPE,       5, False),  # enum: HF/saw/sine/square  (PU/WAV/KIT)
+    (VIBRATO_DIRECTION,  3, False),  # enum: down/up             (PU/WAV/KIT)
+    (ENV_VOLUME,        17, True),   # nibble: envelope volume       (PU/NOI)
+    (ENV_FADE,          17, True),   # nibble: fade duration         (PU/NOI)
+    (LENGTH,            65, True),   # 6-bit: note duration          (PU/NOI)
+    (LENGTH_LIMITED,     3, False),  # bool                          (PU/NOI)
+    (SWEEP,            257, True),   # byte: sweep intensity         (PU/NOI)
+    (VOLUME,             5, False),  # enum: discrete output level  (WAV/KIT)
+    (PHASE_TRANSPOSE,  257, True),   # byte: pitch offset                (PU)
+    (WAVE,               5, False),  # enum: duty cycle                  (PU)
+    (PHASE_FINETUNE,    17, True),   # nibble: finetune                  (PU)
+    (SOFTSYNTH_ID,      17, False),  # entity reference  ← index 17.    (WAV)
+    (REPEAT,            17, True),   # nibble: repeat count             (WAV)
+    (PLAY_TYPE,          5, False),  # enum: once/loop/pingpong/manual  (WAV)
+    (WAVE_LENGTH,       17, True),   # nibble: waveform length          (WAV)
+    (SPEED,             17, True),   # nibble: playback speed           (WAV)
+    (KEEP_ATTACK_1,      3, False),  # bool                             (KIT)
+    (KEEP_ATTACK_2,      3, False),  # bool                             (KIT)
+    (KIT_1_ID,          65, True),   # 6-bit: sample index (ordinal)    (KIT)
+    (KIT_2_ID,          65, True),   # 6-bit: sample index              (KIT)
+    (LENGTH_KIT_1,     257, True),   # byte: sample length              (KIT)
+    (LENGTH_KIT_2,     257, True),   # byte                             (KIT)
+    (LOOP_KIT_1,         3, False),  # bool                             (KIT)
+    (LOOP_KIT_2,         3, False),  # bool                             (KIT)
+    (OFFSET_KIT_1,     257, True),   # byte: playback offset            (KIT)
+    (OFFSET_KIT_2,     257, True),   # byte                             (KIT)
+    (HALF_SPEED,         3, False),  # bool                             (KIT)
+    (PITCH,            257, True),   # byte: pitch                      (KIT)
+    (DISTORTION_TYPE,    5, False),  # enum: clip/shape/shape2/wrap     (KIT)
 ]
 assert len(INSTR_FIELD_SPECS) == INSTR_WIDTH
 
@@ -119,12 +121,12 @@ TABLE_FIELD_SPECS = (
 )
 assert len(TABLE_FIELD_SPECS) == 624
 
-# Grooves: ALL fields are continuous (nibble timing values).
 GROOVE_FIELD_SPECS = [
     (f'step{i}_{tick}', 17, True)
     for i in range(STEPS_PER_GROOVE) for tick in ('even', 'odd')
 ]
 
+# Only present if instr_type == WAV, so add a +1 offset to vocab
 SOFTSYNTH_FIELD_SPECS = [
     ('waveform',               4, False),  # enum: sawtooth/square/sine
     ('filter_type',            5, False),  # enum: LP/HP/BP/AP

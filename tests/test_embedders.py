@@ -167,7 +167,7 @@ def test_table_embedder_in_dim_matches_table_width():
     fxv = FXValueEmbedder(dummy, subs)
     fx_emb = FXEmbedder(k3, fxv, 64)
     te = TableEmbedder(64, k4, fx_emb)
-    assert te.in_dim == STEPS_PER_TABLE * TABLE_WIDTH
+    assert te.in_dim == TABLE_WIDTH
 
 # --- SoftsynthEmbedder weight sharing ---
 
@@ -333,7 +333,7 @@ class TestForwardPassShapes:
 
         # Phrase level: table entity at position 0
         table_entity = EntityEmbedder(
-            jnp.ones((NUM_TABLES, STEPS_PER_TABLE * TABLE_WIDTH)), te0,
+            jnp.ones((NUM_TABLES, TABLE_WIDTH)), te0,
         )
         fxv_phrase = FXValueEmbedder(table_entity, subs)
         e = FXEmbedder(k5, fxv_phrase, 128, _projection=fx0.projection)
@@ -558,13 +558,13 @@ class TestSongBanks:
         assert banks.softsynths.shape == (NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)
         assert banks.waveframes.shape == (NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)
         assert banks.grooves.shape == (NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)
-        assert banks.tables.shape == (NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)
-        assert banks.traces.shape == (NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)
+        assert banks.tables.shape == (NUM_TABLES + 1, TABLE_WIDTH)
+        assert banks.traces.shape == (NUM_TABLES + 1, TABLE_WIDTH)
 
     def test_from_songfile(self, song_file):
         banks = SongBanks.from_songfile(song_file)
         assert banks.instruments.shape == (NUM_INSTRUMENTS + 1, INSTR_WIDTH)
-        assert banks.tables.shape == (NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)
+        assert banks.tables.shape == (NUM_TABLES + 1, TABLE_WIDTH)
 
 
 class TestSetBanks:
@@ -582,8 +582,8 @@ class TestSetBanks:
             softsynths=jnp.ones((NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)),
             waveframes=jnp.ones((NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
             grooves=jnp.ones((NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)),
-            tables=jnp.ones((NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)),
-            traces=jnp.ones((NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)),
+            tables=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
+            traces=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
         )
         seq_emb2 = seq_emb.with_banks(banks)
         out_after = seq_emb2(tokens)
@@ -617,8 +617,8 @@ class TestSetBanks:
             softsynths=jnp.ones((NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)),
             waveframes=jnp.ones((NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
             grooves=jnp.ones((NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)),
-            tables=jnp.ones((NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)),
-            traces=jnp.ones((NUM_TABLES + 1, STEPS_PER_TABLE * TABLE_WIDTH)),
+            tables=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
+            traces=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
         )
         seq_emb2 = seq_emb.with_banks(banks)
 

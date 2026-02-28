@@ -1,8 +1,9 @@
 # PE-LSDJ Token Specification
 # [Generated upon request by Claude Opus 4.6]
 
-Token layout for the LSDJ ML pipeline. All values use **+1 null offset**
-(0 = NULL) unless noted otherwise.
+Token layout for the LSDJ ML pipeline.
+Conditionally-present values use **+1 NULL offset**.
+Always-present values natively use (0 = NULL).
 
 ## Overview
 

@@ -288,5 +288,6 @@ FX_VALUE_KEYS = (
 # Token dimensions (input to embedding layer)
 
 INSTR_WIDTH = 35 # +1 within embedding, for waveframes
-TABLE_WIDTH = 39
+TABLE_STEP_WIDTH = 39
+TABLE_WIDTH = STEPS_PER_TABLE * TABLE_STEP_WIDTH
 SOFTSYNTH_WIDTH = 13

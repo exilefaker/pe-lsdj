@@ -77,11 +77,11 @@ class FXEmbedder(ConcatEmbedder):
 
 class TableEmbedder(BaseEmbedder):
     """
-    Embeds a full table (STEPS_PER_TABLE steps of TABLE_WIDTH features).
+    Embeds a full table (STEPS_PER_TABLE steps of TABLE_STEP_WIDTH features).
     Each step is embedded via shared sub-embedders (env×3, FX×2),
     then all step embeddings are concatenated and projected.
 
-    Input:  (STEPS_PER_TABLE * TABLE_WIDTH,) = (624,)
+    Input:  (STEPS_PER_TABLE * TABLE_STEP_WIDTH,) = (624,) = (TABLE_WIDTH,)
     Output: (out_dim,)
     """
     embedders: dict[str, BaseEmbedder]
@@ -124,7 +124,7 @@ class TableEmbedder(BaseEmbedder):
         self.out_dim = out_dim
 
     def _embed_step(self, x):
-        """Embed one table step (TABLE_WIDTH,) -> (step_concat_dim,)."""
+        """Embed one table step (TABLE_STEP_WIDTH,) -> (step_concat_dim,)."""
         embeddings = []
         for name, e in self.embedders.items():
             emb = e(x[self.offsets[name]:self.offsets[name] + e.in_dim])
