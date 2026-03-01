@@ -443,22 +443,6 @@ class LSDJTransformer(eqx.Module):
         ]
         self.final_norm   = eqx.nn.LayerNorm(d_model)
         self.output_heads = OutputHeads(d_model, instr_entity_dim, table_entity_dim, softsynth_entity_dim, keys[-1])
-        step = self.embedder.step_embedder
-        instr_emb_dim = step.instrument_embedder.out_dim
-        table_emb_dim = step.fx_embedder.embedders['value'].embedders['table_fx'].out_dim
-        synth_emb_dim = step.instrument_embedder.embedder.embedders['softsynth'].out_dim
-        assert instr_emb_dim == instr_entity_dim, (
-            f"instr_dim ({instr_emb_dim}) must equal instr_entity_dim ({instr_entity_dim}) "
-            f"for entity_alignment_loss. Pass instr_dim={instr_entity_dim} explicitly."
-        )
-        assert table_emb_dim == table_entity_dim, (
-            f"table_dim ({table_emb_dim}) must equal table_entity_dim ({table_entity_dim}) "
-            f"for entity_alignment_loss. Pass table_dim={table_entity_dim} and value_out_dim={table_entity_dim} explicitly."
-        )
-        assert synth_emb_dim == softsynth_entity_dim, (
-            f"softsynth_dim ({synth_emb_dim}) must equal softsynth_entity_dim ({softsynth_entity_dim}) "
-            f"for entity_alignment_loss. Pass softsynth_dim={softsynth_entity_dim} explicitly."
-        )
 
     def encode(self, song_tokens: Array) -> Array:
         x = self.embedder(song_tokens)
