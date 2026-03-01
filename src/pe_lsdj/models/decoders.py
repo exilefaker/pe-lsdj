@@ -300,21 +300,21 @@ class GrooveDecoder(eqx.Module):
     """
     Predicts one groove (GROOVE_CONT_N fields) per slot.
 
-    Slot embeddings (shape: (N_GROOVE_SLOTS + 1) × entity_dim) are added to the
-    entity_dim context before decoding. Shared across ALL groove levels:
+    Slot embeddings (shape: (N_GROOVE_SLOTS + 1) × context_dim) are added to the
+    context_dim context before decoding. Shared across ALL groove levels:
       indices 0..N_GROOVE_SLOTS-1 — per-table/trace slot predictions
       index  N_GROOVE_SLOTS       — phrase-level groove (special phrase slot)
     Context distinguishes the level; slot_embeds distinguish position.
     """
-    slot_embeds: Array          # (N_GROOVE_SLOTS + 1, entity_dim)
-    linear_in:   eqx.nn.Linear  # entity_dim → entity_dim
-    linear_out:  eqx.nn.Linear  # entity_dim → GROOVE_CONT_N
+    slot_embeds: Array          # (N_GROOVE_SLOTS + 1, context_dim)
+    linear_in:   eqx.nn.Linear  # context_dim → context_dim
+    linear_out:  eqx.nn.Linear  # context_dim → GROOVE_CONT_N
 
-    def __init__(self, entity_dim, key):
+    def __init__(self, context_dim, key):
         k1, k2, k3 = jr.split(key, 3)
-        self.slot_embeds = jr.normal(k1, (N_GROOVE_SLOTS + 1, entity_dim)) * 0.02
-        self.linear_in   = eqx.nn.Linear(entity_dim, entity_dim,   use_bias=False, key=k2)
-        self.linear_out  = eqx.nn.Linear(entity_dim, GROOVE_CONT_N, use_bias=False, key=k3)
+        self.slot_embeds = jr.normal(k1, (N_GROOVE_SLOTS + 1, context_dim)) * 0.02
+        self.linear_in   = eqx.nn.Linear(context_dim, context_dim,   use_bias=False, key=k2)
+        self.linear_out  = eqx.nn.Linear(context_dim, GROOVE_CONT_N, use_bias=False, key=k3)
 
     def __call__(self, context, slot_idx):
         """context: (entity_dim,) → (GROOVE_CONT_N,) groove logits."""
@@ -340,17 +340,17 @@ class TableDecoder(eqx.Module):
 
     slot_embeds are used by cond_entity_scan_loss to contextualize each trace sub-slot.
     """
-    slot_embeds: Array          # (N_TABLE_SLOTS, entity_dim) — for trace sub-slot context
-    linear_in:   eqx.nn.Linear  # entity_dim → entity_dim
-    cat_out:     eqx.nn.Linear  # entity_dim → TABLE_SCALAR_CAT_TOTAL_VOCAB
-    cont_out:    eqx.nn.Linear  # entity_dim → TABLE_SCALAR_CONT_N
+    slot_embeds: Array          # (N_TABLE_SLOTS, context_dim) — for trace sub-slot context
+    linear_in:   eqx.nn.Linear  # context_dim → context_dim
+    cat_out:     eqx.nn.Linear  # context_dim → TABLE_SCALAR_CAT_TOTAL_VOCAB
+    cont_out:    eqx.nn.Linear  # context_dim → TABLE_SCALAR_CONT_N
 
-    def __init__(self, entity_dim, key):
+    def __init__(self, context_dim, key):
         k1, k2, k3, k4 = jr.split(key, 4)
-        self.slot_embeds = jr.normal(k1, (N_TABLE_SLOTS, entity_dim)) * 0.02
-        self.linear_in   = eqx.nn.Linear(entity_dim, entity_dim,               use_bias=False, key=k2)
-        self.cat_out     = eqx.nn.Linear(entity_dim, TABLE_SCALAR_CAT_TOTAL_VOCAB, use_bias=False, key=k3)
-        self.cont_out    = eqx.nn.Linear(entity_dim, TABLE_SCALAR_CONT_N,      use_bias=False, key=k4)
+        self.slot_embeds = jr.normal(k1, (N_TABLE_SLOTS, context_dim)) * 0.02
+        self.linear_in   = eqx.nn.Linear(context_dim, context_dim,               use_bias=False, key=k2)
+        self.cat_out     = eqx.nn.Linear(context_dim, TABLE_SCALAR_CAT_TOTAL_VOCAB, use_bias=False, key=k3)
+        self.cont_out    = eqx.nn.Linear(context_dim, TABLE_SCALAR_CONT_N,      use_bias=False, key=k4)
 
     def __call__(self, context):
         """context: (entity_dim,) → {
@@ -368,19 +368,19 @@ class TableDecoder(eqx.Module):
 class SoftSynthDecoder(eqx.Module):
     """
     Softsynth + waveframe decoder.
-    Conditions on instrument entity_dim latent (subordinate — not backbone x directly).
+    Conditions on the instrument latent (in_dim = instr_entity_dim), projects to out_dim = softsynth_entity_dim.
     """
-    linear_in:     eqx.nn.Linear   # entity_dim → entity_dim
-    cat_out:       eqx.nn.Linear   # entity_dim → SOFTSYNTH_CAT_TOTAL_VOCAB
-    cont_out:      eqx.nn.Linear   # entity_dim → SOFTSYNTH_CONT_N
-    waveframe_out: eqx.nn.Linear   # entity_dim → WAVEFRAME_DIM
+    linear_in:     eqx.nn.Linear   # in_dim → out_dim
+    cat_out:       eqx.nn.Linear   # out_dim → SOFTSYNTH_CAT_TOTAL_VOCAB
+    cont_out:      eqx.nn.Linear   # out_dim → SOFTSYNTH_CONT_N
+    waveframe_out: eqx.nn.Linear   # out_dim → WAVEFRAME_DIM
 
-    def __init__(self, entity_dim, key):
+    def __init__(self, in_dim, out_dim, key):
         k1, k2, k3, k4 = jr.split(key, 4)
-        self.linear_in     = eqx.nn.Linear(entity_dim, entity_dim,           use_bias=False, key=k1)
-        self.cat_out       = eqx.nn.Linear(entity_dim, SOFTSYNTH_CAT_TOTAL_VOCAB, use_bias=False, key=k2)
-        self.cont_out      = eqx.nn.Linear(entity_dim, SOFTSYNTH_CONT_N,     use_bias=False, key=k3)
-        self.waveframe_out = eqx.nn.Linear(entity_dim, WAVEFRAME_DIM,        use_bias=False, key=k4)
+        self.linear_in     = eqx.nn.Linear(in_dim,  out_dim,                  use_bias=False, key=k1)
+        self.cat_out       = eqx.nn.Linear(out_dim, SOFTSYNTH_CAT_TOTAL_VOCAB, use_bias=False, key=k2)
+        self.cont_out      = eqx.nn.Linear(out_dim, SOFTSYNTH_CONT_N,         use_bias=False, key=k3)
+        self.waveframe_out = eqx.nn.Linear(out_dim, WAVEFRAME_DIM,            use_bias=False, key=k4)
 
     def __call__(self, instr_h):
         """instr_h: (entity_dim,) GELU'd instrument latent."""
@@ -398,20 +398,21 @@ class SoftSynthDecoder(eqx.Module):
 class InstrumentDecoder(eqx.Module):
     """
     Phrase-level instrument decoder. Conditions on backbone x (d_model).
-    Instrument's table uses the shared table_decoder with instrument latent as context.
-    Softsynth/waveframes condition on instrument entity_dim latent (subordinate).
+    Instrument's table uses the shared table_decoder (via OutputHeads.instr_to_table_proj)
+    with the instr_dim latent bridged to table_entity_dim context.
+    Softsynth/waveframes condition on the instr_dim latent (subordinate).
     """
-    linear_in:         eqx.nn.Linear    # d_model → entity_dim
-    cat_out:           eqx.nn.Linear    # entity_dim → INSTR_SCALAR_CAT_TOTAL_VOCAB
-    cont_out:          eqx.nn.Linear    # entity_dim → INSTR_SCALAR_CONT_N
+    linear_in:         eqx.nn.Linear    # d_model → instr_dim
+    cat_out:           eqx.nn.Linear    # instr_dim → INSTR_SCALAR_CAT_TOTAL_VOCAB
+    cont_out:          eqx.nn.Linear    # instr_dim → INSTR_SCALAR_CONT_N
     softsynth_decoder: SoftSynthDecoder
 
-    def __init__(self, d_model, entity_dim, key):
+    def __init__(self, d_model, instr_dim, softsynth_dim, key):
         k1, k2, k3, k4 = jr.split(key, 4)
-        self.linear_in         = eqx.nn.Linear(d_model,     entity_dim,              use_bias=False, key=k1)
-        self.cat_out           = eqx.nn.Linear(entity_dim,  INSTR_SCALAR_CAT_TOTAL_VOCAB, use_bias=False, key=k2)
-        self.cont_out          = eqx.nn.Linear(entity_dim,  INSTR_SCALAR_CONT_N,     use_bias=False, key=k3)
-        self.softsynth_decoder = SoftSynthDecoder(entity_dim, k4)
+        self.linear_in         = eqx.nn.Linear(d_model,    instr_dim,               use_bias=False, key=k1)
+        self.cat_out           = eqx.nn.Linear(instr_dim,  INSTR_SCALAR_CAT_TOTAL_VOCAB, use_bias=False, key=k2)
+        self.cont_out          = eqx.nn.Linear(instr_dim,  INSTR_SCALAR_CONT_N,     use_bias=False, key=k3)
+        self.softsynth_decoder = SoftSynthDecoder(instr_dim, softsynth_dim, k4)
 
     def __call__(self, x):
         """
@@ -436,24 +437,26 @@ class OutputHeads(eqx.Module):
     """
     All output projection heads.
 
-    weights:            logit-group linear heads (TOKEN_HEADS, shared-vocab batching)
-    groove_decoder:     shared GrooveDecoder — phrase-level groove + cond scan losses
-                        (slot index N_GROOVE_SLOTS = phrase-level slot)
-    table_decoder:      TableDecoder — phrase-level table AND instrument's table scalar preds;
-                        its weights are also reused for trace scalar preds in conditional loss
-    instr_decoder:      InstrumentDecoder (instrument scalars + softsynth)
-    table_proj:         d_model → entity_dim projection for phrase-level table context
-    phrase_groove_proj: d_model → entity_dim projection for phrase-level groove context
+    weights:             logit-group linear heads (TOKEN_HEADS, shared-vocab batching)
+    groove_decoder:      shared GrooveDecoder — phrase-level groove + cond scan losses
+                         (slot index N_GROOVE_SLOTS = phrase-level slot)
+    table_decoder:       TableDecoder — phrase-level table AND instrument's table scalar preds;
+                         its weights are also reused for trace scalar preds in conditional loss
+    instr_decoder:       InstrumentDecoder (instrument scalars + softsynth)
+    table_proj:          d_model → table_entity_dim projection for phrase-level table context
+    phrase_groove_proj:  d_model → table_entity_dim projection for phrase-level groove context
+    instr_to_table_proj: instr_entity_dim → table_entity_dim bridge for instrument's table context
     """
-    weights:            dict[str, Array]
-    groove_decoder:     GrooveDecoder
-    table_decoder:      TableDecoder
-    instr_decoder:      InstrumentDecoder
-    table_proj:         eqx.nn.Linear
-    phrase_groove_proj: eqx.nn.Linear
+    weights:             dict[str, Array]
+    groove_decoder:      GrooveDecoder
+    table_decoder:       TableDecoder
+    instr_decoder:       InstrumentDecoder
+    table_proj:          eqx.nn.Linear
+    phrase_groove_proj:  eqx.nn.Linear
+    instr_to_table_proj: eqx.nn.Linear
 
-    def __init__(self, d_model, entity_dim, key):
-        keys = jr.split(key, 6)
+    def __init__(self, d_model, instr_entity_dim, table_entity_dim, softsynth_entity_dim, key):
+        keys = jr.split(key, 7)
 
         # Logit-group heads
         weights = {}
@@ -464,18 +467,19 @@ class OutputHeads(eqx.Module):
         self.weights = weights
 
         # Shared GrooveDecoder
-        self.groove_decoder = GrooveDecoder(entity_dim, keys[1])
+        self.groove_decoder = GrooveDecoder(table_entity_dim, keys[1])
 
         # Single TableDecoder — used for both table and trace predictions
         # (trace predictions in cond_entity_scan_loss reuse these same weights)
-        self.table_decoder = TableDecoder(entity_dim, keys[2])
+        self.table_decoder = TableDecoder(table_entity_dim, keys[2])
 
         # Instrument decoder
-        self.instr_decoder = InstrumentDecoder(d_model, entity_dim, keys[3])
+        self.instr_decoder = InstrumentDecoder(d_model, instr_entity_dim, softsynth_entity_dim, keys[3])
 
         # Phrase-level projections
-        self.table_proj         = eqx.nn.Linear(d_model, entity_dim, use_bias=False, key=keys[4])
-        self.phrase_groove_proj = eqx.nn.Linear(d_model, entity_dim, use_bias=False, key=keys[5])
+        self.table_proj          = eqx.nn.Linear(d_model, table_entity_dim,           use_bias=False, key=keys[4])
+        self.phrase_groove_proj  = eqx.nn.Linear(d_model, table_entity_dim,           use_bias=False, key=keys[5])
+        self.instr_to_table_proj = eqx.nn.Linear(instr_entity_dim, table_entity_dim,  use_bias=False, key=keys[6])
     
 
 
@@ -502,7 +506,8 @@ class OutputHeads(eqx.Module):
 
         # Instrument (scalar cat + cont, softsynth; table scalar cat + cont)
         instr_preds, instr_h = self.instr_decoder(x)
-        instr_preds['table'] = self.table_decoder(instr_h)
+        instr_table_ctx = jax.nn.gelu(self.instr_to_table_proj(instr_h))
+        instr_preds['table'] = self.table_decoder(instr_table_ctx)
         result['instr'] = instr_preds
 
         return result

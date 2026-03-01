@@ -116,7 +116,7 @@ class TestOutputHeads:
 
     @pytest.fixture(scope="class")
     def heads(self):
-        return OutputHeads(D_MODEL, ENTITY_DIM, KEY)
+        return OutputHeads(D_MODEL, ENTITY_DIM, ENTITY_DIM, ENTITY_DIM, KEY)
 
     def test_token_head_keys(self, heads):
         x = jnp.ones(D_MODEL)
@@ -208,7 +208,7 @@ class TestHardTargetsAndLoss:
         assert targets['note'].sum() == 1.0
 
     def test_token_loss_finite(self):
-        heads = OutputHeads(D_MODEL, ENTITY_DIM, KEY)
+        heads = OutputHeads(D_MODEL, ENTITY_DIM, ENTITY_DIM, ENTITY_DIM, KEY)
         x = jr.normal(jr.PRNGKey(1), (D_MODEL,))
         out = heads(x)
         tokens = jnp.zeros(21, dtype=jnp.int32)
@@ -217,14 +217,14 @@ class TestHardTargetsAndLoss:
         assert loss > 0
 
     def test_soft_targets_lower_loss(self):
-        heads = OutputHeads(D_MODEL, ENTITY_DIM, KEY)
+        heads = OutputHeads(D_MODEL, ENTITY_DIM, ENTITY_DIM, ENTITY_DIM, KEY)
         x = jr.normal(jr.PRNGKey(1), (D_MODEL,))
         out = heads(x)
         soft = {name: jax.nn.softmax(out[name]) for name in TOKEN_HEADS}
         assert token_loss(out, soft) < token_loss(out, hard_targets(jnp.zeros(21, dtype=jnp.int32)))
 
     def test_entity_loss_finite(self):
-        heads  = OutputHeads(D_MODEL, ENTITY_DIM, KEY)
+        heads  = OutputHeads(D_MODEL, ENTITY_DIM, ENTITY_DIM, ENTITY_DIM, KEY)
         x      = jr.normal(jr.PRNGKey(1), (D_MODEL,))
         out    = heads(x)
         entity_preds = {k: out[k] for k in ('instr', 'table', 'groove')}
@@ -232,7 +232,7 @@ class TestHardTargetsAndLoss:
         assert jnp.isfinite(loss)
 
     def test_entity_loss_null_tokens(self):
-        heads  = OutputHeads(D_MODEL, ENTITY_DIM, KEY)
+        heads  = OutputHeads(D_MODEL, ENTITY_DIM, ENTITY_DIM, ENTITY_DIM, KEY)
         x      = jr.normal(jr.PRNGKey(2), (D_MODEL,))
         out    = heads(x)
         entity_preds = {k: out[k] for k in ('instr', 'table', 'groove')}
@@ -241,7 +241,9 @@ class TestHardTargetsAndLoss:
 
     def test_cond_entity_scan_loss_finite(self):
         """cond_entity_scan_loss should run and return a finite scalar."""
-        model  = LSDJTransformer(KEY, d_model=D_MODEL, entity_dim=ENTITY_DIM,
+        model  = LSDJTransformer(KEY, d_model=D_MODEL,
+                                 instr_entity_dim=ENTITY_DIM, table_entity_dim=ENTITY_DIM,
+                                 softsynth_entity_dim=ENTITY_DIM,
                                  num_heads_t=2, num_heads_c=2, num_blocks=1,
                                  instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
                                  value_out_dim=ENTITY_DIM, softsynth_dim=ENTITY_DIM)
@@ -255,7 +257,9 @@ class TestHardTargetsAndLoss:
 
     def test_cond_entity_scan_loss_zero_for_null_banks(self):
         """With all-null tokens, all groove/trace ids are 0 — cond loss should be 0."""
-        model  = LSDJTransformer(KEY, d_model=D_MODEL, entity_dim=ENTITY_DIM,
+        model  = LSDJTransformer(KEY, d_model=D_MODEL,
+                                 instr_entity_dim=ENTITY_DIM, table_entity_dim=ENTITY_DIM,
+                                 softsynth_entity_dim=ENTITY_DIM,
                                  num_heads_t=2, num_heads_c=2, num_blocks=1,
                                  instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
                                  value_out_dim=ENTITY_DIM, softsynth_dim=ENTITY_DIM)
@@ -274,7 +278,9 @@ class TestLSDJTransformer:
     @pytest.fixture(scope="class")
     def model(self):
         return LSDJTransformer(
-            KEY, d_model=D_MODEL, entity_dim=ENTITY_DIM,
+            KEY, d_model=D_MODEL,
+            instr_entity_dim=ENTITY_DIM, table_entity_dim=ENTITY_DIM,
+            softsynth_entity_dim=ENTITY_DIM,
             num_heads_t=2, num_heads_c=2, num_blocks=2,
             instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
             value_out_dim=ENTITY_DIM, softsynth_dim=ENTITY_DIM,

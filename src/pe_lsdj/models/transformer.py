@@ -230,7 +230,7 @@ def conditional_entity_loss(heads, hiddens, target_tokens, banks):
 
     # ── Context vectors for all T positions ───────────────────────────────
     instr_h_all = jax.vmap(lambda h: jax.nn.gelu(heads.instr_decoder.linear_in(h)))(hiddens_flat)
-    it_h_all    = jax.vmap(lambda h: jax.nn.gelu(heads.table_decoder.linear_in(h)))(instr_h_all)
+    it_h_all    = jax.vmap(lambda h: jax.nn.gelu(heads.instr_to_table_proj(h)))(instr_h_all)
     pt_ctx_all  = jax.vmap(lambda h: jax.nn.gelu(heads.table_proj(h)))(hiddens_flat)
     pt_h_all    = jax.vmap(lambda h: jax.nn.gelu(heads.table_decoder.linear_in(h)))(pt_ctx_all)
 
@@ -298,8 +298,12 @@ def entity_alignment_loss(model, hiddens, target_tokens, banks):
     Table-slot groove alignment would require scanning groove references inside
     table bank rows and is not implemented here.
 
-    Requires: instr_dim == table_dim == softsynth_dim == entity_dim
-    (enforced by assertions in LSDJTransformer.__init__).
+    Each pair operates in its own entity dim:
+      - Instrument:   instr_entity_dim
+      - Table pairs:  table_entity_dim (instrument's table bridged via instr_to_table_proj)
+      - Softsynth:    softsynth_entity_dim
+      - Groove:       table_entity_dim
+    Dims enforced by assertions in LSDJTransformer.__init__.
     Null entities (ID == 0) contribute zero.
     Returns a sum to be normalised alongside other loss terms in sequence_loss.
     """
@@ -318,14 +322,15 @@ def entity_alignment_loss(model, hiddens, target_tokens, banks):
     step_emb = model.embedder.step_embedder
 
     # Decoder-side latents
-    instr_q    = jax.vmap(heads.instr_decoder.encode)(h_flat)                           # (T, entity_dim) pre-GELU
-    instr_gelu = jax.nn.gelu(instr_q)                                                   # (T, entity_dim) post-GELU, used as parent context
-    it_table_q = jax.vmap(heads.table_decoder.encode)(instr_gelu)                       # (T, entity_dim)
-    pt_ctx     = jax.nn.gelu(jax.vmap(heads.table_proj)(h_flat))                        # (T, entity_dim)
-    pt_table_q = jax.vmap(heads.table_decoder.encode)(pt_ctx)                           # (T, entity_dim)
-    synth_q    = jax.vmap(heads.instr_decoder.softsynth_decoder.encode)(instr_gelu)     # (T, entity_dim)
-    groove_ctx = jax.nn.gelu(jax.vmap(heads.phrase_groove_proj)(h_flat))                # (T, entity_dim)
-    groove_q   = jax.vmap(lambda ctx: heads.groove_decoder.encode(ctx, N_GROOVE_SLOTS))(groove_ctx)  # (T, entity_dim)
+    instr_q      = jax.vmap(heads.instr_decoder.encode)(h_flat)                                        # (T, instr_entity_dim) pre-GELU
+    instr_gelu   = jax.nn.gelu(instr_q)                                                               # (T, instr_entity_dim) post-GELU
+    it_table_ctx = jax.nn.gelu(jax.vmap(heads.instr_to_table_proj)(instr_gelu))                       # (T, table_entity_dim) bridge
+    it_table_q   = jax.vmap(heads.table_decoder.encode)(it_table_ctx)                                 # (T, table_entity_dim)
+    pt_ctx       = jax.nn.gelu(jax.vmap(heads.table_proj)(h_flat))                                    # (T, table_entity_dim)
+    pt_table_q   = jax.vmap(heads.table_decoder.encode)(pt_ctx)                                       # (T, table_entity_dim)
+    synth_q      = jax.vmap(heads.instr_decoder.softsynth_decoder.encode)(instr_gelu)                 # (T, softsynth_entity_dim)
+    groove_ctx   = jax.nn.gelu(jax.vmap(heads.phrase_groove_proj)(h_flat))                            # (T, table_entity_dim)
+    groove_q     = jax.vmap(lambda ctx: heads.groove_decoder.encode(ctx, N_GROOVE_SLOTS))(groove_ctx) # (T, table_entity_dim)
 
     # Embedder-side keys
     instr_emb   = step_emb.instrument_embedder
@@ -409,7 +414,9 @@ class LSDJTransformer(eqx.Module):
         key: Key,
         *,
         d_model: int = 256,
-        entity_dim: int = 128,
+        instr_entity_dim: int = 128,
+        table_entity_dim: int = 64,
+        softsynth_entity_dim: int = 64,
         num_heads_t: int = 4,
         num_heads_c: int = 2,
         num_blocks: int = 6,
@@ -417,7 +424,10 @@ class LSDJTransformer(eqx.Module):
         **embedder_kwargs,
     ):
         self.metadata = {
-            "d_model": d_model, "entity_dim": entity_dim,
+            "d_model": d_model,
+            "instr_entity_dim": instr_entity_dim,
+            "table_entity_dim": table_entity_dim,
+            "softsynth_entity_dim": softsynth_entity_dim,
             "num_heads_t": num_heads_t, "num_heads_c": num_heads_c,
             "num_blocks": num_blocks,
             "embedder": {k: v for k, v in embedder_kwargs.items() if isinstance(v, int)},
@@ -432,22 +442,22 @@ class LSDJTransformer(eqx.Module):
             for i in range(num_blocks)
         ]
         self.final_norm   = eqx.nn.LayerNorm(d_model)
-        self.output_heads = OutputHeads(d_model, entity_dim, keys[-1])
+        self.output_heads = OutputHeads(d_model, instr_entity_dim, table_entity_dim, softsynth_entity_dim, keys[-1])
         step = self.embedder.step_embedder
         instr_emb_dim = step.instrument_embedder.out_dim
         table_emb_dim = step.fx_embedder.embedders['value'].embedders['table_fx'].out_dim
         synth_emb_dim = step.instrument_embedder.embedder.embedders['softsynth'].out_dim
-        assert instr_emb_dim == entity_dim, (
-            f"instr_dim ({instr_emb_dim}) must equal entity_dim ({entity_dim}) "
-            f"for entity_alignment_loss. Pass instr_dim={entity_dim} explicitly."
+        assert instr_emb_dim == instr_entity_dim, (
+            f"instr_dim ({instr_emb_dim}) must equal instr_entity_dim ({instr_entity_dim}) "
+            f"for entity_alignment_loss. Pass instr_dim={instr_entity_dim} explicitly."
         )
-        assert table_emb_dim == entity_dim, (
-            f"table_dim ({table_emb_dim}) must equal entity_dim ({entity_dim}) "
-            f"for entity_alignment_loss. Pass table_dim={entity_dim} explicitly."
+        assert table_emb_dim == table_entity_dim, (
+            f"table_dim ({table_emb_dim}) must equal table_entity_dim ({table_entity_dim}) "
+            f"for entity_alignment_loss. Pass table_dim={table_entity_dim} and value_out_dim={table_entity_dim} explicitly."
         )
-        assert synth_emb_dim == entity_dim, (
-            f"softsynth_dim ({synth_emb_dim}) must equal entity_dim ({entity_dim}) "
-            f"for entity_alignment_loss. Pass softsynth_dim={entity_dim} explicitly."
+        assert synth_emb_dim == softsynth_entity_dim, (
+            f"softsynth_dim ({synth_emb_dim}) must equal softsynth_entity_dim ({softsynth_entity_dim}) "
+            f"for entity_alignment_loss. Pass softsynth_dim={softsynth_entity_dim} explicitly."
         )
 
     def encode(self, song_tokens: Array) -> Array:

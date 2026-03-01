@@ -164,10 +164,10 @@ class SongStepEmbedder(eqx.Module):
         note_dim: int = 128,
         instr_dim: int = 128,
         fx_dim: int = 128,
-        table_dim: int = 128,
+        table_dim: int = 64,
         transpose_dim: int = 16,
-        value_out_dim: int = 128,
-        softsynth_dim: int = 128,
+        value_out_dim: int = 64,
+        softsynth_dim: int = 64,
         waveframe_dim: int = 32,
     ):
         if banks is None:
