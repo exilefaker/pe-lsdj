@@ -242,7 +242,9 @@ class TestHardTargetsAndLoss:
     def test_cond_entity_scan_loss_finite(self):
         """cond_entity_scan_loss should run and return a finite scalar."""
         model  = LSDJTransformer(KEY, d_model=D_MODEL, entity_dim=ENTITY_DIM,
-                                 num_heads_t=2, num_heads_c=2, num_blocks=1)
+                                 num_heads_t=2, num_heads_c=2, num_blocks=1,
+                                 instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
+                                 value_out_dim=ENTITY_DIM, softsynth_dim=ENTITY_DIM)
         L = 4
         tokens  = jnp.zeros((L, 4, 21), dtype=jnp.float32)
         hiddens = model.encode(tokens)                  # (L, 4, D_MODEL)
@@ -254,7 +256,9 @@ class TestHardTargetsAndLoss:
     def test_cond_entity_scan_loss_zero_for_null_banks(self):
         """With all-null tokens, all groove/trace ids are 0 — cond loss should be 0."""
         model  = LSDJTransformer(KEY, d_model=D_MODEL, entity_dim=ENTITY_DIM,
-                                 num_heads_t=2, num_heads_c=2, num_blocks=1)
+                                 num_heads_t=2, num_heads_c=2, num_blocks=1,
+                                 instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
+                                 value_out_dim=ENTITY_DIM, softsynth_dim=ENTITY_DIM)
         L = 4
         tokens  = jnp.zeros((L, 4, 21), dtype=jnp.float32)
         hiddens = model.encode(tokens)
@@ -272,6 +276,8 @@ class TestLSDJTransformer:
         return LSDJTransformer(
             KEY, d_model=D_MODEL, entity_dim=ENTITY_DIM,
             num_heads_t=2, num_heads_c=2, num_blocks=2,
+            instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
+            value_out_dim=ENTITY_DIM, softsynth_dim=ENTITY_DIM,
         )
 
     def test_output_token_keys(self, model):

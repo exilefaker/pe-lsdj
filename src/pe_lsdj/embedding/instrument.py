@@ -19,7 +19,7 @@ class SoftsynthEmbedder(ConcatEmbedder):
         enum_out_dim=32,
         sound_param_out_dim=16,
         continuous_out_dim=16,
-        out_dim=64,
+        out_dim=128,
     ):
         keys = jr.split(key, 11)
 
@@ -52,7 +52,7 @@ class SoftsynthEntityEmbedder(EntityEmbedder):
         self,
         key,
         softsynths: Array,
-        out_dim: int=64,
+        out_dim: int = 128,
         enum_out_dim=32,
         sound_param_out_dim=16,
         continuous_out_dim=16,

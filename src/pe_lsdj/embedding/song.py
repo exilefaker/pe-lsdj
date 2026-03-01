@@ -46,7 +46,7 @@ class SongBanks(NamedTuple):
     grooves: Array       # (NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)
     tables: Array        # (NUM_TABLES + 1, TABLE_WIDTH)
     traces: Array        # (NUM_TABLES + 1, TABLE_WIDTH)
-
+    
     @classmethod
     def default(cls):
         """Zero-filled banks with correct shapes (null rows included)."""
@@ -164,10 +164,10 @@ class SongStepEmbedder(eqx.Module):
         note_dim: int = 128,
         instr_dim: int = 128,
         fx_dim: int = 128,
-        table_dim: int = 64,
+        table_dim: int = 128,
         transpose_dim: int = 16,
-        value_out_dim: int = 64,
-        softsynth_dim: int = 64,
+        value_out_dim: int = 128,
+        softsynth_dim: int = 128,
         waveframe_dim: int = 32,
     ):
         if banks is None:
