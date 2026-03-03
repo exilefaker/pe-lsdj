@@ -22,7 +22,48 @@ It consists of:
 - A multi-channel transformer-based baseline model with axial attention
 - Tools for training and generation
 
+## Usage
+
+Import/tokenize an `.lsdsng` file, do stuff, and render back to bytes:
+
+```python
+from pe_lsdj import SongFile
+
+sf = SongFile("data/chiptune.lsdsng")
+
+# ...do stuff to data...
+
+sf.to_lsdsgn("output.lsdsng")
+
+```
+
+Train the default model (too large for most CPUs -- see Colab notebook):
+
+```python
+import glob
+from pe_lsdj.training import load_songs
+
+DATA_PATH = "..."
+song_files = glob.glob(DATA_PATH + /*.lsdsng")
+songs: list[SongFile] = load_songs(song_files)
+
+key = jr.PRNGKey(33)
+model_key, train_key = jr.split(key)
+
+model = LSDJTransformer(model_key)
+
+CHECKPOINT_PATH = "..."
+
+model, opt_state = train(
+    model, 
+    songs,
+    checkpoint_path=CHECKPOINT_PATH,
+)
+```
+
 ## Credits
+
+Credit where due to the AI.
 
 Code by Alex Kiefer / exileFaker and Claude Opus/Sonnet.
 
