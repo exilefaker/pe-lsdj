@@ -2,7 +2,7 @@
 
 ## Milestones
 
-- [??/??/2013] Initial idea/pass at PELSDJ
+- [2015] Initial idea/pass at PELSDJ
 - [7/3/2020] exileFaker "Parallel Experiments LSDJ" EP release
 - [2/12/2026] Initial commit of v2
 - [2/14❤️/2026] Tokenization pipeline working 

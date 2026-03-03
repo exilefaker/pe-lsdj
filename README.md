@@ -22,7 +22,7 @@ It consists of:
 - A multi-channel transformer-based baseline model with axial attention
 - Tools for training and generation
 
-# Credits
+## Credits
 
 Code by Alex Kiefer / exileFaker and Claude Opus/Sonnet.
 
