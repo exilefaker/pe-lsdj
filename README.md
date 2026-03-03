@@ -33,7 +33,7 @@ sf = SongFile("data/chiptune.lsdsng")
 
 # ...do stuff to data...
 
-sf.to_lsdsgn("output.lsdsng")
+sf.to_lsdsng("output.lsdsng")
 
 ```
 
@@ -41,11 +41,13 @@ Train the default model (too large for most CPUs -- see Colab notebook):
 
 ```python
 import glob
+import jax.random as jr
 from pe_lsdj.training import load_songs
+from pe_lsdj.models import LSDJTransformer
 
 DATA_PATH = "..."
-song_files = glob.glob(DATA_PATH + /*.lsdsng")
-songs: list[SongFile] = load_songs(song_files)
+song_fns = glob.glob(DATA_PATH + /*.lsdsng")
+songs = load_songs(song_fns)
 
 key = jr.PRNGKey(33)
 model_key, train_key = jr.split(key)
@@ -53,7 +55,6 @@ model_key, train_key = jr.split(key)
 model = LSDJTransformer(model_key)
 
 CHECKPOINT_PATH = "..."
-
 model, opt_state = train(
     model, 
     songs,
