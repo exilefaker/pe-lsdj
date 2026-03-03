@@ -46,12 +46,19 @@ class SongBanks(NamedTuple):
     grooves: Array       # (NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)
     tables: Array        # (NUM_TABLES + 1, TABLE_WIDTH)
     traces: Array        # (NUM_TABLES + 1, TABLE_WIDTH)
-    
+    synth_waves: Array    # (NUM_SYNTHS + 1, SOFTSYNTH_WIDTH + WAVES_PER_SYNTH * FRAMES_PER_WAVE)
+    instrs_occupied: Array   # (NUM_INSTRUMENTS + 1,) bool — index 0 always False (null sentinel)
+    grooves_occupied: Array  # (NUM_GROOVES + 1,) bool
+    tables_occupied: Array   # (NUM_TABLES + 1,) bool
+    synths_occupied: Array   # (NUM_SYNTHS + 1,) bool
+
     @classmethod
     def default(cls):
-        """Zero-filled banks with correct shapes (null rows included)."""
+        """Zero-filled banks (null rows included). All slots unoccupied."""
         def _z(n, w):
             return jnp.zeros((n + 1, w), dtype=jnp.uint8)
+        def _occ(n):
+            return jnp.zeros(n + 1, dtype=jnp.bool_)
         return cls(
             instruments=_z(NUM_INSTRUMENTS, INSTR_WIDTH),
             softsynths=_z(NUM_SYNTHS, SOFTSYNTH_WIDTH),
@@ -59,14 +66,29 @@ class SongBanks(NamedTuple):
             grooves=_z(NUM_GROOVES, STEPS_PER_GROOVE * 2),
             tables=_z(NUM_TABLES, TABLE_WIDTH),
             traces=_z(NUM_TABLES, TABLE_WIDTH),
+            synth_waves=_z(NUM_SYNTHS, SOFTSYNTH_WIDTH + WAVES_PER_SYNTH * FRAMES_PER_WAVE),
+            instrs_occupied=_occ(NUM_INSTRUMENTS),
+            grooves_occupied=_occ(NUM_GROOVES),
+            tables_occupied=_occ(NUM_TABLES),
+            synths_occupied=_occ(NUM_SYNTHS),
         )
 
     @classmethod
     def from_songfile(cls, songfile: SongFile):
+        """
+        Load banks from a song file.
+
+        Instruments and tables: occupancy from LSDJ's native alloc tables.
+        Grooves and synths: no LSDJ alloc table exists; derive from non-zero rows
+        (empty slots have all-zero defaults in LSDJ's save format).
+        """
         def _prepend(arr):
             return jnp.concatenate(
                 [jnp.zeros((1, arr.shape[1]), arr.dtype), arr], axis=0
             )
+        def _prepend_bool(arr_1d):
+            return jnp.concatenate([jnp.array([False]), arr_1d])
+
         return cls(
             instruments=_prepend(songfile.instruments_array),
             softsynths=_prepend(songfile.softsynths_array),
@@ -74,6 +96,21 @@ class SongBanks(NamedTuple):
             grooves=_prepend(songfile.grooves_array),
             tables=_prepend(songfile.tables_array),
             traces=_prepend(songfile.traces_array),
+            synth_waves=_prepend(
+                jnp.concatenate([
+                    songfile.softsynths_array,
+                    songfile.waveframes_array,
+                ], axis=-1)
+            ),
+            instrs_occupied=_prepend_bool(songfile.instr_alloc),
+            tables_occupied=_prepend_bool(songfile.table_alloc),
+            grooves_occupied=_prepend_bool(
+                jnp.any(songfile.grooves_array != 0, axis=-1)
+            ),
+            synths_occupied=_prepend_bool(
+                jnp.any(songfile.softsynths_array != 0, axis=-1)
+                | jnp.any(songfile.waveframes_array != 0, axis=-1)
+            ),
         )
 
 

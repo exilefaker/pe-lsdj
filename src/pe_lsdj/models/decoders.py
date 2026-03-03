@@ -148,16 +148,13 @@ assert len(SOFTSYNTH_FIELD_SPECS) == SOFTSYNTH_WIDTH
 # Scalar sub-specs: exclude sub-entity reference columns.
 # ---------------------------------------------------------------------------
 
-_INSTR_TABLE_COL     = 1
-_INSTR_SOFTSYNTH_COL = 17
-
 INSTR_SCALAR_SPECS = [
     spec for i, spec in enumerate(INSTR_FIELD_SPECS)
-    if i not in (_INSTR_TABLE_COL, _INSTR_SOFTSYNTH_COL)
+    if i not in (INSTR_TABLE_COL, INSTR_SOFTSYNTH_COL)
 ]
 INSTR_SCALAR_COL_INDICES = [
     i for i in range(len(INSTR_FIELD_SPECS))
-    if i not in (_INSTR_TABLE_COL, _INSTR_SOFTSYNTH_COL)
+    if i not in (INSTR_TABLE_COL, INSTR_SOFTSYNTH_COL)
 ]
 
 _TABLE_FX_COLS  = frozenset(
@@ -511,6 +508,43 @@ class OutputHeads(eqx.Module):
         result['instr'] = instr_preds
 
         return result
+
+    def generation_outputs(self, x):
+        """
+        Like __call__ but also returns the context vectors needed by match_*.
+
+        Returns (logits, latents) where latents contains:
+          'table_ctx'      — (table_entity_dim,) phrase-level table context
+          'instr_table_ctx'— (table_entity_dim,) instrument's table context
+
+        These are the 'table_hidden' arguments to match_table / match_groove /
+        match_trace for the two table-matching call sites in resolve_step.
+        Computing them here avoids recomputing inside the match functions.
+        """
+        logits = {}
+
+        for group_name, members in LOGIT_GROUPS.items():
+            w = self.weights[group_name] @ x
+            for i, (name, _, _) in enumerate(members):
+                logits[name] = w[i]
+
+        table_ctx = jax.nn.gelu(self.table_proj(x))
+        logits['table'] = self.table_decoder(table_ctx)
+
+        phrase_groove_ctx = jax.nn.gelu(self.phrase_groove_proj(x))
+        logits['groove'] = self.groove_decoder(phrase_groove_ctx, N_GROOVE_SLOTS)
+
+        instr_preds, instr_h = self.instr_decoder(x)
+        instr_table_ctx = jax.nn.gelu(self.instr_to_table_proj(instr_h))
+        instr_preds['table'] = self.table_decoder(instr_table_ctx)
+        logits['instr'] = instr_preds
+
+        latents = {
+            'table_ctx':         table_ctx,
+            'instr_table_ctx':   instr_table_ctx,
+            'phrase_groove_ctx': phrase_groove_ctx,
+        }
+        return logits, latents
 
     def log_probs(self, x):
         raw = self(x)

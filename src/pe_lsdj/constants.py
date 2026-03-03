@@ -274,7 +274,9 @@ EMPTY = 255
 
 NUM_CHANNELS = 4
 
-# Canonical column order for stacked FX value arrays.
+# Canonical column orders 
+ 
+# Stacked FX value arrays
 # Must match the dict key order in parse_fx_values.
 FX_VALUE_KEYS = (
     TABLE_FX, GROOVE_FX, HOP_FX, PAN_FX,
@@ -284,6 +286,9 @@ FX_VALUE_KEYS = (
     CONTINUOUS_FX,
 )
 
+# Instruments
+INSTR_TABLE_COL     = 1
+INSTR_SOFTSYNTH_COL = 17
 
 # Token dimensions (input to embedding layer)
 

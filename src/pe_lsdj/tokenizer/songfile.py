@@ -84,6 +84,8 @@ class SongFile(eqx.Module):
     softsynths: dict
     grooves: Array
     waveframes: Array
+    instr_alloc: Array   # (NUM_INSTRUMENTS,) bool — LSDJ native alloc table
+    table_alloc: Array   # (NUM_TABLES,) bool — LSDJ native alloc table
 
     def __init__(self, filename: str = None, *, raw_bytes=None, name=""):
         if raw_bytes is not None:
@@ -118,6 +120,8 @@ class SongFile(eqx.Module):
         self.instruments = parse_instruments(raw_data[INSTRUMENTS_ADDR])
         self.tables, self.traces = parse_tables(raw_data)
         self.waveframes = parse_waveframes(raw_data[WAVE_FRAMES_ADDR])
+        self.instr_alloc = raw_data[INSTR_ALLOC_TABLE_ADDR].astype(jnp.bool_)  # (NUM_INSTRUMENTS,)
+        self.table_alloc = raw_data[TABLE_ALLOC_TABLE_ADDR].astype(jnp.bool_)  # (NUM_TABLES,)
 
         # ===== Extract active song structure =====
 

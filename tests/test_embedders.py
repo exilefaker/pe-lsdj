@@ -584,6 +584,11 @@ class TestSetBanks:
             grooves=jnp.ones((NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)),
             tables=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
             traces=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
+            synth_waves=jnp.ones((NUM_SYNTHS + 1, SOFTSYNTH_WIDTH + WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
+            instrs_occupied=jnp.zeros(NUM_INSTRUMENTS + 1, dtype=jnp.bool_),
+            grooves_occupied=jnp.zeros(NUM_GROOVES + 1, dtype=jnp.bool_),
+            tables_occupied=jnp.zeros(NUM_TABLES + 1, dtype=jnp.bool_),
+            synths_occupied=jnp.zeros(NUM_SYNTHS + 1, dtype=jnp.bool_),
         )
         seq_emb2 = seq_emb.with_banks(banks)
         out_after = seq_emb2(tokens)
@@ -619,6 +624,11 @@ class TestSetBanks:
             grooves=jnp.ones((NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)),
             tables=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
             traces=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
+            synth_waves=jnp.ones((NUM_SYNTHS + 1, SOFTSYNTH_WIDTH + WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
+            instrs_occupied=jnp.zeros(NUM_INSTRUMENTS + 1, dtype=jnp.bool_),
+            grooves_occupied=jnp.zeros(NUM_GROOVES + 1, dtype=jnp.bool_),
+            tables_occupied=jnp.zeros(NUM_TABLES + 1, dtype=jnp.bool_),
+            synths_occupied=jnp.zeros(NUM_SYNTHS + 1, dtype=jnp.bool_),
         )
         seq_emb2 = seq_emb.with_banks(banks)
 

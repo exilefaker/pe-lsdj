@@ -6,6 +6,7 @@ import jax.random as jr
 from jaxtyping import Array, Bool, Key
 
 from pe_lsdj.embedding.song import SequenceEmbedder, SongBanks
+from pe_lsdj.constants import SOFTSYNTH_WIDTH
 from pe_lsdj.models.decoders import (
     # Public specs / constants
     LOGIT_GROUPS, TOKEN_HEADS, ENTITY_HEADS, WAVEFRAME_DIM,
@@ -18,9 +19,8 @@ from pe_lsdj.models.decoders import (
     SOFTSYNTH_CAT_SPECS, SOFTSYNTH_CAT_COL_INDICES, SOFTSYNTH_CONT_N,
     GROOVE_CONT_N,
     TABLE_SCALAR_CAT_TOTAL_VOCAB, INSTR_SCALAR_CAT_TOTAL_VOCAB, SOFTSYNTH_CAT_TOTAL_VOCAB,
-    N_TABLE_SLOTS, N_GROOVE_SLOTS,
+    N_TABLE_SLOTS, N_GROOVE_SLOTS, INSTR_TABLE_COL, INSTR_SOFTSYNTH_COL,
     # Private arrays needed by loss functions
-    _INSTR_TABLE_COL, _INSTR_SOFTSYNTH_COL,
     _TABLE_FX_COLS_ARRAY, _GROOVE_FX_COLS_ARRAY, _TABLE_CAT_TRACE_MASK,
     _INSTR_SCALAR_CAT_GROUPS, _TABLE_SCALAR_CAT_GROUPS, _SOFTSYNTH_CAT_GROUPS,
     _INSTR_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_COLS_ARRAY, _SOFTSYNTH_CONT_COLS_ARRAY,
@@ -76,18 +76,99 @@ def _mse_loss(cont_logits, row, cont_cols_array, max_vals_array):
     return jnp.mean((preds - targets) ** 2)
 
 
-def _table_loss(preds, table_row):
+def table_loss(prediction, target):
     """
     Scalar loss components for one table (or trace) prediction.
     Returns [cat_loss, cont_loss] — 2 components.
     Groove-slot and trace sub-entity losses are computed separately by
     cond_entity_scan_loss using lax.scan + lax.cond.
     """
+
     return [
-        _ce_loss_grouped(preds['cat'], table_row, _TABLE_SCALAR_CAT_GROUPS),
-        _mse_loss(preds['cont'], table_row,
+        _ce_loss_grouped(prediction['cat'], target, _TABLE_SCALAR_CAT_GROUPS),
+        _mse_loss(prediction['cont'], target,
                   _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES),
     ]
+
+
+def softsynth_loss(prediction, target):
+    synth_target, wf_target = (
+        target[:SOFTSYNTH_WIDTH], 
+        target[SOFTSYNTH_WIDTH:]
+    )
+    synth_losses = []
+
+    synth_losses.append(_ce_loss_grouped(
+        prediction['cat'], 
+        synth_target, 
+        _SOFTSYNTH_CAT_GROUPS
+    ))
+    synth_losses.append(_mse_loss(
+        prediction['cont'], 
+        synth_target,
+        _SOFTSYNTH_CONT_COLS_ARRAY, 
+        _SOFTSYNTH_CONT_MAX_VALUES
+    ))
+
+    # Waveframes
+    waveframes_prediction = prediction['waveframes']
+    synth_losses.append(jnp.mean(
+        (
+            jax.nn.sigmoid(waveframes_prediction) 
+            - wf_target.astype(jnp.float32) / 15.0
+        ) ** 2
+    ))
+
+    return synth_losses
+
+
+def instr_scalar_loss(prediction, target):
+    """
+    Loss for scalar components of instrument 
+    (table and softsynth losses computed separately)
+    """
+    return [
+        _ce_loss_grouped(
+            prediction['cat'], 
+            target, 
+            _INSTR_SCALAR_CAT_GROUPS,
+        ),
+        _mse_loss(
+            prediction['cont'], 
+            target,
+            _INSTR_SCALAR_CONT_COLS_ARRAY, 
+            _INSTR_SCALAR_CONT_MAX_VALUES,
+        )
+    ]
+
+
+def instr_loss(instr_prediction, instr_target, banks):
+    instr_losses = []
+    instr_losses.extend(
+        instr_scalar_loss(instr_prediction, instr_target)
+    )
+    # Instrument's table
+    table_id = instr_target[INSTR_TABLE_COL]
+    instr_table_target = banks.tables[table_id]
+    instr_losses.extend(
+        table_loss(instr_prediction['table'], instr_table_target)
+    )
+    # Instrument's softsynth
+    synth_id = instr_target[INSTR_SOFTSYNTH_COL]
+    synth_wave_target = banks.synth_waves[synth_id]
+    instr_losses.extend(
+        softsynth_loss(instr_prediction['softsynth'], synth_wave_target)
+    )
+
+    return instr_losses
+
+
+def groove_loss(prediction, target):
+
+    return jnp.mean(
+        (jax.nn.sigmoid(prediction)
+         - target.astype(jnp.float32) / _GROOVE_CONT_MAX) ** 2
+    )
 
 
 def entity_loss(entity_preds, banks: SongBanks, target_tokens):
@@ -102,41 +183,20 @@ def entity_loss(entity_preds, banks: SongBanks, target_tokens):
 
     # ─── Instrument ──────────────────────────────────────────────────────────
     instr_id  = target_tokens[ENTITY_HEADS['instr_id']]
-    instr_row = banks.instruments[instr_id]
-    p = entity_preds['instr']
-
-    losses.append(_ce_loss_grouped(p['cat'], instr_row, _INSTR_SCALAR_CAT_GROUPS))
-    losses.append(_mse_loss(p['cont'], instr_row,
-                            _INSTR_SCALAR_CONT_COLS_ARRAY, _INSTR_SCALAR_CONT_MAX_VALUES))
-
-    # Instrument's table
-    it_row = banks.tables[instr_row[_INSTR_TABLE_COL]]
-    losses.extend(_table_loss(p['table'], it_row))
-
-    # Instrument's softsynth
-    synth_id  = instr_row[_INSTR_SOFTSYNTH_COL]
-    synth_row = banks.softsynths[synth_id]
-    ps = p['softsynth']
-    losses.append(_ce_loss_grouped(ps['cat'], synth_row, _SOFTSYNTH_CAT_GROUPS))
-    losses.append(_mse_loss(ps['cont'], synth_row,
-                            _SOFTSYNTH_CONT_COLS_ARRAY, _SOFTSYNTH_CONT_MAX_VALUES))
-
-    # Waveframes
-    wf_row = banks.waveframes[synth_id]
-    losses.append(jnp.mean(
-        (jax.nn.sigmoid(ps['waveframes']) - wf_row.astype(jnp.float32) / 15.0) ** 2
-    ))
+    instr_target = banks.instruments[instr_id]
+    losses.extend(
+        instr_loss(entity_preds['instr'], instr_target, banks)
+    )
 
     # ─── Phrase-level table ──────────────────────────────────────────────────
-    pt_row = banks.tables[target_tokens[ENTITY_HEADS['table_id']]]
-    losses.extend(_table_loss(entity_preds['table'], pt_row))
+    table_id = target_tokens[ENTITY_HEADS['table_id']]
+    phrase_table = banks.tables[table_id]
+    losses.extend(table_loss(entity_preds['table'], phrase_table))
 
     # ─── Phrase-level groove ─────────────────────────────────────────────────
-    groove_row = banks.grooves[target_tokens[ENTITY_HEADS['groove_id']]]
-    losses.append(jnp.mean(
-        (jax.nn.sigmoid(entity_preds['groove'])
-         - groove_row.astype(jnp.float32) / _GROOVE_CONT_MAX) ** 2
-    ))
+    groove_id = target_tokens[ENTITY_HEADS['groove_id']]
+    phrase_groove = banks.grooves[groove_id]
+    losses.append(groove_loss(entity_preds['groove'], phrase_groove))
 
     return jnp.mean(jnp.array(losses))
 
@@ -155,11 +215,6 @@ def _groove_loss_vmap(groove_decoder, table_h, table_row, groove_rows):
     Predict losses for all N_GROOVE_SLOTS in parallel via vmap.
     Null slots (groove_id == 0) contribute 0 via jnp.where masking.
 
-    Replaces the previous lax.scan+lax.cond approach: nested scans caused XLA
-    to track per-step AD state across all three nesting levels simultaneously,
-    producing enormous intermediate buffers (~818 GB for reverse-mode AD).
-    vmap computes all slots in one parallel batch — no sequential dependency chain.
-
     groove_rows: (N_GROOVE_SLOTS, GROOVE_CONT_N) — pre-fetched bank rows.
     Returns scalar = sum of active groove losses.
     """
@@ -175,6 +230,27 @@ def _groove_loss_vmap(groove_decoder, table_h, table_row, groove_rows):
         jnp.arange(N_GROOVE_SLOTS, dtype=jnp.int32), groove_ids, groove_rows,
     )
     return jnp.sum(losses)
+
+
+def score_one_trace(heads, h, sidx, tr_row, tgr_rows):
+    """
+    Score one bank trace row against the model's prediction for slot sidx.
+
+    h:        table-level context vector (entity_dim,)
+    sidx:     slot index scalar
+    tr_row:   bank trace row (TABLE_WIDTH,)
+    tgr_rows: groove rows for this trace (N_GROOVE_SLOTS, GROOVE_CONT_N)
+    Returns:  scalar score
+    """
+    trace_ctx  = h + heads.table_decoder.slot_embeds[sidx]
+    trace_h    = jax.nn.gelu(heads.table_decoder.linear_in(trace_ctx))
+    cat_logits = jnp.where(_TABLE_CAT_TRACE_MASK, -jnp.inf,
+                           heads.table_decoder.cat_out(trace_h))
+    cat_s    = _ce_loss_grouped(cat_logits, tr_row, _TABLE_SCALAR_CAT_GROUPS)
+    cont_s   = _mse_loss(heads.table_decoder.cont_out(trace_h), tr_row,
+                         _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES)
+    groove_s = _groove_loss_vmap(heads.groove_decoder, trace_h, tr_row, tgr_rows)
+    return cat_s + cont_s + groove_s
 
 
 def conditional_entity_loss(heads, hiddens, target_tokens, banks):
@@ -207,7 +283,7 @@ def conditional_entity_loss(heads, hiddens, target_tokens, banks):
     # ── Pre-fetch ALL bank data ────────────────────────────────────────────
     instr_ids     = targets_flat[:, ENTITY_HEADS['instr_id']]
     instr_rows    = banks.instruments[instr_ids]                                # (T, INSTR_WIDTH)
-    it_table_ids  = instr_rows[:, _INSTR_TABLE_COL].astype(jnp.int32)
+    it_table_ids  = instr_rows[:, INSTR_TABLE_COL].astype(jnp.int32)
     it_table_rows = banks.tables[it_table_ids]                                  # (T, table_bank_w)
 
     pt_ids        = targets_flat[:, ENTITY_HEADS['table_id']]
@@ -279,6 +355,7 @@ def conditional_entity_loss(heads, hiddens, target_tokens, banks):
 
 
 def entity_alignment_loss(model, hiddens, target_tokens, banks):
+    # NOTE: Unused currently to simplify arch. and avoid OOM issues.
     """
     Contrastive alignment losses for entity embedding/decoder pairs.
 
@@ -315,8 +392,8 @@ def entity_alignment_loss(model, hiddens, target_tokens, banks):
     instr_ids        = t_flat[:, ENTITY_HEADS['instr_id']]   # (T,)
     pt_ids           = t_flat[:, ENTITY_HEADS['table_id']]   # (T,)
     instr_rows       = banks.instruments[instr_ids]           # (T, INSTR_WIDTH)
-    it_table_ids     = instr_rows[:, _INSTR_TABLE_COL].astype(jnp.int32)      # (T,)
-    it_softsynth_ids = instr_rows[:, _INSTR_SOFTSYNTH_COL].astype(jnp.int32)  # (T,)
+    it_table_ids     = instr_rows[:, INSTR_TABLE_COL].astype(jnp.int32)      # (T,)
+    it_softsynth_ids = instr_rows[:, INSTR_SOFTSYNTH_COL].astype(jnp.int32)  # (T,)
 
     heads    = model.output_heads
     step_emb = model.embedder.step_embedder
