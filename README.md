@@ -42,7 +42,7 @@ Train the default model (too large for most CPUs -- see Colab notebook):
 ```python
 import glob
 import jax.random as jr
-from pe_lsdj.training import load_songs
+from pe_lsdj.training import load_songs, train
 from pe_lsdj.models import LSDJTransformer
 
 DATA_PATH = "..."
