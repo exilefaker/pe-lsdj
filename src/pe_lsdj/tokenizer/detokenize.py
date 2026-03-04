@@ -399,6 +399,10 @@ def repack_song(
     """
     tokens = np.array(song_tokens, dtype=np.uint8)
     S = tokens.shape[0]
+    pad = (STEPS_PER_PHRASE - S % STEPS_PER_PHRASE) % STEPS_PER_PHRASE
+    if pad:
+        tokens = np.pad(tokens, ((0, pad), (0, 0), (0, 0)))
+        S = tokens.shape[0]
     num_phrase_blocks = S // STEPS_PER_PHRASE
 
     # 1. Split song_tokens columns

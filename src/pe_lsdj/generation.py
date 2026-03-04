@@ -97,7 +97,7 @@ def _score_table_traces(banks, heads, table_h):
 
 
 def _build_table(logits, key) -> Array:
-    table = jnp.zeros(TABLE_WIDTH)
+    table = jnp.zeros(TABLE_WIDTH, dtype=jnp.uint8)
     categorical, continuous = logits['cat'], logits['cont']
     keys = jr.split(key, len(_TABLE_SCALAR_CAT_GROUPS))
 
@@ -108,7 +108,7 @@ def _build_table(logits, key) -> Array:
             keys[i],
             field_logits,
             axis=-1
-        )
+        ).astype(jnp.uint8)
         table = table.at[cols].set(cat_values)
 
     cont_values = jnp.round(jax.nn.sigmoid(
@@ -133,7 +133,7 @@ def _build_softsynth(logits, key) -> Array:
     for i, (vocab_size, starts, cols) in enumerate(_SOFTSYNTH_CAT_GROUPS):
         gather_idxs = starts[:, None] + jnp.arange(vocab_size)[None, :]
         field_logits = logits['cat'][gather_idxs]
-        cat_values = jr.categorical(keys[i], field_logits, axis=-1)
+        cat_values = jr.categorical(keys[i], field_logits, axis=-1).astype(jnp.uint8)
         synth_row = synth_row.at[cols].set(cat_values)
 
     cont_values = jnp.round(
@@ -578,14 +578,14 @@ def _build_instrument(logits, key, instr_type=None) -> Array:
                 when the type has already been sampled externally (e.g. in
                 match_instrument) to avoid a redundant independent draw.
     """
-    instr = jnp.zeros(INSTR_WIDTH)
+    instr = jnp.zeros(INSTR_WIDTH, dtype=jnp.uint8)
     categorical, continuous = logits['cat'], logits['cont']
     keys = jr.split(key, len(_INSTR_SCALAR_CAT_GROUPS))
 
     for i, (vocab_size, starts, cols) in enumerate(_INSTR_SCALAR_CAT_GROUPS):
         gather_idxs = starts[:, None] + jnp.arange(vocab_size)[None, :]
         field_logits = categorical[gather_idxs]
-        cat_values = jr.categorical(keys[i], field_logits, axis=-1)
+        cat_values = jr.categorical(keys[i], field_logits, axis=-1).astype(jnp.uint8)
         instr = instr.at[cols].set(cat_values)
 
     cont_values = jnp.round(jax.nn.sigmoid(
@@ -594,7 +594,7 @@ def _build_instrument(logits, key, instr_type=None) -> Array:
     instr = instr.at[_INSTR_SCALAR_CONT_COLS_ARRAY].set(cont_values)
 
     if instr_type is not None:
-        instr = instr.at[0].set(instr_type.astype(instr.dtype))
+        instr = instr.at[0].set(instr_type.astype(jnp.uint8))
 
     return instr
 
