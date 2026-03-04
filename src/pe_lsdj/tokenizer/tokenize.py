@@ -330,6 +330,20 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     return instruments
 
 
+# Column order for flat instrument arrays (matches dict insertion order above).
+# Used to reconstruct the dict from (N, INSTR_WIDTH) bank arrays in SongFile.from_banks.
+INSTRUMENT_FIELDS = (
+    TYPE_ID, TABLE, TABLE_ON_OFF, TABLE_AUTOMATE, AUTOMATE_2, PAN,
+    VIBRATO_TYPE, VIBRATO_DIRECTION, ENV_VOLUME, ENV_FADE,
+    LENGTH, LENGTH_LIMITED, SWEEP, VOLUME, PHASE_TRANSPOSE,
+    WAVE, PHASE_FINETUNE, SOFTSYNTH_ID, REPEAT, PLAY_TYPE,
+    WAVE_LENGTH, SPEED, KEEP_ATTACK_1, KEEP_ATTACK_2,
+    KIT_1_ID, KIT_2_ID, LENGTH_KIT_1, LENGTH_KIT_2,
+    LOOP_KIT_1, LOOP_KIT_2, OFFSET_KIT_1, OFFSET_KIT_2,
+    HALF_SPEED, PITCH, DISTORTION_TYPE,
+)
+
+
 # NOTE: Unclear we need these. Alloc tables can (and probably should)
 # be derived algorithmically from generated data.
 def parse_alloc_table(data: list[int]):
@@ -511,6 +525,17 @@ def parse_softsynths(data: Array) -> dict[str, Array]:
         SOFTSYNTH_END_PHASE_AMOUNT: end_phase_amounts,
         SOFTSYNTH_END_VERTICAL_SHIFT: end_vertical_shifts,
     }
+
+
+# Column order for flat softsynth arrays (matches dict insertion order above).
+SOFTSYNTH_FIELDS = (
+    SOFTSYNTH_WAVEFORM, SOFTSYNTH_FILTER_TYPE, SOFTSYNTH_FILTER_RESONANCE,
+    SOFTSYNTH_DISTORTION, SOFTSYNTH_PHASE_TYPE,
+    SOFTSYNTH_START_VOLUME, SOFTSYNTH_START_FILTER_CUTOFF,
+    SOFTSYNTH_START_PHASE_AMOUNT, SOFTSYNTH_START_VERTICAL_SHIFT,
+    SOFTSYNTH_END_VOLUME, SOFTSYNTH_END_FILTER_CUTOFF,
+    SOFTSYNTH_END_PHASE_AMOUNT, SOFTSYNTH_END_VERTICAL_SHIFT,
+)
 
 
 def parse_waveframes(data: Array) -> Array:

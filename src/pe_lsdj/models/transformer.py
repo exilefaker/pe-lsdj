@@ -505,7 +505,8 @@ class LSDJTransformer(eqx.Module):
             "instr_entity_dim": instr_entity_dim,
             "table_entity_dim": table_entity_dim,
             "softsynth_entity_dim": softsynth_entity_dim,
-            "num_heads_t": num_heads_t, "num_heads_c": num_heads_c,
+            "num_heads_t": num_heads_t, 
+            "num_heads_c": num_heads_c,
             "num_blocks": num_blocks,
             "embedder": {k: v for k, v in embedder_kwargs.items() if isinstance(v, int)},
         }

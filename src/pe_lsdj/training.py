@@ -20,7 +20,7 @@ def load_songs(song_paths: list[str]) -> list[SongFile]:
     return [SongFile(p) for p in song_paths]
 
 
-def load_weights(reference_model, filepath):
+def load_weights(filepath, reference_model):
     """
     Load checkpointed model weights, given an isomorphic model 'skeleton'
     i.e., first initialize a model with the same hyperparams

@@ -13,6 +13,8 @@ from pe_lsdj.tokenizer.tokenize import (
     parse_softsynths,
     parse_tables,
     parse_waveframes,
+    INSTRUMENT_FIELDS,
+    SOFTSYNTH_FIELDS,
 )
 from pe_lsdj.tokenizer.detokenize import repack_song
 from pylsdj import load_lsdsng, filepack, bread_spec as spec
@@ -71,6 +73,45 @@ def _parse_name(name_bytes):
     return name_bytes.rstrip(b'\x00').decode('utf-8')
 
 
+_SETTINGS_SIZE = SETTINGS_ADDR.stop - SETTINGS_ADDR.start  # 75 bytes
+
+
+def _arr_to_instr_dict(arr):
+    """Convert (NUM_INSTRUMENTS, INSTR_WIDTH) flat array → instruments dict."""
+    return {k: arr[:, j] for j, k in enumerate(INSTRUMENT_FIELDS)}
+
+
+def _arr_to_synths_dict(arr):
+    """Convert (NUM_SYNTHS, SOFTSYNTH_WIDTH) flat array → softsynths dict."""
+    return {k: arr[:, j] for j, k in enumerate(SOFTSYNTH_FIELDS)}
+
+
+def _arr_to_tables_dict(arr):
+    """Convert (NUM_TABLES, TABLE_WIDTH) flat array → tables dict.
+
+    Column layout (mirrors tables_array property):
+        [0 : SPT]                    TABLE_ENV_VOLUME
+        [SPT : 2*SPT]                TABLE_ENV_DURATION
+        [2*SPT : 3*SPT]              TABLE_TRANSPOSE
+        [3*SPT : 4*SPT]              TABLE_FX_1
+        [4*SPT : 4*SPT + SPT*FD]     TABLE_FX_VALUE_1  (reshaped to (N, SPT, FD))
+        [4*SPT + SPT*FD : 5*SPT+SPT*FD]  TABLE_FX_2
+        [5*SPT+SPT*FD : 5*SPT+2*SPT*FD]  TABLE_FX_VALUE_2
+    """
+    N   = arr.shape[0]
+    SPT = STEPS_PER_TABLE
+    FD  = FX_VALUES_FEATURE_DIM
+    return {
+        TABLE_ENV_VOLUME:  arr[:, 0:SPT].reshape(N, SPT),
+        TABLE_ENV_DURATION: arr[:, SPT:2*SPT].reshape(N, SPT),
+        TABLE_TRANSPOSE:   arr[:, 2*SPT:3*SPT].reshape(N, SPT),
+        TABLE_FX_1:        arr[:, 3*SPT:4*SPT].reshape(N, SPT),
+        TABLE_FX_VALUE_1:  arr[:, 4*SPT:4*SPT+SPT*FD].reshape(N, SPT, FD),
+        TABLE_FX_2:        arr[:, 4*SPT+SPT*FD:5*SPT+SPT*FD].reshape(N, SPT),
+        TABLE_FX_VALUE_2:  arr[:, 5*SPT+SPT*FD:5*SPT+2*SPT*FD].reshape(N, SPT, FD),
+    }
+
+
 class SongFile(eqx.Module):
     name: str
     tempo: Int[Array, "1"]
@@ -98,7 +139,7 @@ class SongFile(eqx.Module):
             )
         else:
             raise ValueError("Must provide either filename or raw_bytes")
-
+    
     def _load_from_raw(self, raw_bytes, name: str):
         """
         Parse the (decompressed) raw bytes of a LSDJ v3.9.2 track.
@@ -235,6 +276,45 @@ class SongFile(eqx.Module):
             raw_bytes[SETTINGS_ADDR]
         )
     
+    @classmethod
+    def from_tokens(
+        cls,
+        song_tokens: Array,
+        banks, # SongBanks (avoids circular import)
+        tempo: int = 120,
+        settings: "Settings | None" = None,
+        name: str = "",
+    ) -> "SongFile":
+        """
+        Construct a SongFile from generated song_tokens and a SongBanks,
+        ready to be saved with .repack() / .to_lsdsng().
+
+        Entity arrays are converted from the flat SongBanks format back to
+        the dict format expected by repack_song.  The null sentinel row
+        (index 0) is dropped from each bank before conversion.
+        """
+        self = object.__new__(cls)
+        object.__setattr__(self, 'name', name)
+        object.__setattr__(self, 'tempo', jnp.array(tempo, dtype=jnp.uint8))
+        object.__setattr__(self, 'song_tokens', song_tokens)
+        settings_bytes = (
+            settings.settings_bytes if settings is not None
+            else jnp.zeros(_SETTINGS_SIZE, dtype=jnp.uint8)
+        )
+        object.__setattr__(self, 'settings', Settings(settings_bytes))
+        object.__setattr__(self, 'instruments', _arr_to_instr_dict(banks.instruments[1:]))
+        object.__setattr__(self, 'tables',      _arr_to_tables_dict(banks.tables[1:]))
+        object.__setattr__(self, 'traces',      _arr_to_tables_dict(banks.traces[1:]))
+        object.__setattr__(self, 'softsynths',  _arr_to_synths_dict(banks.softsynths[1:]))
+        object.__setattr__(self, 'grooves',
+            banks.grooves[1:].reshape(NUM_GROOVES, STEPS_PER_GROOVE, 2))
+        object.__setattr__(self, 'waveframes',
+            banks.waveframes[1:].reshape(NUM_SYNTHS, WAVES_PER_SYNTH, FRAMES_PER_WAVE))
+        object.__setattr__(self, 'instr_alloc', banks.instrs_occupied[1:])
+        object.__setattr__(self, 'table_alloc', banks.tables_occupied[1:])
+        
+        return self
+
     def repack(self, max_phrases_per_chain: int = PHRASES_PER_CHAIN):
         return repack_song(
             self.song_tokens,
@@ -247,36 +327,6 @@ class SongFile(eqx.Module):
             self.settings.settings_bytes,
             max_phrases_per_chain,
         )
-
-    @property
-    def instruments_array(self):
-        return jnp.column_stack(self.instruments.values())
-    
-    @property 
-    def grooves_array(self):
-        return self.grooves.reshape((NUM_GROOVES, -1))
-    
-    @property
-    def waveframes_array(self):
-        return self.waveframes.reshape((NUM_SYNTHS, -1))
-
-    @property
-    def tables_array(self):
-        return jnp.column_stack([
-            v.reshape(NUM_TABLES, -1)
-            for v in self.tables.values()]
-        )
-
-    @property
-    def traces_array(self):
-        return jnp.column_stack([
-            v.reshape(NUM_TABLES, -1)
-            for v in self.traces.values()]
-        )
-
-    @property
-    def softsynths_array(self):
-        return jnp.column_stack(self.softsynths.values())
 
     def to_lsdsng(self, output_filename=None, name="", version=25):
         """
@@ -323,3 +373,81 @@ class SongFile(eqx.Module):
                 fp.write(bytearray(factory.blocks[key].data))
                 
         print(f"Save to {output_filename} complete.")
+
+    @property
+    def instruments_array(self):
+        return jnp.column_stack(self.instruments.values())
+    
+    @property 
+    def grooves_array(self):
+        return self.grooves.reshape((NUM_GROOVES, -1))
+    
+    @property
+    def waveframes_array(self):
+        return self.waveframes.reshape((NUM_SYNTHS, -1))
+
+    @property
+    def tables_array(self):
+        return jnp.column_stack([
+            v.reshape(NUM_TABLES, -1)
+            for v in self.tables.values()]
+        )
+
+    @property
+    def traces_array(self):
+        return jnp.column_stack([
+            v.reshape(NUM_TABLES, -1)
+            for v in self.traces.values()]
+        )
+
+    @property
+    def softsynths_array(self):
+        return jnp.column_stack(self.softsynths.values())
+
+    def to_npz(self, filepath):
+        jnp.savez(
+            filepath,
+            name=jnp.array([ord(c) for c in self.name], dtype=jnp.uint8),
+            song_tokens=self.song_tokens,
+            instruments=self.instruments_array,
+            tables=self.tables_array,
+            traces=self.traces_array,
+            grooves=self.grooves_array,
+            softsynths=self.softsynths_array,
+            waveframes=self.waveframes_array,
+            tempo=jnp.array([self.tempo], dtype=jnp.uint8),
+            settings=self.settings.settings_bytes,
+            instr_alloc=self.instr_alloc,
+            table_alloc=self.table_alloc,
+        )
+
+    @classmethod
+    def from_npz(cls, filepath) -> "SongFile":
+        """Load a SongFile previously saved with to_npz()."""
+        data = jnp.load(filepath)
+        self = object.__new__(cls)
+        object.__setattr__(self, 'name',
+            ''.join(chr(c) for c in data['name']))
+        object.__setattr__(self, 'tempo',
+            jnp.array(data['tempo'][0], dtype=jnp.uint8))
+        object.__setattr__(self, 'song_tokens',
+            jnp.array(data['song_tokens']))
+        object.__setattr__(self, 'settings',
+            Settings(jnp.array(data['settings'])))
+        object.__setattr__(self, 'instruments',
+            _arr_to_instr_dict(jnp.array(data['instruments'])))
+        object.__setattr__(self, 'tables',
+            _arr_to_tables_dict(jnp.array(data['tables'])))
+        object.__setattr__(self, 'traces',
+            _arr_to_tables_dict(jnp.array(data['traces'])))
+        object.__setattr__(self, 'softsynths',
+            _arr_to_synths_dict(jnp.array(data['softsynths'])))
+        object.__setattr__(self, 'grooves',
+            jnp.array(data['grooves']).reshape(NUM_GROOVES, STEPS_PER_GROOVE, 2))
+        object.__setattr__(self, 'waveframes',
+            jnp.array(data['waveframes']).reshape(NUM_SYNTHS, WAVES_PER_SYNTH, FRAMES_PER_WAVE))
+        object.__setattr__(self, 'instr_alloc',
+            jnp.array(data['instr_alloc'], dtype=jnp.bool_))
+        object.__setattr__(self, 'table_alloc',
+            jnp.array(data['table_alloc'], dtype=jnp.bool_))
+        return self
