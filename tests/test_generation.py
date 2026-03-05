@@ -46,14 +46,14 @@ def step_logits(model):
 def test_generate_jit_smoke(model):
     """generate must be traceable by eqx.filter_jit without errors."""
     S_in, num_steps = 8, 4
-    input_tokens = jnp.zeros((S_in, 4, 21), dtype=jnp.uint8)
+    input_tokens = jnp.zeros((S_in, 4, 21), dtype=jnp.uint16)
     out, _ = eqx.filter_jit(generate)(model, input_tokens, KEY, num_steps=num_steps)
     assert out.shape == (S_in + num_steps, 4, 21)
 
 
 def test_generated_seq_length_shape_matches_num_steps(model):
     S_in, num_steps = 8, 4
-    input_tokens = jnp.zeros((S_in, 4, 21), dtype=jnp.uint8)
+    input_tokens = jnp.zeros((S_in, 4, 21), dtype=jnp.uint16)
     output, _ = generate(model, input_tokens, KEY, num_steps=num_steps)
     assert output.shape == (S_in + num_steps, 4, 21)
 
@@ -61,7 +61,7 @@ def test_generated_seq_length_shape_matches_num_steps(model):
 def test_occupied_slot_mask_updates(model):
     """After generating a few steps from empty banks, some slots should be occupied."""
     S_in = 4
-    input_tokens = jnp.zeros((S_in, 4, 21), dtype=jnp.uint8)
+    input_tokens = jnp.zeros((S_in, 4, 21), dtype=jnp.uint16)
     banks_init = SongBanks.default()
     _, banks_out = generate(model, input_tokens, KEY, banks=banks_init, num_steps=2)
     # 4 channels × 2 steps each resolve an instrument
@@ -242,7 +242,7 @@ def test_masked_instr_not_used(model, step_logits):
     # Slot 2: zeros, IS occupied.
     banks = SongBanks.default()._replace(
         instruments=SongBanks.default().instruments.at[1].set(
-            jnp.ones(INSTR_WIDTH, dtype=jnp.uint8)
+            jnp.ones(INSTR_WIDTH, dtype=jnp.uint16)
         ),
         instrs_occupied=SongBanks.default().instrs_occupied.at[2].set(True),
     )

@@ -178,9 +178,11 @@ class SongFile(eqx.Module):
              (NUM_CHAINS, PHRASES_PER_CHAIN)
         ).astype(jnp.uint8)
 
-        phrase_instrument_ids = raw_data[PHRASE_INSTR_ADDR].reshape(
+        _phr_instr_raw = raw_data[PHRASE_INSTR_ADDR].reshape(
             (NUM_PHRASES, STEPS_PER_PHRASE)
-        ).astype(jnp.uint8) + 1 # Instruments may be NULL / 255
+        ).astype(jnp.uint16)
+        # EMPTY (0xFF) means "no instrument"; map explicitly to NULL token 0.
+        phrase_instrument_ids = jnp.where(_phr_instr_raw == EMPTY, 0, _phr_instr_raw + 1)
 
         # Chain level: per channel, find the played chain block
         active_song_chains = []
@@ -209,7 +211,7 @@ class SongFile(eqx.Module):
                 active_song_transposes.append(jnp.concatenate(tr_vals))
             else:
                 active_song_phrases.append(jnp.array([], dtype=jnp.uint8))
-                active_song_transposes.append(jnp.array([], dtype=jnp.uint8))
+                active_song_transposes.append(jnp.array([], dtype=jnp.uint16))
 
         # Pack ragged lists into (max_phrases, NUM_CHANNELS)
         # Pad shorter channels with EMPTY=255 (sentinel = empty phrase).
@@ -218,7 +220,7 @@ class SongFile(eqx.Module):
             (max_phrases, NUM_CHANNELS), EMPTY, dtype=jnp.uint8
         )
         song_transposes_raw = jnp.zeros(
-            (max_phrases, NUM_CHANNELS), dtype=jnp.uint8
+            (max_phrases, NUM_CHANNELS), dtype=jnp.uint16
         )
         for ch in range(NUM_CHANNELS):
             n = len(active_song_phrases[ch])

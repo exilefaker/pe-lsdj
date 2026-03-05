@@ -8,6 +8,10 @@ from pe_lsdj.constants import *
 def _nibble_merge(high: Array, low: Array) -> Array:
     return ((high & 0x0F) << 4) | (low & 0x0F)
 
+def _safe_dec(t: Array) -> Array:
+    """Invert the +1 null offset. Token 0 (NULL) → 0; token n → n-1."""
+    return jnp.where(t > 0, t - 1, 0)
+
 # TODO: Do we want to preserve the `tokens_dict` thing?
 def repack_notes(tokens_dict: dict[str, Array]) -> Array:
     return tokens_dict[PHRASE_NOTES].ravel().tolist()
@@ -15,21 +19,21 @@ def repack_notes(tokens_dict: dict[str, Array]) -> Array:
 def repack_grooves(groove_tokens: Array) -> list[int]:
     """Reverse of parse_grooves. Input shape: (NUM_GROOVES, STEPS_PER_GROOVE, 2)"""
     flat = groove_tokens.reshape(-1, 2)
-    return _nibble_merge(flat[:, 0] - 1, flat[:, 1] - 1).astype(jnp.uint8).ravel().tolist()
+    return _nibble_merge(_safe_dec(flat[:, 0]), _safe_dec(flat[:, 1])).astype(jnp.uint8).ravel().tolist()
 
 def repack_instruments(tokens_dict: dict[str, Array]) -> Array:
-    repacked_bytes = jnp.zeros((NUM_INSTRUMENTS, 16), dtype=jnp.uint8)
+    repacked_bytes = jnp.zeros((NUM_INSTRUMENTS, 16), dtype=jnp.uint16)
 
     # Byte 0
-    type_IDs = tokens_dict[TYPE_ID].astype(jnp.uint8)
-    repacked_bytes = repacked_bytes.at[:,0].set(type_IDs - 1)
+    type_IDs = tokens_dict[TYPE_ID]
+    repacked_bytes = repacked_bytes.at[:,0].set(_safe_dec(type_IDs))
 
     # Byte 1
     env_byte = (
-        ((tokens_dict[ENV_VOLUME] - 1) & 0x0F) << 4 | 
-        ((tokens_dict[ENV_FADE]  - 1) & 0x0F)
+        (_safe_dec(tokens_dict[ENV_VOLUME]) & 0x0F) << 4 |
+        (_safe_dec(tokens_dict[ENV_FADE])   & 0x0F)
     )
-    vol_byte = ((tokens_dict[VOLUME] - 1) & 0x03) << 5
+    vol_byte = (_safe_dec(tokens_dict[VOLUME]) & 0x03) << 5
 
     byte1 = jnp.where(
         (type_IDs == PU) | (type_IDs == NOI), # PU/NOI
@@ -40,31 +44,31 @@ def repack_instruments(tokens_dict: dict[str, Array]) -> Array:
 
     # Byte 2
     wave_byte2 = (
-        ((tokens_dict[SOFTSYNTH_ID] - 1) & 0x0F) << 4 |
-        ((tokens_dict[REPEAT]    - 1) & 0x0F)
+        (_safe_dec(tokens_dict[SOFTSYNTH_ID]) & 0x0F) << 4 |
+        (_safe_dec(tokens_dict[REPEAT])       & 0x0F)
     )
 
-    kit_attack1_bit = ((tokens_dict[KEEP_ATTACK_1] - 1) & 0x01) << 7
-    kit_halfspeed_bit = ((tokens_dict[HALF_SPEED]  - 1) & 0x01) << 6
-    kit_1_ID_bits = ((tokens_dict[KIT_1_ID] - 1) & 0x3F)
+    kit_attack1_bit = (_safe_dec(tokens_dict[KEEP_ATTACK_1]) & 0x01) << 7
+    kit_halfspeed_bit = (_safe_dec(tokens_dict[HALF_SPEED])  & 0x01) << 6
+    kit_1_ID_bits = (_safe_dec(tokens_dict[KIT_1_ID]) & 0x3F)
 
     kit_byte2 = kit_attack1_bit | kit_halfspeed_bit | kit_1_ID_bits
 
-    pulse_byte2 = tokens_dict[PHASE_TRANSPOSE] - 1
+    pulse_byte2 = _safe_dec(tokens_dict[PHASE_TRANSPOSE])
 
     repacked_bytes = repacked_bytes.at[:, 2].set(
         jnp.select(
-            [type_IDs == PU, type_IDs == WAV, type_IDs == KIT], 
-            [pulse_byte2, wave_byte2, kit_byte2], 
+            [type_IDs == PU, type_IDs == WAV, type_IDs == KIT],
+            [pulse_byte2, wave_byte2, kit_byte2],
             default=0
         )
-    ).astype(jnp.uint8)
+    )
 
     # Byte 3
-    length_bits = ((tokens_dict[LENGTH] - 1) & 0x3F)
-    length_limited_bits = ((tokens_dict[LENGTH_LIMITED] - 1) & 0x01) << 6
+    length_bits = (_safe_dec(tokens_dict[LENGTH]) & 0x3F)
+    length_limited_bits = (_safe_dec(tokens_dict[LENGTH_LIMITED]) & 0x01) << 6
 
-    length_kit_1_byte = tokens_dict[LENGTH_KIT_1] - 1
+    length_kit_1_byte = _safe_dec(tokens_dict[LENGTH_KIT_1])
 
     pu_noi_byte2 = length_bits | length_limited_bits
     
@@ -72,24 +76,21 @@ def repack_instruments(tokens_dict: dict[str, Array]) -> Array:
         jnp.select(
             [(type_IDs == PU) | (type_IDs == NOI), type_IDs == KIT],
             [pu_noi_byte2, length_kit_1_byte],
-            default = 0
+            default=0
         )
-    ).astype(jnp.uint8)
+    )
 
-    # Byte 4
-    sweep_byte = tokens_dict[SWEEP] - 1
-
-    repacked_bytes = repacked_bytes.at[:,4].set(
-        sweep_byte * ((type_IDs == PU) | (type_IDs == NOI))
-    ).astype(jnp.uint8)
+    # Byte 4 (PU/NOI only: sweep; written for all types)
+    sweep_byte = _safe_dec(tokens_dict[SWEEP]).astype(jnp.uint8)
+    repacked_bytes = repacked_bytes.at[:,4].set(sweep_byte)
 
     # Byte 5
     table_automate_bit = (tokens_dict[TABLE_AUTOMATE] & 0x01) << 4
     automate_2_bit = (tokens_dict[AUTOMATE_2] & 0x01) << 3
-    vibrato_type_bits = ((tokens_dict[VIBRATO_TYPE] - 1) & 0x03) << 1
-    vibrato_direction_bits = (tokens_dict[VIBRATO_DIRECTION] - 1) & 0x01
-    loop_kit_bit1 = ((tokens_dict[LOOP_KIT_1] - 1) & 0x01) << 6
-    loop_kit_bit2 = ((tokens_dict[LOOP_KIT_2] - 1) & 0x01) << 5
+    vibrato_type_bits = (_safe_dec(tokens_dict[VIBRATO_TYPE]) & 0x03) << 1
+    vibrato_direction_bits = _safe_dec(tokens_dict[VIBRATO_DIRECTION]) & 0x01
+    loop_kit_bit1 = (_safe_dec(tokens_dict[LOOP_KIT_1]) & 0x01) << 6
+    loop_kit_bit2 = (_safe_dec(tokens_dict[LOOP_KIT_2]) & 0x01) << 5
 
     pu_wav_kit_bits = vibrato_type_bits | vibrato_direction_bits
     kit_bits = loop_kit_bit1 | loop_kit_bit2
@@ -106,32 +107,29 @@ def repack_instruments(tokens_dict: dict[str, Array]) -> Array:
     repacked_bytes = repacked_bytes.at[:,5].set(byte5)
 
     # Byte 6
-    table_bits = (tokens_dict[TABLE] - 1) & 0x1F
+    table_bits = _safe_dec(tokens_dict[TABLE]) & 0x1F
     table_on_off_bits = (tokens_dict[TABLE_ON_OFF] << 5)
     table_byte = (table_bits | table_on_off_bits) & 0xFF
 
     repacked_bytes = repacked_bytes.at[:,6].set(table_byte)
 
     # Byte 7
-    wave_bits = ((tokens_dict[WAVE] - 1) << 6)
-    phase_finetune_bits = ((tokens_dict[PHASE_FINETUNE] - 1) & 0x0F) << 2
-    pan_bits = (tokens_dict[PAN] - 1) & 0x0F
+    wave_bits = (_safe_dec(tokens_dict[WAVE]) << 6)
+    phase_finetune_bits = (_safe_dec(tokens_dict[PHASE_FINETUNE]) & 0x0F) << 2
+    pan_bits = _safe_dec(tokens_dict[PAN]) & 0x0F
     pu_bits = wave_bits | phase_finetune_bits
     byte7 = pan_bits | pu_bits * (type_IDs == PU) 
     
     repacked_bytes = repacked_bytes.at[:,7].set(byte7)
 
-    # Byte 8
-    pitch_byte = tokens_dict[PITCH] - 1
-
-    repacked_bytes = repacked_bytes.at[:,8].set(
-        pitch_byte * (type_IDs == KIT)
-    ).astype(jnp.uint8)
+    # Byte 8 (KIT only: pitch; written for all types)
+    pitch_byte = _safe_dec(tokens_dict[PITCH]).astype(jnp.uint8)
+    repacked_bytes = repacked_bytes.at[:,8].set(pitch_byte)
 
     # Byte 9
-    play_type_bits = (tokens_dict[PLAY_TYPE] - 1) & 0x03
-    keep_attack_2_bit = ((tokens_dict[KEEP_ATTACK_2] - 1) & 0x01) << 7
-    kit_2_id_bit = (tokens_dict[KIT_2_ID] - 1) & 0x3F
+    play_type_bits = _safe_dec(tokens_dict[PLAY_TYPE]) & 0x03
+    keep_attack_2_bit = (_safe_dec(tokens_dict[KEEP_ATTACK_2]) & 0x01) << 7
+    kit_2_id_bit = _safe_dec(tokens_dict[KIT_2_ID]) & 0x3F
 
     byte9 = (
         play_type_bits * (type_IDs == WAV)
@@ -142,111 +140,96 @@ def repack_instruments(tokens_dict: dict[str, Array]) -> Array:
     repacked_bytes = repacked_bytes.at[:,9].set(byte9)
 
     # Byte 10 (KIT only: distortion type)
-    distortion_type_bits = (tokens_dict[DISTORTION_TYPE] - 1) + 0xD0
+    distortion_type_bits = _safe_dec(tokens_dict[DISTORTION_TYPE]) + 0xD0
     byte10 = (
         distortion_type_bits * (type_IDs == KIT)
     ).astype(jnp.uint8)
     repacked_bytes = repacked_bytes.at[:,10].set(byte10)
 
-    # Byte 14 (WAV only: steps / speed)
-    wave_length_bits = ((tokens_dict[WAVE_LENGTH] - 1) & 0x0F) << 4
-    speed_bits = (tokens_dict[SPEED] - 1) & 0x0F
-    byte14 = (
-        (wave_length_bits | speed_bits) * (type_IDs == WAV)
-    ).astype(jnp.uint8)
+    # Byte 14 (WAV only: steps / speed; written for all types)
+    wave_length_bits = (_safe_dec(tokens_dict[WAVE_LENGTH]) & 0x0F) << 4
+    speed_bits = _safe_dec(tokens_dict[SPEED]) & 0x0F
+    byte14 = (wave_length_bits | speed_bits).astype(jnp.uint8)
     repacked_bytes = repacked_bytes.at[:,14].set(byte14)
 
-    # Byte 11
-    byte11 = (
-        (tokens_dict[LENGTH_KIT_2] - 1) 
-        * (type_IDs == KIT)
-    ).astype(jnp.uint8)
-
-    repacked_bytes = repacked_bytes.at[:,11].set(byte11)
-
-    # Byte 12
-    byte12 = (
-        (tokens_dict[OFFSET_KIT_1] - 1) 
-        * (type_IDs == KIT)
-    ).astype(jnp.uint8)
-
-    repacked_bytes = repacked_bytes.at[:,12].set(byte12)
-
-    # Byte 13
-    byte13 = (
-        (tokens_dict[OFFSET_KIT_2] - 1) 
-        * (type_IDs == KIT)
-    ).astype(jnp.uint8)
-
-    repacked_bytes = repacked_bytes.at[:,13].set(byte13)
+    # Bytes 11-13 (KIT only; written for all types)
+    repacked_bytes = repacked_bytes.at[:,11].set(
+        _safe_dec(tokens_dict[LENGTH_KIT_2]).astype(jnp.uint8)
+    )
+    repacked_bytes = repacked_bytes.at[:,12].set(
+        _safe_dec(tokens_dict[OFFSET_KIT_1]).astype(jnp.uint8)
+    )
+    repacked_bytes = repacked_bytes.at[:,13].set(
+        _safe_dec(tokens_dict[OFFSET_KIT_2]).astype(jnp.uint8)
+    )
 
 
-    return repacked_bytes.ravel().tolist()
+    return repacked_bytes.astype(jnp.uint8).ravel().tolist()
 
 
 def repack_softsynths(tokens_dict: dict[str, Array]) -> Array:
-    repacked_bytes = jnp.zeros((NUM_SYNTHS, SYNTH_SIZE), dtype=jnp.uint8)
+    repacked_bytes = jnp.zeros((NUM_SYNTHS, SYNTH_SIZE), dtype=jnp.uint16)
 
     # Byte 0: waveform
     repacked_bytes = repacked_bytes.at[:, 0].set(
-        (tokens_dict[SOFTSYNTH_WAVEFORM] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_WAVEFORM]).astype(jnp.uint8)
     )
 
     # Byte 1: filter_type
     repacked_bytes = repacked_bytes.at[:, 1].set(
-        (tokens_dict[SOFTSYNTH_FILTER_TYPE] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_FILTER_TYPE]).astype(jnp.uint8)
     )
 
     # Byte 2: filter_resonance
     repacked_bytes = repacked_bytes.at[:, 2].set(
-        (tokens_dict[SOFTSYNTH_FILTER_RESONANCE] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_FILTER_RESONANCE]).astype(jnp.uint8)
     )
 
     # Byte 3: distortion
     repacked_bytes = repacked_bytes.at[:, 3].set(
-        (tokens_dict[SOFTSYNTH_DISTORTION] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_DISTORTION]).astype(jnp.uint8)
     )
 
     # Byte 4: phase_type
     repacked_bytes = repacked_bytes.at[:, 4].set(
-        (tokens_dict[SOFTSYNTH_PHASE_TYPE] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_PHASE_TYPE]).astype(jnp.uint8)
     )
 
     # Bytes 5-8: start params
     repacked_bytes = repacked_bytes.at[:, 5].set(
-        (tokens_dict[SOFTSYNTH_START_VOLUME] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_START_VOLUME]).astype(jnp.uint8)
     )
     repacked_bytes = repacked_bytes.at[:, 6].set(
-        (tokens_dict[SOFTSYNTH_START_FILTER_CUTOFF] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_START_FILTER_CUTOFF]).astype(jnp.uint8)
     )
     repacked_bytes = repacked_bytes.at[:, 7].set(
-        (tokens_dict[SOFTSYNTH_START_PHASE_AMOUNT] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_START_PHASE_AMOUNT]).astype(jnp.uint8)
     )
     repacked_bytes = repacked_bytes.at[:, 8].set(
-        (tokens_dict[SOFTSYNTH_START_VERTICAL_SHIFT] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_START_VERTICAL_SHIFT]).astype(jnp.uint8)
     )
 
     # Bytes 9-12: end params
     repacked_bytes = repacked_bytes.at[:, 9].set(
-        (tokens_dict[SOFTSYNTH_END_VOLUME] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_END_VOLUME]).astype(jnp.uint8)
     )
     repacked_bytes = repacked_bytes.at[:, 10].set(
-        (tokens_dict[SOFTSYNTH_END_FILTER_CUTOFF] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_END_FILTER_CUTOFF]).astype(jnp.uint8)
     )
     repacked_bytes = repacked_bytes.at[:, 11].set(
-        (tokens_dict[SOFTSYNTH_END_PHASE_AMOUNT] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_END_PHASE_AMOUNT]).astype(jnp.uint8)
     )
     repacked_bytes = repacked_bytes.at[:, 12].set(
-        (tokens_dict[SOFTSYNTH_END_VERTICAL_SHIFT] - 1).astype(jnp.uint8)
+        _safe_dec(tokens_dict[SOFTSYNTH_END_VERTICAL_SHIFT]).astype(jnp.uint8)
     )
 
     # Bytes 13-15: padding (zeros, already initialized)
 
-    return repacked_bytes.ravel().tolist()
+    return repacked_bytes.astype(jnp.uint8).ravel().tolist()
 
 
 def repack_waveframes(waveframe_tokens: Array) -> list[int]:
-    flat = waveframe_tokens.reshape(-1, 2) - 1
+    flat = _safe_dec(waveframe_tokens.reshape(-1, 2))
     return _nibble_merge(flat[:, 0], flat[:, 1]).astype(jnp.uint8).ravel().tolist()
 
 
@@ -257,29 +240,29 @@ def repack_fx_values(tokens_dict: dict[str, Array], fx_command_IDs: Array) -> li
     """
     # Nibble-pair commands: recombine high and low nibbles
     chord_byte = _nibble_merge(
-        tokens_dict[CHORD_FX_1] - 1, tokens_dict[CHORD_FX_2] - 1
+        _safe_dec(tokens_dict[CHORD_FX_1]), _safe_dec(tokens_dict[CHORD_FX_2])
     )
     env_byte = _nibble_merge(
-        tokens_dict[ENV_FX_VOL] - 1, tokens_dict[ENV_FX_FADE] - 1
+        _safe_dec(tokens_dict[ENV_FX_VOL]), _safe_dec(tokens_dict[ENV_FX_FADE])
     )
     retrig_byte = _nibble_merge(
-        tokens_dict[RETRIG_FX_FADE] - 1, tokens_dict[RETRIG_FX_RATE] - 1
+        _safe_dec(tokens_dict[RETRIG_FX_FADE]), _safe_dec(tokens_dict[RETRIG_FX_RATE])
     )
     vibrato_byte = _nibble_merge(
-        tokens_dict[VIBRATO_FX_SPEED] - 1, tokens_dict[VIBRATO_FX_DEPTH] - 1
+        _safe_dec(tokens_dict[VIBRATO_FX_SPEED]), _safe_dec(tokens_dict[VIBRATO_FX_DEPTH])
     )
     random_byte = _nibble_merge(
-        tokens_dict[RANDOM_FX_L] - 1, tokens_dict[RANDOM_FX_R] - 1
+        _safe_dec(tokens_dict[RANDOM_FX_L]), _safe_dec(tokens_dict[RANDOM_FX_R])
     )
 
-    # ID/enum/byte commands: subtract the null offset
-    table_byte = tokens_dict[TABLE_FX] - 1
-    groove_byte = tokens_dict[GROOVE_FX] - 1
-    hop_byte = tokens_dict[HOP_FX] - 1
-    pan_byte = tokens_dict[PAN_FX] - 1
-    volume_byte = tokens_dict[VOLUME_FX] - 1
-    wave_byte = tokens_dict[WAVE_FX] - 1
-    continuous_byte = tokens_dict[CONTINUOUS_FX] - 1
+    # ID/enum/byte commands: invert the null offset
+    table_byte = _safe_dec(tokens_dict[TABLE_FX])
+    groove_byte = _safe_dec(tokens_dict[GROOVE_FX])
+    hop_byte = _safe_dec(tokens_dict[HOP_FX])
+    pan_byte = _safe_dec(tokens_dict[PAN_FX])
+    volume_byte = _safe_dec(tokens_dict[VOLUME_FX])
+    wave_byte = _safe_dec(tokens_dict[WAVE_FX])
+    continuous_byte = _safe_dec(tokens_dict[CONTINUOUS_FX])
 
     is_continuous = (
         (fx_command_IDs == CMD_D)
@@ -338,13 +321,13 @@ def repack_tables(tokens_dict: dict[str, Array]) -> dict[str, list]:
     """
     # Envelopes: merge volume/fade nibbles back into bytes
     env_bytes = _nibble_merge(
-        tokens_dict[TABLE_ENV_VOLUME] - 1,
-        tokens_dict[TABLE_ENV_DURATION] - 1,
+        _safe_dec(tokens_dict[TABLE_ENV_VOLUME]),
+        _safe_dec(tokens_dict[TABLE_ENV_DURATION]),
     ).ravel().astype(jnp.uint8).tolist()
 
     # Transposes: remove null offset
     transpose_bytes = (
-        tokens_dict[TABLE_TRANSPOSE] - 1
+        _safe_dec(tokens_dict[TABLE_TRANSPOSE])
     ).ravel().astype(jnp.uint8).tolist()
 
     # FX commands: parse_fx_commands doesn't add +1, raw 0-18 values
@@ -397,7 +380,7 @@ def repack_song(
     phrase/chain/song arrays, deduplicates phrases and chains, repacks
     entities, and assembles the 32KB byte array.
     """
-    tokens = np.array(song_tokens, dtype=np.uint8)
+    tokens = np.array(song_tokens, dtype=np.uint16)
     S = tokens.shape[0]
     pad = (STEPS_PER_PHRASE - S % STEPS_PER_PHRASE) % STEPS_PER_PHRASE
     if pad:
@@ -423,11 +406,11 @@ def repack_song(
 
     # 4. Deduplicate phrases → allocate phrase IDs
     # Full-size output arrays (255 phrases max, indexed 0-254)
-    phrase_notes_out = np.full((NUM_PHRASES, STEPS_PER_PHRASE), EMPTY, dtype=np.uint8)
-    phrase_instr_out = np.full((NUM_PHRASES, STEPS_PER_PHRASE), EMPTY, dtype=np.uint8)
-    phrase_fx_cmd_out = np.zeros((NUM_PHRASES, STEPS_PER_PHRASE), dtype=np.uint8)
+    phrase_notes_out = np.full((NUM_PHRASES, STEPS_PER_PHRASE), EMPTY, dtype=np.uint16)
+    phrase_instr_out = np.full((NUM_PHRASES, STEPS_PER_PHRASE), EMPTY, dtype=np.uint16)
+    phrase_fx_cmd_out = np.zeros((NUM_PHRASES, STEPS_PER_PHRASE), dtype=np.uint16)
     phrase_fx_val_out = np.zeros(
-        (NUM_PHRASES, STEPS_PER_PHRASE, FX_VALUES_FEATURE_DIM), dtype=np.uint8
+        (NUM_PHRASES, STEPS_PER_PHRASE, FX_VALUES_FEATURE_DIM), dtype=np.uint16
     )
 
     next_phrase_id = 0
@@ -556,8 +539,10 @@ def repack_song(
     # Phrase FX commands: repack to raw bytes
     fx_cmd_bytes = fx_cmd_flat.astype(jnp.uint8).tolist()
 
-    # Phrase instruments: raw byte values - 1 for offset
-    phrase_instr_bytes = (phrase_instr_out - 1).ravel().tolist()
+    # Phrase instruments: NULL token (0) → EMPTY (0xFF); token n → raw n-1.
+    phrase_instr_bytes = jnp.where(
+        phrase_instr_out == 0, EMPTY, phrase_instr_out - 1
+    ).ravel().tolist()
 
     # 8. Set allocation tables
     phrase_alloc = np.zeros(32, dtype=np.uint8)

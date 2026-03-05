@@ -56,7 +56,7 @@ class SongBanks(NamedTuple):
     def default(cls):
         """Zero-filled banks (null rows included). All slots unoccupied."""
         def _z(n, w):
-            return jnp.zeros((n + 1, w), dtype=jnp.uint8)
+            return jnp.zeros((n + 1, w), dtype=jnp.uint16)
         def _occ(n):
             return jnp.zeros(n + 1, dtype=jnp.bool_)
         return cls(

@@ -97,7 +97,7 @@ def _score_table_traces(banks, heads, table_h):
 
 
 def _build_table(logits, key) -> Array:
-    table = jnp.zeros(TABLE_WIDTH, dtype=jnp.uint8)
+    table = jnp.zeros(TABLE_WIDTH, dtype=jnp.uint16)
     categorical, continuous = logits['cat'], logits['cont']
     keys = jr.split(key, len(_TABLE_SCALAR_CAT_GROUPS))
 
@@ -108,12 +108,12 @@ def _build_table(logits, key) -> Array:
             keys[i],
             field_logits,
             axis=-1
-        ).astype(jnp.uint8)
+        ).astype(jnp.uint16)
         table = table.at[cols].set(cat_values)
 
     cont_values = jnp.round(jax.nn.sigmoid(
         continuous
-    ) * _TABLE_SCALAR_CONT_MAX_VALUES).astype(jnp.uint8)
+    ) * _TABLE_SCALAR_CONT_MAX_VALUES).astype(jnp.uint16)
 
     table = table.at[_TABLE_SCALAR_CONT_COLS_ARRAY].set(cont_values)
 
@@ -127,23 +127,23 @@ def _build_softsynth(logits, key) -> Array:
     logits: dict with keys 'cat', 'cont', 'waveframes' (output of SoftSynthDecoder)
     Returns (synth_row, waveframe_row) — both uint8 arrays.
     """
-    synth_row = jnp.zeros(SOFTSYNTH_WIDTH, dtype=jnp.uint8)
+    synth_row = jnp.zeros(SOFTSYNTH_WIDTH, dtype=jnp.uint16)
     keys = jr.split(key, len(_SOFTSYNTH_CAT_GROUPS))
 
     for i, (vocab_size, starts, cols) in enumerate(_SOFTSYNTH_CAT_GROUPS):
         gather_idxs = starts[:, None] + jnp.arange(vocab_size)[None, :]
         field_logits = logits['cat'][gather_idxs]
-        cat_values = jr.categorical(keys[i], field_logits, axis=-1).astype(jnp.uint8)
+        cat_values = jr.categorical(keys[i], field_logits, axis=-1).astype(jnp.uint16)
         synth_row = synth_row.at[cols].set(cat_values)
 
     cont_values = jnp.round(
         jax.nn.sigmoid(logits['cont']) * _SOFTSYNTH_CONT_MAX_VALUES
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
     synth_row = synth_row.at[_SOFTSYNTH_CONT_COLS_ARRAY].set(cont_values)
 
     waveframe_row = jnp.round(
         jax.nn.sigmoid(logits['waveframes']) * 15.0
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     return synth_row, waveframe_row
 
@@ -195,7 +195,7 @@ def _build_trace_for_table(table_row: Array, banks: SongBanks) -> Array:
     """
     S = STEPS_PER_TABLE
 
-    table_row = table_row.astype(jnp.uint8)
+    table_row = table_row.astype(jnp.uint16)
 
     def get_row(is_bank, bank_idx):
         return jax.lax.cond(
@@ -308,7 +308,7 @@ def match_groove(
     def _create_new_groove():
         groove_row = jnp.round(
             jax.nn.sigmoid(predicted) * _GROOVE_CONT_MAX
-        ).astype(jnp.uint8)
+        ).astype(jnp.uint16)
         return banks._replace(
             grooves=banks.grooves.at[groove_id].set(groove_row),
             grooves_occupied=banks.grooves_occupied.at[groove_id].set(True),
@@ -578,23 +578,23 @@ def _build_instrument(logits, key, instr_type=None) -> Array:
                 when the type has already been sampled externally (e.g. in
                 match_instrument) to avoid a redundant independent draw.
     """
-    instr = jnp.zeros(INSTR_WIDTH, dtype=jnp.uint8)
+    instr = jnp.zeros(INSTR_WIDTH, dtype=jnp.uint16)
     categorical, continuous = logits['cat'], logits['cont']
     keys = jr.split(key, len(_INSTR_SCALAR_CAT_GROUPS))
 
     for i, (vocab_size, starts, cols) in enumerate(_INSTR_SCALAR_CAT_GROUPS):
         gather_idxs = starts[:, None] + jnp.arange(vocab_size)[None, :]
         field_logits = categorical[gather_idxs]
-        cat_values = jr.categorical(keys[i], field_logits, axis=-1).astype(jnp.uint8)
+        cat_values = jr.categorical(keys[i], field_logits, axis=-1).astype(jnp.uint16)
         instr = instr.at[cols].set(cat_values)
 
     cont_values = jnp.round(jax.nn.sigmoid(
         continuous
-    ) * _INSTR_SCALAR_CONT_MAX_VALUES).astype(jnp.uint8)
+    ) * _INSTR_SCALAR_CONT_MAX_VALUES).astype(jnp.uint16)
     instr = instr.at[_INSTR_SCALAR_CONT_COLS_ARRAY].set(cont_values)
 
     if instr_type is not None:
-        instr = instr.at[0].set(instr_type.astype(jnp.uint8))
+        instr = instr.at[0].set(instr_type.astype(jnp.uint16))
 
     return instr
 
@@ -735,10 +735,10 @@ def resolve_step(
         #    and are absent from TOKEN_HEADS — they are filled in below.
         #    jr.fold_in(key, pos) gives a unique subkey per field without
         #    allocating a split array; positions 0-20 are safely below 100.
-        next_chan_tokens = jnp.zeros(21, dtype=jnp.uint8)
+        next_chan_tokens = jnp.zeros(21, dtype=jnp.uint16)
         for name, (pos, _) in TOKEN_HEADS.items():
             val = jr.categorical(jr.fold_in(ch_key, pos), ch_logits[name])
-            next_chan_tokens = next_chan_tokens.at[pos].set(val.astype(jnp.uint8))
+            next_chan_tokens = next_chan_tokens.at[pos].set(val.astype(jnp.uint16))
 
         # 2. Instrument → col 1.
         instr_id, banks = match_instrument(
@@ -749,7 +749,7 @@ def resolve_step(
         )
         next_chan_tokens = next_chan_tokens.at[
             ENTITY_HEADS['instr_id']
-        ].set(instr_id.astype(jnp.uint8))
+        ].set(instr_id.astype(jnp.uint16))
 
         # 3. CMD_A → phrase-level table → col 3 (TABLE_FX = fx_vals[0]).
         fx_cmd = next_chan_tokens[2]
@@ -764,7 +764,7 @@ def resolve_step(
         )
         next_chan_tokens = next_chan_tokens.at[
             ENTITY_HEADS['table_id']
-        ].set(table_id.astype(jnp.uint8))
+        ].set(table_id.astype(jnp.uint16))
 
         # 4. CMD_G → phrase-level groove → col 4 (GROOVE_FX = fx_vals[1]).
         groove_id, banks = jax.lax.cond(
@@ -778,7 +778,7 @@ def resolve_step(
         )
         next_chan_tokens = next_chan_tokens.at[
             ENTITY_HEADS['groove_id']
-        ].set(groove_id.astype(jnp.uint8))
+        ].set(groove_id.astype(jnp.uint16))
 
         return banks, next_chan_tokens
 
@@ -846,6 +846,7 @@ def generate(
     """
     keys = jr.split(key, num_steps)   # (num_steps, 2) — one key per step
 
+    input_tokens = jnp.asarray(input_tokens, dtype=jnp.uint16)
     banks = banks or SongBanks.default()
 
     generate_step_fn = partial(

@@ -90,7 +90,7 @@ def test_softsynths_array(song_file):
 
 def test_from_tokens_smoke():
     """from_tokens with zero tokens and default banks must produce 32 KB output."""
-    song_tokens = jnp.zeros((16, 4, 21), dtype=jnp.uint8)
+    song_tokens = jnp.zeros((16, 4, 21), dtype=jnp.uint16)
     sf = SongFile.from_tokens(song_tokens, SongBanks.default(), tempo=120, name="SMOKE")
     assert len(sf.repack()) == 32768
 

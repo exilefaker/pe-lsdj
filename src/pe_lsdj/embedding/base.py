@@ -75,7 +75,7 @@ class GatedNormedEmbedder(BaseEmbedder):
 
     def __call__(self, x):
         valid_event = jnp.all(
-            (x > self.null_value) & (x <= self.max_value)
+            (x > self.null_value) & (x <= self.max_value + 1)
         ).astype(jnp.float32)
 
         # 2-dim "event" one-hot

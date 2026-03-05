@@ -12,7 +12,7 @@ def parse_notes(data_bytes: Array) -> Array:
     # Raw 0 = "---" (no note); 1..NUM_NOTES-1 = playable notes. No +1 offset needed.
     raw_data = data_bytes.reshape(
         (NUM_PHRASES, STEPS_PER_PHRASE)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
     return raw_data * ~(raw_data >= NUM_NOTES)  # Set invalid bytes to 0
 
 
@@ -27,7 +27,7 @@ def parse_notes_normed(data_bytes: Array) -> Array:
 
 def parse_fx_commands(data_bytes: Array) -> Array:
     # Set invalid FX commands to NULL
-    return (data_bytes * ~(data_bytes > 18)).astype(jnp.uint8)
+    return (data_bytes * ~(data_bytes > 18)).astype(jnp.uint16)
 
 
 def parse_envelopes(data_bytes: Array) -> Array:
@@ -52,7 +52,7 @@ def parse_envelopes(data_bytes: Array) -> Array:
             data_bytes.reshape((NUM_TABLES, STEPS_PER_TABLE, 2)), 
             16
         )
-    ).astype(jnp.uint8) + 1
+    ).astype(jnp.uint16) + 1
 
 
 def _nibble_split(bytes: Array) -> Array:
@@ -62,7 +62,7 @@ def _get_bit(bytes: list[int], bit_no: int) -> Array:
     return ((bytes >> bit_no) & 0x01)
 
 def _with_null(data: Array) -> Array:
-    return data.astype(jnp.uint8) + 1
+    return data.astype(jnp.uint16) + 1
 
 def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     """
@@ -119,7 +119,7 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     Speed          | 4-bit int (hex)        | byte 14 bits 3-0| [WAV]
     """
 
-    raw_instruments = data_bytes.reshape(NUM_INSTRUMENTS, INSTRUMENT_SIZE)
+    raw_instruments = data_bytes.reshape(NUM_INSTRUMENTS, INSTRUMENT_SIZE).astype(jnp.uint16)
 
     # Byte 0
     type_IDs = raw_instruments[:,0] + 1
@@ -129,36 +129,36 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     envelopes = (
         (_nibble_split(byte1) + 1) 
         * ((type_IDs == PU) | (type_IDs == NOI))[:,None]
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     volumes = (
         (((byte1 >> 5) & 0x03) + 1)
         * ((type_IDs == WAV) | (type_IDs == KIT))
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     # Byte 2
     byte2 = raw_instruments[:,2]
-    phase_transposes = ((byte2 + 1) * (type_IDs == PU)).astype(jnp.uint8)
+    phase_transposes = ((byte2 + 1) * (type_IDs == PU)).astype(jnp.uint16)
 
     softsynths_and_repeats = (
         (_nibble_split(byte2) + 1) 
         * (type_IDs == WAV)[:,None]
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     keep_attacks = (
         (_get_bit(byte2, 7) + 1)
         * (type_IDs == KIT)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     half_speeds = (
         (_get_bit(byte2, 6) + 1)
         * (type_IDs == KIT)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     kit_1_IDs = (
         ((byte2 & 0x3F) + 1)
         * (type_IDs == KIT)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
     
     # Byte 3
     byte3 = raw_instruments[:,3]
@@ -166,23 +166,20 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     lengths = (
         ((byte3 & 0x3F) + 1)
         * ((type_IDs == PU) | (type_IDs == NOI))
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     length_limited = (
         (_get_bit(byte3, 6) + 1)
         * ((type_IDs == PU) | (type_IDs == NOI))
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     length_kit_1 = (
         (byte3 + 1)
         * (type_IDs == KIT)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     # Byte 4
-    sweeps = (
-        (raw_instruments[:,4] + 1)
-        * ((type_IDs == PU) | (type_IDs == NOI))
-    ).astype(jnp.uint8)
+    sweeps = (raw_instruments[:,4] + 1).astype(jnp.uint16)
 
     # Byte 5
     byte5 = raw_instruments[:,5]
@@ -192,22 +189,22 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     vibrato_types = (
         (((byte5 >> 1) & 0x03) + 1)
         * ~(type_IDs == NOI)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     vibrato_direction = (
         (_get_bit(byte5, 0) + 1)
         * ~(type_IDs == NOI)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     loop_kit_1 = (
         (_get_bit(byte5, 6) + 1)
         * (type_IDs == KIT)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     loop_kit_2 = (
         (_get_bit(byte5, 5) + 1)
         * (type_IDs == KIT)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     # Byte 6
     byte6 = raw_instruments[:,6]
@@ -219,68 +216,51 @@ def parse_instruments(data_bytes: list[int]) -> dict[str, Array]:
     waves = (
         (((byte7 >> 6) & 0x03) + 1)
         * (type_IDs == PU)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     phase_finetunes = (
         (((byte7 >> 2) & 0x0F) + 1)
         * (type_IDs == PU)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     raw_pans = byte7 & 0x03
     pans = (raw_pans + 1) * (raw_pans <= 3)
 
     # Byte 8
-    pitches = (
-        (raw_instruments[:,8] + 1)
-        * (type_IDs == KIT)
-    ).astype(jnp.uint8)
+    pitches = (raw_instruments[:,8] + 1).astype(jnp.uint16)
 
     # Byte 9
     byte9 = raw_instruments[:,9]
     play_types = (
         ((byte9 & 0x03) + 1)
         * (type_IDs == WAV)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     keep_attacks_2 = (
         (_get_bit(byte9, 7) + 1)
         * (type_IDs == KIT)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     kit_2_IDs = (
         ((byte9 & 0x3F) + 1)
         * (type_IDs == KIT)
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
     # Byte 10 (KIT only: distortion type)
     byte10 = raw_instruments[:,10]
     distortion_types = (
         ((byte10 - 0xD0) + 1)
         * ((type_IDs == KIT) & (byte10 >= 0xD0) & (byte10 <= 0xD3))
-    ).astype(jnp.uint8)
+    ).astype(jnp.uint16)
 
-    # Byte 14 (WAV only: steps / speed)
+    # Byte 14 (WAV only: steps / speed; stored for all types)
     byte14 = raw_instruments[:,14]
-    wave_lengths_and_speeds = (
-        (_nibble_split(byte14) + 1)
-        * ((type_IDs == WAV)[:,None])
-    ).astype(jnp.uint8)
+    wave_lengths_and_speeds = (_nibble_split(byte14) + 1).astype(jnp.uint16)
 
-    # Bytes 11-13
-    length_kit_2 = (
-        (raw_instruments[:,11] + 1)
-        * (type_IDs == KIT)
-    ).astype(jnp.uint8)
-
-    offset_kit_1 = (
-        (raw_instruments[:,12] + 1)
-        * (type_IDs == KIT)
-    ).astype(jnp.uint8)
-
-    offset_kit_2 = (
-        (raw_instruments[:,13] + 1)
-        * (type_IDs == KIT)
-    ).astype(jnp.uint8)
+    # Bytes 11-13 (KIT only; stored for all types)
+    length_kit_2 = (raw_instruments[:,11] + 1).astype(jnp.uint16)
+    offset_kit_1 = (raw_instruments[:,12] + 1).astype(jnp.uint16)
+    offset_kit_2 = (raw_instruments[:,13] + 1).astype(jnp.uint16)
 
     instruments = {        
          # All instruments
@@ -373,11 +353,11 @@ def parse_phrase_alloc_table(data: list[int]):
 
 def parse_5bit_IDs(data_bytes: Array) -> Array:
     # Add NULL token and use for invalid entries
-    with_null = data_bytes + 1
-    return (with_null * ~(with_null > 32)).astype(jnp.uint8)
+    with_null = data_bytes.astype(jnp.uint16) + 1
+    return (with_null * ~(with_null > 32)).astype(jnp.uint16)
 
 def parse_3bit_enum(data_bytes: Array) -> Array:
-    return (data_bytes + 1) * (data_bytes <= 3)
+    return ((data_bytes + 1) * (data_bytes <= 3)).astype(jnp.uint16)
 
 def parse_fx_values(
     data_bytes: Array,
@@ -413,8 +393,8 @@ def parse_fx_values(
                     (has dual use for WAV chan but rare)
     Z (random)    | Ranges (L digit, R digit)| High and low nibbles | Random
     """
-    byte_parse = data_bytes + 1
-    nibble_parse = (_nibble_split(data_bytes) + 1)
+    byte_parse = data_bytes.astype(jnp.uint16) + 1
+    nibble_parse = (_nibble_split(data_bytes).astype(jnp.uint16) + 1)
     ID_parse = parse_5bit_IDs(data_bytes)
     enum_parse = parse_3bit_enum(data_bytes)
     chord_FX = nibble_parse * (fx_command_IDs == CMD_C)[:,None]
@@ -479,22 +459,22 @@ def parse_softsynths(data: Array) -> dict[str, Array]:
     End vert. shift    | continuous (0-255)                 | 12
     (padding)          |                                    | 13-15
     """
-    raw = data.reshape(NUM_SYNTHS, SYNTH_SIZE)
+    raw = data.reshape(NUM_SYNTHS, SYNTH_SIZE).astype(jnp.uint16)
 
     # Byte 0: waveform enum (0=sawtooth, 1=square, 2=sine)
-    waveforms = ((raw[:, 0] + 1) * (raw[:, 0] <= 2)).astype(jnp.uint8)
+    waveforms = ((raw[:, 0] + 1) * (raw[:, 0] <= 2)).astype(jnp.uint16)
 
     # Byte 1: filter_type enum (0=lowpass, 1=highpass, 2=bandpass, 3=allpass)
-    filter_types = ((raw[:, 1] + 1) * (raw[:, 1] <= 3)).astype(jnp.uint8)
+    filter_types = ((raw[:, 1] + 1) * (raw[:, 1] <= 3)).astype(jnp.uint16)
 
     # Byte 2: filter_resonance (continuous)
     filter_resonances = _with_null(raw[:, 2])
 
     # Byte 3: distortion enum (0=clip, 1=wrap)
-    distortions = ((raw[:, 3] + 1) * (raw[:, 3] <= 1)).astype(jnp.uint8)
+    distortions = ((raw[:, 3] + 1) * (raw[:, 3] <= 1)).astype(jnp.uint16)
 
     # Byte 4: phase_type enum (0=normal, 1=resync, 2=resync2)
-    phase_types = ((raw[:, 4] + 1) * (raw[:, 4] <= 2)).astype(jnp.uint8)
+    phase_types = ((raw[:, 4] + 1) * (raw[:, 4] <= 2)).astype(jnp.uint16)
 
     # Bytes 5-8: start params
     start_volumes = _with_null(raw[:, 5])
@@ -539,11 +519,11 @@ SOFTSYNTH_FIELDS = (
 
 
 def parse_waveframes(data: Array) -> Array:
-    return _nibble_split(data).reshape((
+    return (_nibble_split(data).astype(jnp.uint16) + 1).reshape((
         NUM_SYNTHS,
         WAVES_PER_SYNTH,
         FRAMES_PER_WAVE
-    )) + 1
+    ))
 
 
 # Parse tables
@@ -752,9 +732,9 @@ def parse_tables(data: Array) -> tuple[dict[str, Array], dict[str, Array]]:
     fx_dim = len(FX_VALUE_KEYS)
 
     # Envelopes: 1 byte per step, nibble-split into (volume, fade)
-    env_nibbles = _nibble_split(data[TABLE_ENVELOPES_ADDR]) + 1  # (512, 2)
-    env_volume = env_nibbles[:, 0].reshape(shape).astype(jnp.uint8)
-    env_duration = env_nibbles[:, 1].reshape(shape).astype(jnp.uint8)
+    env_nibbles = _nibble_split(data[TABLE_ENVELOPES_ADDR]).astype(jnp.uint16) + 1  # (512, 2)
+    env_volume = env_nibbles[:, 0].reshape(shape).astype(jnp.uint16)
+    env_duration = env_nibbles[:, 1].reshape(shape).astype(jnp.uint16)
 
     # Transposes: continuous 0-255
     transposes = _with_null(data[TABLE_TRANSPOSES_ADDR]).reshape(shape)
@@ -764,14 +744,14 @@ def parse_tables(data: Array) -> tuple[dict[str, Array], dict[str, Array]]:
     fx_val_1_dict = parse_fx_values(data[TABLE_FX_VAL_ADDR], fx_cmd_1_flat)
     fx_val_1 = jnp.column_stack(
         [fx_val_1_dict[k] for k in FX_VALUE_KEYS]
-    ).reshape((*shape, fx_dim)).astype(jnp.uint8)
+    ).reshape((*shape, fx_dim))
 
     # FX slot 2
     fx_cmd_2_flat = parse_fx_commands(data[TABLE_FX_2_ADDR])
     fx_val_2_dict = parse_fx_values(data[TABLE_FX_2_VAL_ADDR], fx_cmd_2_flat)
     fx_val_2 = jnp.column_stack(
         [fx_val_2_dict[k] for k in FX_VALUE_KEYS]
-    ).reshape((*shape, fx_dim)).astype(jnp.uint8)
+    ).reshape((*shape, fx_dim))
 
     raw_tables = {
         TABLE_ENV_VOLUME: env_volume,
@@ -844,5 +824,5 @@ def parse_grooves(data: Array) -> Array:
 
     Output: (NUM_GROOVES, STEPS_PER_GROOVE, 2)
     """
-    nibbles = _nibble_split(data.ravel()) + 1  # (NUM_GROOVES * STEPS_PER_GROOVE, 2)
-    return nibbles.reshape(NUM_GROOVES, STEPS_PER_GROOVE, 2).astype(jnp.uint8)
+    nibbles = _nibble_split(data.ravel()).astype(jnp.uint16) + 1
+    return nibbles.reshape(NUM_GROOVES, STEPS_PER_GROOVE, 2)
