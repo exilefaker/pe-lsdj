@@ -9,6 +9,7 @@ from pe_lsdj.training import (
     sequence_loss,
     batch_loss,
     train_step,
+    get_validate_sequences,
 )
 from pe_lsdj.models.transformer import LSDJTransformer
 from pe_lsdj.embedding.song import SongBanks
@@ -102,6 +103,59 @@ class TestBatchLoss:
             sequence_loss(model, inputs[i], targets[i], banks) for i in range(B)
         ])
         assert jnp.allclose(bl, individual.mean(), atol=1e-5)
+
+
+class FakeSong:
+    """Minimal SongFile stub: just needs song_tokens."""
+    def __init__(self, tokens):
+        self.song_tokens = tokens
+
+
+class TestGetValidateSequences:
+
+    def test_crop_count_single_song(self):
+        S, crop_len = 50, 16
+        song = FakeSong(jr.randint(jr.PRNGKey(0), (S, 4, 21), 0, 10).astype(jnp.uint16))
+        seqs = get_validate_sequences([song], [SongBanks.default()], crop_len)
+        assert len(seqs) == (S - 1) // crop_len
+
+    def test_crop_count_multiple_songs(self):
+        crop_len = 16
+        songs = [
+            FakeSong(jr.randint(jr.PRNGKey(i), (S, 4, 21), 0, 10).astype(jnp.uint16))
+            for i, S in enumerate([50, 70])
+        ]
+        banks = [SongBanks.default(), SongBanks.default()]
+        seqs = get_validate_sequences(songs, banks, crop_len)
+        assert len(seqs) == (50 - 1) // crop_len + (70 - 1) // crop_len
+
+    def test_input_target_shapes(self):
+        S, crop_len = 49, 16
+        song = FakeSong(jr.randint(jr.PRNGKey(0), (S, 4, 21), 0, 10).astype(jnp.uint16))
+        seqs = get_validate_sequences([song], [SongBanks.default()], crop_len)
+        for inp, tgt, _ in seqs:
+            assert inp.shape == (crop_len, 4, 21)
+            assert tgt.shape == (crop_len, 4, 21)
+
+    def test_teacher_forcing_shift(self):
+        S, crop_len = 32, 16
+        song = FakeSong(jr.randint(jr.PRNGKey(0), (S, 4, 21), 0, 10).astype(jnp.float32))
+        seqs = get_validate_sequences([song], [SongBanks.default()], crop_len)
+        for inp, tgt, _ in seqs:
+            assert jnp.allclose(tgt[:-1], inp[1:])
+
+    def test_banks_passed_through(self):
+        song = FakeSong(jr.randint(jr.PRNGKey(0), (32, 4, 21), 0, 10).astype(jnp.uint16))
+        banks = SongBanks.default()
+        seqs = get_validate_sequences([song], [banks], crop_len=16)
+        for _, _, bnk in seqs:
+            assert bnk is banks
+
+    def test_val_loss_finite(self, model, banks):
+        song = FakeSong(jr.randint(jr.PRNGKey(0), (32, 4, 21), 0, 10).astype(jnp.uint16))
+        seqs = get_validate_sequences([song], [banks], crop_len=16)
+        val_losses = [sequence_loss(model, inp, tgt, bnk) for inp, tgt, bnk in seqs]
+        assert all(jnp.isfinite(l) for l in val_losses)
 
 
 class TestTrainStep:

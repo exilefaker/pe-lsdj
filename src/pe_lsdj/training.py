@@ -27,7 +27,7 @@ def load_weights(filepath, reference_model):
     """
     return eqx.tree_deserialise_leaves(filepath, like=reference_model)  
 
-
+# NOTE: Legacy (assumes single-song batches) - keeping around in case
 def sample_crops(song_tokens: Array, crop_len: int, batch_size: int, key: Key):
     """
     Sample random crops from one song's token sequence for teacher forcing.
@@ -76,7 +76,7 @@ def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key):
     int array of the selected song indices (useful for logging).
     """
     k1, k2 = jr.split(key)
-    idxs = jr.randint(k1, (batch_size,), 0, len(songs))
+    idxs = jr.choice(k1, len(songs), shape=(batch_size,), replace=False)
     subkeys = jr.split(k2, batch_size)
     crops = [
         sample_crop(songs[i].song_tokens.astype(jnp.float32), crop_len, subkeys[j])
@@ -126,6 +126,7 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
     return (token_ce + scalar_ce + cond_ce) / (L * 4)
 
 
+# NOTE: Legacy (assumes single-song batches) - keeping around in case
 def batch_loss(model, input_batch: Array, target_batch: Array, banks: SongBanks):
     """Mean loss over a batch of sequences."""
     losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, None))(
@@ -152,10 +153,28 @@ def train_step(model, opt_state, optimizer, input_batch, target_batch, banks):
     return model, opt_state, loss
 
 
+def get_validate_sequences(val_songs, val_banks, crop_len):
+    """
+    Pre-gather non-overlapping crops from each validation song (remainder dropped).
+    Returns a list of (input, target, banks) triples, one per crop window.
+    """
+    results = []
+    for song, banks in zip(val_songs, val_banks):
+        tokens = song.song_tokens.astype(jnp.float32)
+        S = tokens.shape[0]
+        B = (S - 1) // crop_len  # -1 ensures every crop has a target step
+        for i in range(B):
+            start = i * crop_len
+            full = tokens[start : start + crop_len + 1]
+            results.append((full[:-1], full[1:], banks))
+    return results
+
+
 def train(
     model,
     songs: list[SongFile],
     *,
+    validation_songs: list[SongFile] | None = None,
     num_steps: int = 10_000,
     crop_len: int = 256,
     batch_size: int = 8,
@@ -214,8 +233,23 @@ def train(
         g = open(os.path.join(session_path, "losses.txt"), "w")
         g.write("step,song,loss\n")
 
+        if validation_songs is not None:
+            h = open(os.path.join(session_path, "validate_losses.txt"), "w")
+            h.write("step,validation_loss\n")
+
+    assert batch_size <= len(songs), (
+        f"batch_size ({batch_size}) must be <= number of training songs ({len(songs)}) "
+        "for without-replacement sampling"
+    )
+
     # Pre-compute banks for each song
     all_banks = [SongBanks.from_songfile(sf) for sf in songs]
+
+    # Set up validation sequences, if applicable
+    if validation_songs is not None:
+        _val_seq_loss = eqx.filter_jit(sequence_loss)
+        validation_banks = [SongBanks.from_songfile(vs) for vs in validation_songs]
+        val_sequences = get_validate_sequences(validation_songs, validation_banks, crop_len)
 
     for step in range(num_steps):
         key, k_crop = jr.split(key)
@@ -233,12 +267,29 @@ def train(
         if step % log_every == 0:
             batch_names = [songs[i].name for i in batch_idxs.tolist()]
             names_str = ','.join(batch_names)
-            print(f"step {step:5d} | {names_str} | loss {loss:.4f}")
+            loss_str = f"step {step:5d} | {names_str} | loss {loss:.4f}"
+
+            # Compute validation loss if applicable
+            if validation_songs is not None:
+                val_losses = [
+                    _val_seq_loss(model, inp, tgt, bnk)
+                    for inp, tgt, bnk in val_sequences
+                ]
+                validation_loss = jnp.mean(jnp.stack(val_losses))
+                loss_str |= f" | val {validation_loss:.4f}"
+            
+            print(loss_str)
+
+            # Display / save data
             if checkpoint_path is not None:
                 ckpt_file = os.path.join(session_path, f"step_{step:06d}.eqx")
                 eqx.tree_serialise_leaves(ckpt_file, model)
                 g.write(f"{step:5d},{names_str},{loss:.4f}\n")
+                if validation_songs is not None:
+                    h.write(f"{step:5d},{validation_loss:.4f}\n")
 
     if checkpoint_path is not None:
         g.close()
+        if validation_songs is not None:
+            h.close()
     return model, opt_state
