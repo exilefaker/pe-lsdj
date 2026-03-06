@@ -8,6 +8,8 @@ import equinox as eqx
 import optax
 from jaxtyping import Array, Key
 
+from typing import Any, NamedTuple
+
 from pe_lsdj import SongFile
 from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.models.transformer import (
@@ -15,17 +17,62 @@ from pe_lsdj.models.transformer import (
 )
 
 
+class TrainState(NamedTuple):
+    model: Any
+    opt_state: Any
+    step: int
+
+
+def save_checkpoint(path, model, opt_state, step):
+    """Save model weights, optimizer state, and step as a single bundle."""
+    eqx.tree_serialise_leaves(path, TrainState(model, opt_state, step))
+
+
+def load_checkpoint(path, ref_model, ref_opt_state):
+    """
+    Load a checkpoint bundle (model, opt_state, step).
+
+    If the file contains only weights (e.g. saved by an older version),
+    loads the model and returns None for opt_state and 0 for step, with
+    a warning. The caller should reinitialize opt_state in that case.
+    """
+    try:
+        state = eqx.tree_deserialise_leaves(
+            path, like=TrainState(ref_model, ref_opt_state, 0)
+        )
+        return state.model, state.opt_state, state.step
+    except Exception:
+        print(
+            f"Warning: {path} does not contain a full TrainState "
+            "(model + opt_state + step). Loading weights only — "
+            "optimizer state will be reset to step 0."
+        )
+        model = eqx.tree_deserialise_leaves(path, like=ref_model)
+        return model, None, 0
+
+
+def _find_latest_checkpoint(checkpoint_path):
+    """Return (session_path, checkpoint_file) for the most recent saved step.
+    Returns (None, None) if no checkpoints exist."""
+    sessions = sorted(
+        d for d in os.listdir(checkpoint_path)
+        if os.path.isdir(os.path.join(checkpoint_path, d))
+    )
+    if not sessions:
+        return None, None
+    session_path = os.path.join(checkpoint_path, sessions[-1])
+    ckpts = sorted(
+        f for f in os.listdir(session_path)
+        if f.startswith("step_") and f.endswith(".eqx")
+    )
+    if not ckpts:
+        return session_path, None
+    return session_path, os.path.join(session_path, ckpts[-1])
+
+
 def load_songs(song_paths: list[str]) -> list[SongFile]:
     """Load all .lsdsng files upfront."""
     return [SongFile(p) for p in song_paths]
-
-
-def load_weights(filepath, reference_model):
-    """
-    Load checkpointed model weights, given an isomorphic model 'skeleton'
-    i.e., first initialize a model with the same hyperparams
-    """
-    return eqx.tree_deserialise_leaves(filepath, like=reference_model)  
 
 # NOTE: Legacy (assumes single-song batches) - keeping around in case
 def sample_crops(song_tokens: Array, crop_len: int, batch_size: int, key: Key):
@@ -182,12 +229,17 @@ def train(
     key: Key,
     log_every: int = 50,
     checkpoint_path: str | None = None,
+    resume_from_checkpoint: bool = False,
 ):
     """
     Multi-song batching training loop.
 
     Each step samples one crop per batch item from a randomly chosen song,
     stacks per-song banks, and runs one gradient step.
+
+    If resume_from_checkpoint=True and checkpoint_path is set, the most
+    recent session and step are loaded automatically. Logs are appended to
+    the existing session folder rather than creating a new one.
     """
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
@@ -195,15 +247,28 @@ def train(
         warmup_steps=num_steps // 20,
         decay_steps=num_steps,
     )
-    # optimizer = optax.adam(lr)
-    # Trying a schedule to mitigate some oscillation
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
         optax.adam(schedule),
     )
     opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
+    start_step = 0
 
-    # Optionally set up model checkpointing + logging
+    # Resume from checkpoint if requested
+    if resume_from_checkpoint and checkpoint_path is not None:
+        session_path, ckpt_file = _find_latest_checkpoint(checkpoint_path)
+        if ckpt_file is not None:
+            model, loaded_opt_state, start_step = load_checkpoint(
+                ckpt_file, model, opt_state
+            )
+            if loaded_opt_state is not None:
+                opt_state = loaded_opt_state
+            print(f"Resumed from {ckpt_file} (step {start_step})")
+        else:
+            print("resume_from_checkpoint=True but no checkpoint found; starting fresh.")
+            session_path = None  # fall through to create a new session below
+
+    # Set up checkpointing + logging
     if checkpoint_path is not None:
 
         def write_train_params(filepath):
@@ -216,26 +281,30 @@ def train(
                     "key": key.tolist(),
                 }))
 
-        session_path = os.path.join(
-            checkpoint_path, 
-            str(datetime.datetime.now())
-            .replace(' ', '_')
-            .replace('.', '_')
-        )
-        os.makedirs(session_path, exist_ok=True)
-        if hasattr(model, "write_metadata"):
-            model.write_metadata(
-                os.path.join(session_path, "model_hyperparams.json")
+        resuming = resume_from_checkpoint and start_step > 0
+        if not resuming:
+            session_path = os.path.join(
+                checkpoint_path,
+                str(datetime.datetime.now())
+                .replace(' ', '_')
+                .replace('.', '_')
             )
-        write_train_params(
-            os.path.join(session_path, "train_params.json")
-        )
-        g = open(os.path.join(session_path, "losses.txt"), "w")
-        g.write("step,song,loss\n")
+            os.makedirs(session_path, exist_ok=True)
+            if hasattr(model, "write_metadata"):
+                model.write_metadata(
+                    os.path.join(session_path, "model_hyperparams.json")
+                )
+            write_train_params(os.path.join(session_path, "train_params.json"))
+
+        log_mode = "a" if resuming else "w"
+        g = open(os.path.join(session_path, "losses.txt"), log_mode)
+        if not resuming:
+            g.write("step,song,loss\n")
 
         if validation_songs is not None:
-            h = open(os.path.join(session_path, "validate_losses.txt"), "w")
-            h.write("step,validation_loss\n")
+            h = open(os.path.join(session_path, "validate_losses.txt"), log_mode)
+            if not resuming:
+                h.write("step,validation_loss\n")
 
     assert batch_size <= len(songs), (
         f"batch_size ({batch_size}) must be <= number of training songs ({len(songs)}) "
@@ -251,7 +320,7 @@ def train(
         validation_banks = [SongBanks.from_songfile(vs) for vs in validation_songs]
         val_sequences = get_validate_sequences(validation_songs, validation_banks, crop_len)
 
-    for step in range(num_steps):
+    for step in range(start_step, num_steps):
         key, k_crop = jr.split(key)
 
         # Sample multi-song batch
@@ -276,14 +345,14 @@ def train(
                     for inp, tgt, bnk in val_sequences
                 ]
                 validation_loss = jnp.mean(jnp.stack(val_losses))
-                loss_str |= f" | val {validation_loss:.4f}"
-            
+                loss_str += f" | val {validation_loss:.4f}"
+
             print(loss_str)
 
-            # Display / save data
+            # Save checkpoint + logs
             if checkpoint_path is not None:
                 ckpt_file = os.path.join(session_path, f"step_{step:06d}.eqx")
-                eqx.tree_serialise_leaves(ckpt_file, model)
+                save_checkpoint(ckpt_file, model, opt_state, step)
                 g.write(f"{step:5d},{names_str},{loss:.4f}\n")
                 if validation_songs is not None:
                     h.write(f"{step:5d},{validation_loss:.4f}\n")
