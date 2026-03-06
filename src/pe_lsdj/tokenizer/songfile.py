@@ -307,11 +307,14 @@ class SongFile(eqx.Module):
         object.__setattr__(self, 'instruments', _arr_to_instr_dict(banks.instruments[1:]))
         object.__setattr__(self, 'tables',      _arr_to_tables_dict(banks.tables[1:]))
         object.__setattr__(self, 'traces',      _arr_to_tables_dict(banks.traces[1:]))
-        object.__setattr__(self, 'softsynths',  _arr_to_synths_dict(banks.softsynths[1:]))
+        object.__setattr__(self, 'softsynths',
+            _arr_to_synths_dict(banks.synth_waves[1:, :SOFTSYNTH_WIDTH]))
         object.__setattr__(self, 'grooves',
             banks.grooves[1:].reshape(NUM_GROOVES, STEPS_PER_GROOVE, 2))
         object.__setattr__(self, 'waveframes',
-            banks.waveframes[1:].reshape(NUM_SYNTHS, WAVES_PER_SYNTH, FRAMES_PER_WAVE))
+            banks.synth_waves[1:, SOFTSYNTH_WIDTH:].reshape(
+                NUM_SYNTHS, WAVES_PER_SYNTH, FRAMES_PER_WAVE
+            ))
         object.__setattr__(self, 'instr_alloc', banks.instrs_occupied[1:])
         object.__setattr__(self, 'table_alloc', banks.tables_occupied[1:])
         

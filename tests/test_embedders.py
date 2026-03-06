@@ -7,8 +7,9 @@ from pe_lsdj.embedding.base import (
     BaseEmbedder,
     DummyEmbedder,
     EnumEmbedder,
-    GatedNormedEmbedder,
     EntityEmbedder,
+    EntityType,
+    GatedNormedEmbedder,
     SumEmbedder,
     ConcatEmbedder,
 )
@@ -20,14 +21,13 @@ from pe_lsdj.embedding.fx import (
     TableEmbedder,
 )
 from pe_lsdj.embedding.instrument import (
-    SoftsynthEmbedder,
+    SynthWavesEmbedder,
     WaveframeEmbedder,
 )
 from pe_lsdj.embedding.song import (
     SongBanks,
     SongStepEmbedder,
     SequenceEmbedder,
-    set_banks,
 )
 from pe_lsdj.embedding.position import (
     SinusoidalPositionEncoding,
@@ -44,9 +44,15 @@ def _split(n):
 
 @pytest.fixture(scope="module")
 def song_step_embedder():
-    """Construct a full SongStepEmbedder with default (zero) banks."""
+    """Construct a full SongStepEmbedder (no banks stored at construction time)."""
     k = jr.PRNGKey(33)
     return SongStepEmbedder(k)
+
+
+@pytest.fixture(scope="module")
+def default_banks():
+    return SongBanks.default()
+
 
 # ===================================================================
 # Basic embedder class structures
@@ -75,13 +81,11 @@ def test_dummy_embedder_dims():
     assert e.out_dim == 64
 
 def test_entity_embedder_dims():
-    bank = jnp.zeros((10, 4))
-    inner = GatedNormedEmbedder(16, KEY, in_dim=4)
-    e = EntityEmbedder(bank, inner)
+    inner = GatedNormedEmbedder(16, KEY, in_dim=STEPS_PER_GROOVE * 2)
+    e = EntityEmbedder(EntityType.GROOVES, inner)
     assert e.in_dim == 1
     assert e.out_dim == 16
-    assert e.num_entities == 10
-    assert bank.shape[1] == e.embedder.in_dim
+    assert e.entity_type == EntityType.GROOVES
 
 # --- Aggregator offsets ---
 
@@ -123,34 +127,29 @@ def test_concat_embedder_projection_sharing():
 
 def test_fx_value_embedder_structure():
     k1, k2 = _split(2)
-    grooves = jnp.zeros((32, STEPS_PER_GROOVE * 2))
-    ge = GrooveEntityEmbedder(64, k1, grooves)
+    ge = GrooveEntityEmbedder(64, k1)
     subs = build_fx_value_embedders(64, k2, ge)
     dummy = DummyEmbedder(1, 64)
     e = FXValueEmbedder(dummy, subs)
     assert e.in_dim == FX_VALUES_FEATURE_DIM
     assert e.out_dim == 64
-    # All sub-embedder out_dims must be 64
     for sub in e.embedders.values():
         assert sub.out_dim == 64
 
 def test_fx_embedder_in_dim():
     k1, k2, k3 = _split(3)
-    grooves = jnp.zeros((32, STEPS_PER_GROOVE * 2))
-    ge = GrooveEntityEmbedder(64, k1, grooves)
+    ge = GrooveEntityEmbedder(64, k1)
     subs = build_fx_value_embedders(64, k2, ge)
     dummy = DummyEmbedder(1, 64)
     fxv = FXValueEmbedder(dummy, subs)
     fx = FXEmbedder(k3, fxv, 128)
-    # fx_cmd(1) + fx_value(17)
     assert fx.in_dim == 1 + fxv.in_dim
 
 # --- TableEmbedder weight sharing ---
 
 def test_table_embedder_fx_weight_sharing():
     k1, k2, k3, k4 = _split(4)
-    grooves = jnp.zeros((32, STEPS_PER_GROOVE * 2))
-    ge = GrooveEntityEmbedder(64, k1, grooves)
+    ge = GrooveEntityEmbedder(64, k1)
     subs = build_fx_value_embedders(64, k2, ge)
     dummy = DummyEmbedder(1, 64)
     fxv = FXValueEmbedder(dummy, subs)
@@ -160,8 +159,7 @@ def test_table_embedder_fx_weight_sharing():
 
 def test_table_embedder_in_dim_matches_table_width():
     k1, k2, k3, k4 = _split(4)
-    grooves = jnp.zeros((32, STEPS_PER_GROOVE * 2))
-    ge = GrooveEntityEmbedder(64, k1, grooves)
+    ge = GrooveEntityEmbedder(64, k1)
     subs = build_fx_value_embedders(64, k2, ge)
     dummy = DummyEmbedder(1, 64)
     fxv = FXValueEmbedder(dummy, subs)
@@ -169,35 +167,15 @@ def test_table_embedder_in_dim_matches_table_width():
     te = TableEmbedder(64, k4, fx_emb)
     assert te.in_dim == TABLE_WIDTH
 
-# --- SoftsynthEmbedder weight sharing ---
+# --- SynthWavesEmbedder weight sharing ---
 
-def test_softsynth_param_weight_sharing():
-    se = SoftsynthEmbedder(KEY)
-    assert se.embedders['start_params'] is se.embedders['end_params']
+def test_synth_waves_param_weight_sharing():
+    sw = SynthWavesEmbedder(KEY)
+    assert sw.embedders['start_params'] is sw.embedders['end_params']
 
-# --- Entity bank / inner embedder compatibility ---
-
-def test_entity_bank_compat(song_step_embedder):
-    # Instrument entity bank columns == InstrumentEmbedder.in_dim
-    ie = song_step_embedder.instrument_embedder
-    assert ie.entity_bank.shape[1] == ie.embedder.in_dim
-
-def test_table_entity_bank_compat(song_step_embedder):
-    # Table entity bank columns == TableEmbedder.in_dim
-    te = song_step_embedder.instrument_embedder.embedder.embedders['table']
-    assert te.entity_bank.shape[1] == te.embedder.in_dim
-
-def test_softsynth_entity_bank_compat(song_step_embedder):
-    se = song_step_embedder.instrument_embedder.embedder.embedders['softsynth']
-    assert se.entity_bank.shape[1] == se.embedder.in_dim
-
-def test_waveframe_entity_bank_compat(song_step_embedder):
-    we = song_step_embedder.instrument_embedder.embedder.embedders['waveframe']
-    assert we.entity_bank.shape[1] == we.embedder.in_dim
-
-def test_groove_entity_bank_compat(song_step_embedder):
-    ge = song_step_embedder.fx_embedder.embedders['value'].embedders['groove']
-    assert ge.entity_bank.shape[1] == ge.embedder.in_dim
+def test_synth_waves_embedder_in_dim():
+    sw = SynthWavesEmbedder(KEY)
+    assert sw.in_dim == SOFTSYNTH_WIDTH + WAVEFRAME_DIM
 
 # --- Two-tier table embedding projection sharing ---
 
@@ -253,11 +231,10 @@ class TestForwardPassShapes:
         assert out.shape == (64,)
         assert jnp.all(out == 0)
 
-    def test_entity_embedder(self):
-        bank = jnp.ones((10, 4))
-        inner = GatedNormedEmbedder(16, KEY, in_dim=4)
-        e = EntityEmbedder(bank, inner)
-        out = e(jnp.array([3]))
+    def test_entity_embedder(self, default_banks):
+        inner = GatedNormedEmbedder(16, KEY, in_dim=STEPS_PER_GROOVE * 2)
+        e = EntityEmbedder(EntityType.GROOVES, inner)
+        out = e(jnp.array([3]), default_banks)
         assert out.shape == (16,)
 
     # --- Aggregators ---
@@ -283,46 +260,42 @@ class TestForwardPassShapes:
 
     # --- FX chain ---
 
-    def test_fx_value_embedder(self):
+    def test_fx_value_embedder(self, default_banks):
         k1, k2 = _split(2)
-        grooves = jnp.ones((32, STEPS_PER_GROOVE * 2))
-        ge = GrooveEntityEmbedder(64, k1, grooves)
+        ge = GrooveEntityEmbedder(64, k1)
         subs = build_fx_value_embedders(64, k2, ge)
         dummy = DummyEmbedder(1, 64)
         e = FXValueEmbedder(dummy, subs)
         x = jnp.ones((e.in_dim,))
-        out = e(x)
+        out = e(x, default_banks)
         assert out.shape == (64,)
 
-    def test_fx_embedder(self):
+    def test_fx_embedder(self, default_banks):
         k1, k2, k3 = _split(3)
-        grooves = jnp.ones((32, STEPS_PER_GROOVE * 2))
-        ge = GrooveEntityEmbedder(64, k1, grooves)
+        ge = GrooveEntityEmbedder(64, k1)
         subs = build_fx_value_embedders(64, k2, ge)
         dummy = DummyEmbedder(1, 64)
         fxv = FXValueEmbedder(dummy, subs)
         e = FXEmbedder(k3, fxv, 128)
         x = jnp.ones((e.in_dim,))
-        out = e(x)
+        out = e(x, default_banks)
         assert out.shape == (128,)
 
-    def test_table_embedder(self):
+    def test_table_embedder(self, default_banks):
         k1, k2, k3, k4 = _split(4)
-        grooves = jnp.ones((32, STEPS_PER_GROOVE * 2))
-        ge = GrooveEntityEmbedder(64, k1, grooves)
+        ge = GrooveEntityEmbedder(64, k1)
         subs = build_fx_value_embedders(64, k2, ge)
         dummy = DummyEmbedder(1, 64)
         fxv = FXValueEmbedder(dummy, subs)
         fx_emb = FXEmbedder(k3, fxv, 64)
         e = TableEmbedder(64, k4, fx_emb)
         x = jnp.ones((e.in_dim,))
-        out = e(x)
+        out = e(x, default_banks)
         assert out.shape == (64,)
 
-    def test_phrase_fx_embedder(self):
+    def test_phrase_fx_embedder(self, default_banks):
         k1, k2, k3, k4, k5 = _split(5)
-        grooves = jnp.ones((32, STEPS_PER_GROOVE * 2))
-        ge = GrooveEntityEmbedder(64, k1, grooves)
+        ge = GrooveEntityEmbedder(64, k1)
         subs = build_fx_value_embedders(64, k2, ge)
 
         # Tier 0
@@ -331,20 +304,18 @@ class TestForwardPassShapes:
         fx0 = FXEmbedder(k3, fxv0, 128)
         te0 = TableEmbedder(64, k4, fx0)
 
-        # Phrase level: table entity at position 0
-        table_entity = EntityEmbedder(
-            jnp.ones((NUM_TABLES, TABLE_WIDTH)), te0,
-        )
+        # Phrase level: table entity
+        table_entity = EntityEmbedder(EntityType.TABLES, te0)
         fxv_phrase = FXValueEmbedder(table_entity, subs)
         e = FXEmbedder(k5, fxv_phrase, 128, _projection=fx0.projection)
         x = jnp.ones((e.in_dim,))
-        out = e(x)
+        out = e(x, default_banks)
         assert out.shape == (128,)
 
     # --- Instrument chain ---
 
-    def test_softsynth_embedder(self):
-        e = SoftsynthEmbedder(KEY)
+    def test_synth_waves_embedder(self):
+        e = SynthWavesEmbedder(KEY)
         x = jnp.ones((e.in_dim,))
         out = e(x)
         assert out.shape == (e.out_dim,)
@@ -357,39 +328,18 @@ class TestForwardPassShapes:
 
     # --- Full SongStepEmbedder ---
 
-    def test_song_step_embedder_zero(self, song_step_embedder):
+    def test_song_step_embedder_zero(self, song_step_embedder, default_banks):
         step = jnp.zeros((4, 21))
-        out = song_step_embedder(step)
+        out = song_step_embedder(step, default_banks)
         assert out.shape == (4, 256)
 
-    def test_song_step_embedder_nonzero(self, song_step_embedder):
+    def test_song_step_embedder_nonzero(self, song_step_embedder, default_banks):
         step = jnp.ones((4, 21))
-        out = song_step_embedder(step)
+        out = song_step_embedder(step, default_banks)
         assert out.shape == (4, 256)
         assert jnp.linalg.norm(out) > 0
-    
+
     # --- Null value behavior ---
-
-    def test_entity_embedder_null_entry_zero_index(self):
-        """With null_entry=True, index 0 feeds zeros to the inner embedder."""
-        bank = jnp.ones((10, 4))
-        inner = GatedNormedEmbedder(16, KEY, in_dim=4)
-        e = EntityEmbedder(bank, inner, null_entry=True)
-        out_null = e(jnp.array([0]))
-        # Index 0 → zero row → GatedNormedEmbedder gets all zeros → null gate
-        out_real = e(jnp.array([1]))
-        # Null output should differ from a real entity
-        assert not jnp.allclose(out_null, out_real)
-
-    def test_entity_embedder_null_entry_bank_size(self):
-        """null_entry=True prepends a zero row, increasing num_entities by 1."""
-        bank = jnp.ones((10, 4))
-        inner = GatedNormedEmbedder(16, KEY, in_dim=4)
-        e = EntityEmbedder(bank, inner, null_entry=True)
-        assert e.num_entities == 11
-        assert e.entity_bank.shape == (11, 4)
-        # Row 0 should be all zeros
-        assert jnp.all(e.entity_bank[0] == 0)
 
     def test_gated_normed_null_vs_active(self):
         """GatedNormedEmbedder: zero input (null) should differ from active input."""
@@ -402,7 +352,6 @@ class TestForwardPassShapes:
         """GatedNormedEmbedder: null input should have no continuous component."""
         e = GatedNormedEmbedder(16, KEY, in_dim=2, null_value=0, max_value=15)
         out_null = e(jnp.zeros((2,)))
-        # The gate embedding for event=0 plus zero continuous contribution
         gate_only = e.gate_embedder(jnp.array(0.0))
         assert jnp.allclose(out_null, gate_only)
 
@@ -429,31 +378,31 @@ class TestForwardPassShapes:
         soft_out = e(jnp.array([0, 0, 0, 1, 0], dtype=jnp.float32), soft=True)
         assert jnp.allclose(hard_out, soft_out, atol=1e-5)
 
-    def test_entity_embedder_soft_mode(self):
-        """EntityEmbedder soft mode: probability vector selects mixture of entities."""
-        bank = jnp.arange(30, dtype=jnp.float32).reshape(10, 3)
-        inner = GatedNormedEmbedder(16, KEY, in_dim=3)
-        e = EntityEmbedder(bank, inner)
-        probs = jnp.zeros(10).at[3].set(1.0)
-        out_soft = e(probs, soft=True)
-        out_hard = e(jnp.array([3]))
+    def test_entity_embedder_soft_mode(self, default_banks):
+        """EntityEmbedder soft mode: one-hot probs should match hard-index result."""
+        inner = GatedNormedEmbedder(16, KEY, in_dim=STEPS_PER_GROOVE * 2)
+        e = EntityEmbedder(EntityType.GROOVES, inner)
+        n = default_banks.grooves.shape[0]
+        probs = jnp.zeros(n).at[3].set(1.0)
+        out_soft = e(probs, default_banks, soft=True)
+        out_hard = e(jnp.array([3]), default_banks)
         assert out_soft.shape == (16,)
         assert jnp.allclose(out_soft, out_hard, atol=1e-5)
 
-    def test_entity_embedder_soft_mixture(self):
+    def test_entity_embedder_soft_mixture(self, default_banks):
         """Soft mode with uniform weights produces a valid embedding."""
-        bank = jnp.ones((10, 4))
-        inner = GatedNormedEmbedder(16, KEY, in_dim=4)
-        e = EntityEmbedder(bank, inner)
-        probs = jnp.ones(10) / 10.0
-        out = e(probs, soft=True)
+        inner = GatedNormedEmbedder(16, KEY, in_dim=STEPS_PER_GROOVE * 2)
+        e = EntityEmbedder(EntityType.GROOVES, inner)
+        n = default_banks.grooves.shape[0]
+        probs = jnp.ones(n) / n
+        out = e(probs, default_banks, soft=True)
         assert out.shape == (16,)
 
     def test_song_step_embedder_default_banks(self):
-        """SongStepEmbedder with no banks arg should produce valid output."""
+        """SongStepEmbedder should produce valid output with default banks."""
         step = jnp.zeros((4, 21))
         emb = SongStepEmbedder(jr.PRNGKey(99))
-        out = emb(step)
+        out = emb(step, SongBanks.default())
         assert out.shape == (4, 256)
 
     # --- Real data ---
@@ -461,8 +410,8 @@ class TestForwardPassShapes:
     def test_song_step_on_real_data(self, song_file):
         k = jr.PRNGKey(33)
         banks = SongBanks.from_songfile(song_file)
-        song_step_embedder = SongStepEmbedder(k, banks=banks)
-        out = song_step_embedder(song_file.song_tokens[0])
+        step_emb = SongStepEmbedder(k)
+        out = step_emb(song_file.song_tokens[0], banks)
         assert out.shape == (4, 256)
         assert jnp.linalg.norm(out) > 0
 
@@ -489,7 +438,6 @@ class TestSinusoidalPositionEncoding:
     def test_distinct_positions(self):
         enc = SinusoidalPositionEncoding(64)
         out = enc(jnp.arange(4))
-        # Each position should produce a unique vector
         for i in range(4):
             for j in range(i + 1, 4):
                 assert not jnp.allclose(out[i], out[j])
@@ -528,26 +476,25 @@ class TestChannelPositionEmbedder:
 
 class TestSequenceEmbedder:
 
-    def test_shape(self, song_step_embedder):
+    def test_shape(self, song_step_embedder, default_banks):
         seq_emb = SequenceEmbedder(song_step_embedder, KEY)
         tokens = jnp.zeros((32, 4, 21))
-        out = seq_emb(tokens)
+        out = seq_emb(tokens, default_banks)
         assert out.shape == (32, 4, 256)
 
     def test_on_real_data(self, song_file):
         k1, k2 = jr.split(jr.PRNGKey(33))
         banks = SongBanks.from_songfile(song_file)
-        step_emb = SongStepEmbedder(k1, banks=banks)
+        step_emb = SongStepEmbedder(k1)
         seq_emb = SequenceEmbedder(step_emb, k2)
-        # Embed first 32 steps
         tokens = song_file.song_tokens[:32]
-        out = seq_emb(tokens)
+        out = seq_emb(tokens, banks)
         assert out.shape == (32, 4, 256)
         assert jnp.linalg.norm(out) > 0
 
 
 # ===================================================================
-# Bank swapping
+# SongBanks
 # ===================================================================
 
 class TestSongBanks:
@@ -555,8 +502,7 @@ class TestSongBanks:
     def test_default_shapes(self):
         banks = SongBanks.default()
         assert banks.instruments.shape == (NUM_INSTRUMENTS + 1, INSTR_WIDTH)
-        assert banks.softsynths.shape == (NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)
-        assert banks.waveframes.shape == (NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)
+        assert banks.synth_waves.shape == (NUM_SYNTHS + 1, SOFTSYNTH_WIDTH + WAVEFRAME_DIM)
         assert banks.grooves.shape == (NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)
         assert banks.tables.shape == (NUM_TABLES + 1, TABLE_WIDTH)
         assert banks.traces.shape == (NUM_TABLES + 1, TABLE_WIDTH)
@@ -565,80 +511,61 @@ class TestSongBanks:
         banks = SongBanks.from_songfile(song_file)
         assert banks.instruments.shape == (NUM_INSTRUMENTS + 1, INSTR_WIDTH)
         assert banks.tables.shape == (NUM_TABLES + 1, TABLE_WIDTH)
+        assert banks.synth_waves.shape == (NUM_SYNTHS + 1, SOFTSYNTH_WIDTH + WAVEFRAME_DIM)
 
 
-class TestSetBanks:
+# ===================================================================
+# Runtime banks API
+# ===================================================================
 
-    def test_set_banks_changes_output(self, song_step_embedder):
-        """Swapping in non-zero banks should change the embedding output."""
+class TestRuntimeBanks:
+    """Banks are passed at call time — not stored in the model tree."""
+
+    def test_different_banks_produce_different_output(self, song_step_embedder):
+        """Calling with different banks should change the embedding output."""
         seq_emb = SequenceEmbedder(song_step_embedder, KEY)
         tokens = jnp.zeros((4, 4, 21))
 
-        out_before = seq_emb(tokens)
-
-        # Swap in banks with non-zero data
-        banks = SongBanks(
-            instruments=jnp.ones((NUM_INSTRUMENTS + 1, INSTR_WIDTH)),
-            softsynths=jnp.ones((NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)),
-            waveframes=jnp.ones((NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
-            grooves=jnp.ones((NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)),
-            tables=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
-            traces=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
-            synth_waves=jnp.ones((NUM_SYNTHS + 1, SOFTSYNTH_WIDTH + WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
+        banks_zero = SongBanks.default()
+        banks_ones = SongBanks(
+            instruments=jnp.ones((NUM_INSTRUMENTS + 1, INSTR_WIDTH), dtype=jnp.uint16),
+            grooves=jnp.ones((NUM_GROOVES + 1, STEPS_PER_GROOVE * 2), dtype=jnp.uint16),
+            tables=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH), dtype=jnp.uint16),
+            traces=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH), dtype=jnp.uint16),
+            synth_waves=jnp.ones((NUM_SYNTHS + 1, SOFTSYNTH_WIDTH + WAVEFRAME_DIM), dtype=jnp.uint16),
             instrs_occupied=jnp.zeros(NUM_INSTRUMENTS + 1, dtype=jnp.bool_),
             grooves_occupied=jnp.zeros(NUM_GROOVES + 1, dtype=jnp.bool_),
             tables_occupied=jnp.zeros(NUM_TABLES + 1, dtype=jnp.bool_),
             synths_occupied=jnp.zeros(NUM_SYNTHS + 1, dtype=jnp.bool_),
         )
-        seq_emb2 = seq_emb.with_banks(banks)
-        out_after = seq_emb2(tokens)
 
-        assert not jnp.allclose(out_before, out_after)
+        out_zero = seq_emb(tokens, banks_zero)
+        out_ones = seq_emb(tokens, banks_ones)
+        assert not jnp.allclose(out_zero, out_ones)
 
-    def test_set_banks_matches_direct_construction(self, song_file):
-        """set_banks should produce the same result as constructing with those banks."""
-        k1, k2 = jr.split(jr.PRNGKey(42))
-
-        # Direct construction with song banks
-        banks = SongBanks.from_songfile(song_file)
-        step_direct = SongStepEmbedder(k1, banks=banks)
-        seq_direct = SequenceEmbedder(step_direct, k2)
-
-        # Construction with defaults, then bank swap
-        step_default = SongStepEmbedder(k1)
-        seq_swapped = SequenceEmbedder(step_default, k2).with_banks(banks)
-
-        tokens = song_file.song_tokens[:8]
-        out_direct = seq_direct(tokens)
-        out_swapped = seq_swapped(tokens)
-        assert jnp.allclose(out_direct, out_swapped, atol=1e-5)
-
-    def test_set_banks_preserves_learned_params(self, song_step_embedder):
-        """Bank swapping should not change any learned parameters."""
+    def test_same_banks_deterministic(self, song_step_embedder, default_banks):
+        """Calling twice with the same banks produces identical output."""
         seq_emb = SequenceEmbedder(song_step_embedder, KEY)
+        tokens = jnp.zeros((4, 4, 21))
+        out1 = seq_emb(tokens, default_banks)
+        out2 = seq_emb(tokens, default_banks)
+        assert jnp.allclose(out1, out2)
 
-        banks = SongBanks(
-            instruments=jnp.ones((NUM_INSTRUMENTS + 1, INSTR_WIDTH)),
-            softsynths=jnp.ones((NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)),
-            waveframes=jnp.ones((NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
-            grooves=jnp.ones((NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)),
-            tables=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
-            traces=jnp.ones((NUM_TABLES + 1, TABLE_WIDTH)),
-            synth_waves=jnp.ones((NUM_SYNTHS + 1, SOFTSYNTH_WIDTH + WAVES_PER_SYNTH * FRAMES_PER_WAVE)),
-            instrs_occupied=jnp.zeros(NUM_INSTRUMENTS + 1, dtype=jnp.bool_),
-            grooves_occupied=jnp.zeros(NUM_GROOVES + 1, dtype=jnp.bool_),
-            tables_occupied=jnp.zeros(NUM_TABLES + 1, dtype=jnp.bool_),
-            synths_occupied=jnp.zeros(NUM_SYNTHS + 1, dtype=jnp.bool_),
-        )
-        seq_emb2 = seq_emb.with_banks(banks)
+    def test_banks_not_in_model_tree(self, song_step_embedder):
+        """No uint16 arrays (bank data) should appear in the model parameter tree."""
+        import jax
+        for leaf in jax.tree.leaves(song_step_embedder):
+            if hasattr(leaf, 'dtype'):
+                assert leaf.dtype != jnp.uint16, (
+                    f"uint16 leaf found in model tree (likely a leaked bank): {leaf.shape}"
+                )
 
-        # Channel projections should be identical
-        assert jnp.array_equal(
-            seq_emb.step_embedder.channel_projections,
-            seq_emb2.step_embedder.channel_projections,
-        )
-        # FX cmd embedding weights should be identical
-        assert jnp.array_equal(
-            seq_emb.step_embedder.fx_embedder.embedders['cmd'].projection.weight,
-            seq_emb2.step_embedder.fx_embedder.embedders['cmd'].projection.weight,
-        )
+    def test_on_real_data(self, song_file):
+        k1, k2 = jr.split(jr.PRNGKey(42))
+        banks = SongBanks.from_songfile(song_file)
+        step_emb = SongStepEmbedder(k1)
+        seq_emb = SequenceEmbedder(step_emb, k2)
+        tokens = song_file.song_tokens[:8]
+        out = seq_emb(tokens, banks)
+        assert out.shape == (8, 4, step_emb.per_ch_dim)
+        assert jnp.linalg.norm(out) > 0

@@ -51,6 +51,46 @@ def sample_crops(song_tokens: Array, crop_len: int, batch_size: int, key: Key):
     return inputs, targets
 
 
+def sample_crop(song_tokens: Array, crop_len: int, key: Key):
+    """
+    Sample random crop from one song's token sequence for teacher forcing.
+
+    song_tokens: (S, 4, 21)
+    Returns (inputs, targets):
+        inputs:  (B, 4, 21)
+        targets: (B, 4, 21)
+    """
+    S = song_tokens.shape[0]
+    max_start = S - crop_len  # need crop_len + 1 total steps for shift
+    start = jr.randint(key, (), 0, max_start)
+
+    full = jax.lax.dynamic_slice(
+        song_tokens, (start, 0, 0), (crop_len + 1, 4, 21)
+    )
+    return full[:-1], full[1:]
+
+
+def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key):
+    """Sample one crop per batch item, each from a randomly chosen song.
+    Returns (inputs, targets, batched_banks, idxs) where idxs is a JAX
+    int array of the selected song indices (useful for logging).
+    """
+    k1, k2 = jr.split(key)
+    idxs = jr.randint(k1, (batch_size,), 0, len(songs))
+    subkeys = jr.split(k2, batch_size)
+    crops = [
+        sample_crop(songs[i].song_tokens.astype(jnp.float32), crop_len, subkeys[j])
+        for j, i in enumerate(idxs)
+    ]
+    inputs = jnp.stack([c[0] for c in crops])
+    targets = jnp.stack([c[1] for c in crops])
+    batched_banks = jax.tree.map(
+        lambda *xs: jnp.stack(xs),
+        *[all_banks[i] for i in idxs],
+    )
+    return inputs, targets, batched_banks, idxs
+
+
 def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongBanks):
     """
     Teacher-forcing loss for one sequence: token CE + scalar entity CE + conditional entity CE.
@@ -60,7 +100,7 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
     banks:         SongBanks for the current song (null rows pre-included)
     Returns: scalar — mean loss per (channel × timestep)
     """
-    hiddens = model.encode(input_tokens)                          # (L, 4, d_model)
+    hiddens = model.encode(input_tokens, banks)                   # (L, 4, d_model)
     logits  = jax.vmap(jax.vmap(model.output_heads))(hiddens)    # dict of (L, 4, ...)
 
     # Token cross-entropy (note, fx_cmd, fx values, transpose)
@@ -94,10 +134,17 @@ def batch_loss(model, input_batch: Array, target_batch: Array, banks: SongBanks)
     return jnp.mean(losses)
 
 
+def multi_track_batch_loss(model, input_batch: Array, target_batch: Array, batched_banks: SongBanks):
+    """Cross-track/song batch loss:
+    Vmap over sequences and stacked banks pulled from distinct tracks"""
+    losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, 0))(model, input_batch, target_batch, batched_banks)
+    return jnp.mean(losses)
+
+
 @eqx.filter_jit
 def train_step(model, opt_state, optimizer, input_batch, target_batch, banks):
     """One gradient step. Returns (model, opt_state, loss)."""
-    loss, grads = eqx.filter_value_and_grad(batch_loss)(
+    loss, grads = eqx.filter_value_and_grad(multi_track_batch_loss)(
         model, input_batch, target_batch, banks
     )
     updates, opt_state = optimizer.update(grads, opt_state, model)
@@ -118,10 +165,10 @@ def train(
     checkpoint_path: str | None = None,
 ):
     """
-    Per-song batching training loop.
+    Multi-song batching training loop.
 
-    Each step picks a song (round-robin), swaps entity banks,
-    samples random crops, and runs one gradient step.
+    Each step samples one crop per batch item from a randomly chosen song,
+    stacks per-song banks, and runs one gradient step.
     """
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
@@ -169,21 +216,14 @@ def train(
 
     # Pre-compute banks for each song
     all_banks = [SongBanks.from_songfile(sf) for sf in songs]
-    all_tokens = [sf.song_tokens.astype(jnp.float32) for sf in songs]
 
     for step in range(num_steps):
         key, k_crop = jr.split(key)
 
-        # Pick song (round-robin)
-        song_idx = step % len(songs)
-        tokens = all_tokens[song_idx]
-        banks = all_banks[song_idx]
-
-        # Swap entity banks
-        model = model.with_banks(banks)
-
-        # Sample crops
-        inputs, targets = sample_crops(tokens, crop_len, batch_size, k_crop)
+        # Sample multi-song batch
+        inputs, targets, banks, batch_idxs = make_multi_track_batch(
+            songs, all_banks, batch_size, crop_len, k_crop,
+        )
 
         # Gradient step
         model, opt_state, loss = train_step(
@@ -191,12 +231,13 @@ def train(
         )
 
         if step % log_every == 0:
-            song_name = songs[song_idx].name
-            print(f"step {step:5d} | song {song_name} | loss {loss:.4f}")
+            batch_names = [songs[i].name for i in batch_idxs.tolist()]
+            names_str = ','.join(batch_names)
+            print(f"step {step:5d} | {names_str} | loss {loss:.4f}")
             if checkpoint_path is not None:
                 ckpt_file = os.path.join(session_path, f"step_{step:06d}.eqx")
                 eqx.tree_serialise_leaves(ckpt_file, model)
-                g.write(f"{step:5d},{song_name},{loss:.4f}\n") # TODO maybe log (step, loss) as csv?
+                g.write(f"{step:5d},{names_str},{loss:.4f}\n")
 
     if checkpoint_path is not None:
         g.close()

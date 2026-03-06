@@ -125,7 +125,7 @@ def _build_softsynth(logits, key) -> Array:
     Sample softsynth parameters and waveframes from predicted logits.
 
     logits: dict with keys 'cat', 'cont', 'waveframes' (output of SoftSynthDecoder)
-    Returns (synth_row, waveframe_row) — both uint8 arrays.
+    Returns a single synth_waves row: concat([synth_params, waveframe_data]).
     """
     synth_row = jnp.zeros(SOFTSYNTH_WIDTH, dtype=jnp.uint16)
     keys = jr.split(key, len(_SOFTSYNTH_CAT_GROUPS))
@@ -145,7 +145,7 @@ def _build_softsynth(logits, key) -> Array:
         jax.nn.sigmoid(logits['waveframes']) * 15.0
     ).astype(jnp.uint16)
 
-    return synth_row, waveframe_row
+    return jnp.concatenate([synth_row, waveframe_row])
 
 
 # Column offsets in a flat TABLE_WIDTH row.
@@ -555,13 +555,9 @@ def match_softsynth(
     )
 
     def _create_new_synth():
-        synth_row, wf_row = _build_softsynth(softsynth_preds, key)
+        synth_waves_row = _build_softsynth(softsynth_preds, key)
         return banks._replace(
-            softsynths=banks.softsynths.at[synth_id].set(synth_row),
-            waveframes=banks.waveframes.at[synth_id].set(wf_row),
-            synth_waves=banks.synth_waves.at[synth_id].set(
-                jnp.concatenate([synth_row, wf_row])
-            ),
+            synth_waves=banks.synth_waves.at[synth_id].set(synth_waves_row),
             synths_occupied=banks.synths_occupied.at[synth_id].set(True),
         )
 
@@ -803,7 +799,7 @@ def generate_step(
     """
     input_tokens, banks_in = carry
 
-    hiddens                   = model.encode(input_tokens)                    # (S, 4, d_model)
+    hiddens                   = model.encode(input_tokens, banks_in)           # (S, 4, d_model)
     last                      = hiddens[-1]                                   # (4, d_model)
     logits_dict, latents      = jax.vmap(model.output_heads.generation_outputs)(last)
 

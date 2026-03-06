@@ -2,9 +2,18 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-from itertools import accumulate
+from enum import Enum
 from jaxtyping import Array
 from pe_lsdj.constants import *
+
+
+class EntityType(str, Enum):
+    """Names the SongBanks field each EntityEmbedder should look up at call time."""
+    INSTRUMENTS = 'instruments'
+    GROOVES     = 'grooves'
+    TABLES      = 'tables'
+    TRACES      = 'traces'
+    SYNTH_WAVES = 'synth_waves'
 
 
 class BaseEmbedder(eqx.Module):
@@ -33,7 +42,7 @@ class EnumEmbedder(BaseEmbedder):
             key=key,
         )
 
-    def __call__(self, x, soft: bool=False):
+    def __call__(self, x, _banks=None, soft: bool = False):
         x = jnp.squeeze(x)
         soft_hot = _soft_hot(x, self.vocab_size, soft)
         return self.projection(soft_hot)
@@ -73,7 +82,7 @@ class GatedNormedEmbedder(BaseEmbedder):
             key=k2,
         )
 
-    def __call__(self, x):
+    def __call__(self, x, _banks=None):
         valid_event = jnp.all(
             (x > self.null_value) & (x <= self.max_value + 1)
         ).astype(jnp.float32)
@@ -96,38 +105,25 @@ class EntityEmbedder(BaseEmbedder):
     """
     Grabs one of a bank of discrete entities by ID
     (or using a soft mixture), and embeds it.
+
+    Banks are passed at call time via a SongBanks argument; this embedder
+    looks up the right field using entity_type (an EntityType enum value).
+    Banks are expected to be null-prepended (index 0 = zero sentinel row).
     """
-    entity_bank: Array
-    num_entities: int
+    entity_type: EntityType
     embedder: eqx.Module
-    null_entry: bool
 
-    def __init__(self, entity_bank, embedder, null_entry=False):
-        """
-        null_entry: if True, prepends a zero row so that index 0
-        maps to a zero vector.  Tokens are assumed to already carry
-        a +1 offset (0 = null).
-        """
-        self.null_entry = null_entry
-        entity_dim = entity_bank.shape[-1]
-        entity_bank = jnp.concatenate(
-            [jnp.zeros((1, entity_dim), entity_bank.dtype), entity_bank],
-            axis=0
-        ) if null_entry else entity_bank
-
-        self.entity_bank = entity_bank
+    def __init__(self, entity_type: EntityType, embedder):
+        self.entity_type = entity_type
         self.embedder = embedder
-
-        self.num_entities = entity_bank.shape[0]
         self.in_dim = 1
         self.out_dim = embedder.out_dim
 
-    def __call__(self, x, soft: bool=False):
+    def __call__(self, x, banks, soft: bool = False):
+        bank = getattr(banks, self.entity_type)
         x = jnp.squeeze(x)
-        soft_hot = _soft_hot(x, self.num_entities, soft)
-        return self.embedder(
-            soft_hot @ self.entity_bank
-        )
+        soft_hot = _soft_hot(x, bank.shape[0], soft)
+        return self.embedder(soft_hot @ bank, banks)
 
 
 def _offsets(embedders):
@@ -157,9 +153,9 @@ class SumEmbedder(BaseEmbedder):
         self.in_dim = sum(e.in_dim for e in embedders.values())
         self.out_dim = out_dims[0]
 
-    def __call__(self, x):
+    def __call__(self, x, banks=None):
         embeddings = [
-            e(x[self.offsets[name]:self.offsets[name] + e.in_dim])
+            e(x[self.offsets[name]:self.offsets[name] + e.in_dim], banks)
             for name, e in self.embedders.items()
         ]
         return jax.tree.reduce(jnp.add, embeddings)
@@ -190,9 +186,9 @@ class ConcatEmbedder(BaseEmbedder):
                 key=key,
             )
 
-    def __call__(self, x):
+    def __call__(self, x, banks=None):
         embeddings = jnp.concatenate([
-            e(x[self.offsets[name]:self.offsets[name] + e.in_dim])
+            e(x[self.offsets[name]:self.offsets[name] + e.in_dim], banks)
             for name, e in self.embedders.items()
         ])
         return self.projection(embeddings)
@@ -203,5 +199,5 @@ class DummyEmbedder(BaseEmbedder):
         self.in_dim = in_dim
         self.out_dim = out_dim
 
-    def __call__(self, _x):
+    def __call__(self, _x, _banks=None):
         return jnp.zeros(self.out_dim)

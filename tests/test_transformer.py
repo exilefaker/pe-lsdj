@@ -246,12 +246,13 @@ class TestHardTargetsAndLoss:
                                  softsynth_entity_dim=ENTITY_DIM,
                                  num_heads_t=2, num_heads_c=2, num_blocks=1,
                                  instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
-                                 value_out_dim=ENTITY_DIM, softsynth_dim=ENTITY_DIM)
+                                 value_out_dim=ENTITY_DIM, synth_waves_dim=ENTITY_DIM)
         L = 4
+        banks   = SongBanks.default()
         tokens  = jnp.zeros((L, 4, 21), dtype=jnp.float32)
-        hiddens = model.encode(tokens)                  # (L, 4, D_MODEL)
+        hiddens = model.encode(tokens, banks)            # (L, 4, D_MODEL)
         loss    = conditional_entity_loss(
-            model.output_heads, hiddens, tokens, SongBanks.default()
+            model.output_heads, hiddens, tokens, banks
         )
         assert jnp.isfinite(loss)
 
@@ -262,12 +263,13 @@ class TestHardTargetsAndLoss:
                                  softsynth_entity_dim=ENTITY_DIM,
                                  num_heads_t=2, num_heads_c=2, num_blocks=1,
                                  instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
-                                 value_out_dim=ENTITY_DIM, softsynth_dim=ENTITY_DIM)
+                                 value_out_dim=ENTITY_DIM, synth_waves_dim=ENTITY_DIM)
         L = 4
+        banks   = SongBanks.default()
         tokens  = jnp.zeros((L, 4, 21), dtype=jnp.float32)
-        hiddens = model.encode(tokens)
+        hiddens = model.encode(tokens, banks)
         loss    = conditional_entity_loss(
-            model.output_heads, hiddens, tokens, SongBanks.default()
+            model.output_heads, hiddens, tokens, banks
         )
         # Default banks have null (all-zero) rows; groove/trace ids in null rows are 0
         assert loss == 0.0
@@ -283,60 +285,64 @@ class TestLSDJTransformer:
             softsynth_entity_dim=ENTITY_DIM,
             num_heads_t=2, num_heads_c=2, num_blocks=2,
             instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
-            value_out_dim=ENTITY_DIM, softsynth_dim=ENTITY_DIM,
+            value_out_dim=ENTITY_DIM, synth_waves_dim=ENTITY_DIM,
         )
 
-    def test_output_token_keys(self, model):
-        out = model(jnp.zeros((8, 4, 21)))
+    @pytest.fixture(scope="class")
+    def banks(self):
+        return SongBanks.default()
+
+    def test_output_token_keys(self, model, banks):
+        out = model(jnp.zeros((8, 4, 21)), banks)
         for name in TOKEN_HEADS:
             assert name in out
 
-    def test_output_entity_keys(self, model):
-        out = model(jnp.zeros((8, 4, 21)))
+    def test_output_entity_keys(self, model, banks):
+        out = model(jnp.zeros((8, 4, 21)), banks)
         assert 'instr' in out
         assert 'table' in out
         assert 'groove' in out
 
-    def test_token_head_shapes(self, model):
+    def test_token_head_shapes(self, model, banks):
         S = 8
-        out = model(jnp.zeros((S, 4, 21)))
+        out = model(jnp.zeros((S, 4, 21)), banks)
         for name, (pos, vocab) in TOKEN_HEADS.items():
             assert out[name].shape == (S, 4, vocab), f"{name}: expected ({S},4,{vocab})"
 
-    def test_instr_cat_shape(self, model):
+    def test_instr_cat_shape(self, model, banks):
         S = 8
-        out = model(jnp.zeros((S, 4, 21)))
+        out = model(jnp.zeros((S, 4, 21)), banks)
         assert out['instr']['cat'].shape == (S, 4, INSTR_SCALAR_CAT_TOTAL_VOCAB)
 
-    def test_instr_table_shape(self, model):
+    def test_instr_table_shape(self, model, banks):
         S = 8
-        out = model(jnp.zeros((S, 4, 21)))
+        out = model(jnp.zeros((S, 4, 21)), banks)
         t = out['instr']['table']
         assert set(t.keys()) == {'cat', 'cont'}
         assert t['cat'].shape  == (S, 4, TABLE_SCALAR_CAT_TOTAL_VOCAB)
         assert t['cont'].shape == (S, 4, TABLE_SCALAR_CONT_N)
 
-    def test_phrase_groove_shape(self, model):
+    def test_phrase_groove_shape(self, model, banks):
         S = 8
-        out = model(jnp.zeros((S, 4, 21)))
+        out = model(jnp.zeros((S, 4, 21)), banks)
         assert out['groove'].shape == (S, 4, GROOVE_CONT_N)
 
-    def test_waveframe_shape(self, model):
+    def test_waveframe_shape(self, model, banks):
         S = 8
-        out = model(jnp.zeros((S, 4, 21)))
+        out = model(jnp.zeros((S, 4, 21)), banks)
         assert out['instr']['softsynth']['waveframes'].shape == (S, 4, WAVEFRAME_DIM)
 
     def test_default_banks(self):
         model = LSDJTransformer(jr.PRNGKey(42), d_model=D_MODEL, num_heads_t=2,
                                 num_heads_c=1, num_blocks=1)
-        out = model(jnp.zeros((4, 4, 21)))
+        out = model(jnp.zeros((4, 4, 21)), SongBanks.default())
         assert out['note'].shape == (4, 4, NUM_NOTES)
 
-    def test_with_banks_no_crash(self, model):
-        new_model = model.with_banks(SongBanks.default())
-        out = new_model(jnp.zeros((4, 4, 21)))
+    def test_with_banks_no_crash(self, model, banks):
+        """Runtime banks: model call with banks should produce correct output shape."""
+        out = model(jnp.zeros((4, 4, 21)), banks)
         assert out['note'].shape == (4, 4, NUM_NOTES)
 
-    def test_encode_shape(self, model):
-        hiddens = model.encode(jnp.zeros((8, 4, 21)))
+    def test_encode_shape(self, model, banks):
+        hiddens = model.encode(jnp.zeros((8, 4, 21)), banks)
         assert hiddens.shape == (8, 4, D_MODEL)

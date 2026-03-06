@@ -9,6 +9,7 @@ from pe_lsdj.constants import *
 from pe_lsdj.embedding.base import (
     DummyEmbedder,
     EntityEmbedder,
+    EntityType,
     GatedNormedEmbedder,
 )
 from pe_lsdj.embedding.fx import (
@@ -20,8 +21,7 @@ from pe_lsdj.embedding.fx import (
 )
 from pe_lsdj.embedding.instrument import (
     InstrumentEntityEmbedder,
-    SoftsynthEntityEmbedder,
-    WaveFrameEntityEmbedder,
+    SynthWavesEntityEmbedder,
 )
 from pe_lsdj.embedding.position import (
     SinusoidalPositionEncoding,
@@ -41,12 +41,10 @@ class SongBanks(NamedTuple):
     embedders and the entity parameter loss.
     """
     instruments: Array   # (NUM_INSTRUMENTS + 1, INSTR_WIDTH)
-    softsynths: Array    # (NUM_SYNTHS + 1, SOFTSYNTH_WIDTH)
-    waveframes: Array    # (NUM_SYNTHS + 1, WAVES_PER_SYNTH * FRAMES_PER_WAVE)
     grooves: Array       # (NUM_GROOVES + 1, STEPS_PER_GROOVE * 2)
     tables: Array        # (NUM_TABLES + 1, TABLE_WIDTH)
     traces: Array        # (NUM_TABLES + 1, TABLE_WIDTH)
-    synth_waves: Array    # (NUM_SYNTHS + 1, SOFTSYNTH_WIDTH + WAVES_PER_SYNTH * FRAMES_PER_WAVE)
+    synth_waves: Array   # (NUM_SYNTHS + 1, SOFTSYNTH_WIDTH + WAVES_PER_SYNTH * FRAMES_PER_WAVE)
     instrs_occupied: Array   # (NUM_INSTRUMENTS + 1,) bool — index 0 always False (null sentinel)
     grooves_occupied: Array  # (NUM_GROOVES + 1,) bool
     tables_occupied: Array   # (NUM_TABLES + 1,) bool
@@ -61,8 +59,6 @@ class SongBanks(NamedTuple):
             return jnp.zeros(n + 1, dtype=jnp.bool_)
         return cls(
             instruments=_z(NUM_INSTRUMENTS, INSTR_WIDTH),
-            softsynths=_z(NUM_SYNTHS, SOFTSYNTH_WIDTH),
-            waveframes=_z(NUM_SYNTHS, WAVES_PER_SYNTH * FRAMES_PER_WAVE),
             grooves=_z(NUM_GROOVES, STEPS_PER_GROOVE * 2),
             tables=_z(NUM_TABLES, TABLE_WIDTH),
             traces=_z(NUM_TABLES, TABLE_WIDTH),
@@ -91,8 +87,6 @@ class SongBanks(NamedTuple):
 
         return cls(
             instruments=_prepend(songfile.instruments_array),
-            softsynths=_prepend(songfile.softsynths_array),
-            waveframes=_prepend(songfile.waveframes_array),
             grooves=_prepend(songfile.grooves_array),
             tables=_prepend(songfile.tables_array),
             traces=_prepend(songfile.traces_array),
@@ -114,51 +108,6 @@ class SongBanks(NamedTuple):
         )
 
 
-def _augment_instruments(instruments):
-    """Append softsynth_id column as waveframe reference (null row preserved)."""
-    waveframe_ref = instruments[:, InstrumentEntityEmbedder.SOFTSYNTH_COL:
-                                   InstrumentEntityEmbedder.SOFTSYNTH_COL + 1]
-    return jnp.concatenate([instruments, waveframe_ref], axis=1)
-
-
-def set_banks(step_embedder, banks: SongBanks):
-    """
-    Swap all per-song entity banks in a SongStepEmbedder.
-
-    All banks in SongBanks are already null-prepended (index 0 = NULL
-    sentinel), so no further augmentation is needed here.
-
-    Uses id()-based leaf replacement to correctly handle shared references
-    (grooves across tiers, tables between FX/instrument chains, fx1/fx2
-    weight sharing, tier projection sharing, etc.).  Learned params stay
-    shared; each bank is replaced at every occurrence.
-    """
-    replacements = {
-        id(step_embedder.instrument_embedder.entity_bank):
-            _augment_instruments(banks.instruments),
-        id(step_embedder.instrument_embedder.embedder
-           .embedders['softsynth'].entity_bank):
-            banks.softsynths,
-        id(step_embedder.instrument_embedder.embedder
-           .embedders['waveframe'].entity_bank):
-            banks.waveframes,
-        id(step_embedder.fx_embedder.embedders['value']
-           .embedders['table_fx'].entity_bank):
-            banks.tables,
-        id(step_embedder.fx_embedder.embedders['value']
-           .embedders['table_fx'].embedder.embedders['fx1']
-           .embedders['value'].embedders['table_fx'].entity_bank):
-            banks.traces,
-        id(step_embedder.fx_embedder.embedders['value']
-           .embedders['groove'].entity_bank):
-            banks.grooves,
-    }
-
-    leaves, treedef = jax.tree.flatten(step_embedder)
-    new_leaves = [replacements.get(id(leaf), leaf) for leaf in leaves]
-    return treedef.unflatten(new_leaves)
-
-
 class SongStepEmbedder(eqx.Module):
     """
     Embedder for one step of an LSDJ track:
@@ -176,8 +125,11 @@ class SongStepEmbedder(eqx.Module):
             (no A commands possible here)
       Within-table: EntityEmbedder over traces bank for TABLE_FX
             (tables can be used, but not recursively)
-      Phrase/instrument-level:  EntityEmbedder over tables bank
+      Phrase/instrument-level: EntityEmbedder over tables bank
             (full table representation)
+
+    Banks are passed at call time (not stored in the model tree),
+    enabling correct per-item batching across songs.
 
     Output: (4 * per_ch_dim,) = (out_dim,)
     """
@@ -196,7 +148,6 @@ class SongStepEmbedder(eqx.Module):
         self,
         key: Key,
         *,
-        banks: SongBanks | None = None,
         out_dim: int = 1024,
         note_dim: int = 128,
         instr_dim: int = 128,
@@ -204,23 +155,13 @@ class SongStepEmbedder(eqx.Module):
         table_dim: int = 64,
         transpose_dim: int = 16,
         value_out_dim: int = 64,
-        softsynth_dim: int = 64,
-        waveframe_dim: int = 32,
+        synth_waves_dim: int = 64,
     ):
-        if banks is None:
-            banks = SongBanks.default()
-        instruments = banks.instruments
-        softsynths = banks.softsynths
-        waveframes = banks.waveframes
-        grooves = banks.grooves
-        tables = banks.tables
-        traces = banks.traces
-
         assert out_dim % 4 == 0, f"out_dim must be divisible by 4, got {out_dim}"
         per_ch_dim = out_dim // 4
         self.per_ch_dim = per_ch_dim
 
-        keys = jr.split(key, 14)
+        keys = jr.split(key, 12)
 
         # --- Note ---
         self.note_embedder = GatedNormedEmbedder(
@@ -230,11 +171,7 @@ class SongStepEmbedder(eqx.Module):
         )
 
         # --- Shared FX value sub-embedders (positions 1..11) ---
-        groove_embedder = GrooveEntityEmbedder(
-            value_out_dim,
-            keys[1],
-            grooves,
-        )
+        groove_embedder = GrooveEntityEmbedder(value_out_dim, keys[1])
         shared_embedders = build_fx_value_embedders(value_out_dim, keys[2], groove_embedder)
 
         # --- Tier 0: base table embedder (DummyEmbedder for TABLE_FX) ---
@@ -244,50 +181,34 @@ class SongStepEmbedder(eqx.Module):
         table_embedder_0 = TableEmbedder(table_dim, keys[4], fx0)
 
         # --- Tier 1: trace entity for TABLE_FX ---
-        trace_embedder = EntityEmbedder(traces, table_embedder_0)
+        trace_embedder = EntityEmbedder(EntityType.TRACES, table_embedder_0)
         fxv1 = FXValueEmbedder(trace_embedder, shared_embedders)
         fx1 = FXEmbedder(keys[5], fxv1, fx_dim, _projection=fx0.projection)
         table_table_embedder = TableEmbedder(table_dim, keys[6], fx1, _projection=table_embedder_0.projection)
 
         # --- Phrase/instr level: table entity for TABLE_FX ---
-        table_embedder = EntityEmbedder(tables, table_table_embedder)
+        table_embedder = EntityEmbedder(EntityType.TABLES, table_table_embedder)
         fxv_phrase = FXValueEmbedder(table_embedder, shared_embedders)
         self.fx_embedder = FXEmbedder(
             keys[7], fxv_phrase, fx_dim, _projection=fx0.projection,
         )
 
         # --- Instrument ---
-        softsynth_embedder = SoftsynthEntityEmbedder(
-            keys[8],
-            softsynths,
-            softsynth_dim,
-        )
-
-        waveframe_embedder = WaveFrameEntityEmbedder(
-            keys[9],
-            waveframes,
-            waveframe_dim,
-        )
-
+        synth_waves_embedder = SynthWavesEntityEmbedder(keys[8], synth_waves_dim)
         self.instrument_embedder = InstrumentEntityEmbedder(
-            keys[10],
-            instruments,
+            keys[9],
             table_embedder,
-            softsynth_embedder,
-            waveframe_embedder,
+            synth_waves_embedder,
             instr_dim,
         )
 
         # --- Transpose ---
-        self.transpose_embedder = GatedNormedEmbedder(
-            transpose_dim,
-            keys[11],
-        )
+        self.transpose_embedder = GatedNormedEmbedder(transpose_dim, keys[10])
 
         # --- Per-channel projections (stacked for vmap) ---
         concat_dim = note_dim + instr_dim + fx_dim + transpose_dim
 
-        proj_keys = jr.split(keys[12], 4)
+        proj_keys = jr.split(keys[11], 4)
         self.channel_projections = jnp.stack([
             jr.normal(k, (per_ch_dim, concat_dim)) / jnp.sqrt(concat_dim)
             for k in proj_keys
@@ -295,48 +216,41 @@ class SongStepEmbedder(eqx.Module):
 
         self.out_dim = out_dim
 
-    def _embed_one_channel(self, note, instr_id, fx_data, transpose):
+    def _embed_one_channel(self, note, instr_id, fx_data, transpose, banks):
         """Shared sub-embedders → concatenated feature vector."""
         return jnp.concatenate([
             self.note_embedder(note),
-            self.instrument_embedder(instr_id),
-            self.fx_embedder(fx_data),
+            self.instrument_embedder(instr_id, banks),
+            self.fx_embedder(fx_data, banks),
             self.transpose_embedder(transpose),
         ])  # (concat_dim,)
 
-    def __call__(self, step):
+    def __call__(self, step, banks):
         """
-        step: (4, 21) — one timestep across all channels
-        Returns: (4, per_ch_dim) — structured per-channel embeddings
+        step:  (4, 21) — one timestep across all channels
+        banks: SongBanks for the current song
+        Returns: (4, per_ch_dim)
         """
-        # Embed each channel with shared weights → (4, concat_dim)
         channel_embs = jnp.stack([
             self._embed_one_channel(
                 step[ch, 0:1],     # note
                 step[ch, 1:2],     # instr_id
                 step[ch, 2:20],    # fx_cmd + fx_vals (18 values)
                 step[ch, 20:21],   # transpose
+                banks,
             )
             for ch in range(4)
         ])
 
         # Per-channel projection via vmap: (4, per_ch_dim)
         return jax.vmap(jnp.dot)(self.channel_projections, channel_embs)
-    
-    @classmethod
-    def from_songfile(cls, key: Key, songfile: SongFile, **kwargs):
-        return cls(
-            key,
-            banks=SongBanks.from_songfile(songfile),
-            **kwargs,
-        )
 
 
 class SequenceEmbedder(eqx.Module):
     """
     Full sequence embedding: content + positional encodings.
 
-    Input:  song_tokens (S, 4, 21)
+    Input:  song_tokens (S, 4, 21), banks: SongBanks
     Output: (S, 4, per_ch_dim)
     """
     step_embedder: SongStepEmbedder
@@ -353,24 +267,19 @@ class SequenceEmbedder(eqx.Module):
         self.channel_position = ChannelPositionEmbedder(d, k2)
 
     @classmethod
-    def create(cls, key: Key, *, banks: SongBanks | None = None, **step_kwargs):
+    def create(cls, key: Key, **step_kwargs):
         k1, k2 = jr.split(key)
-        step = SongStepEmbedder(k1, banks=banks, **step_kwargs)
+        step = SongStepEmbedder(k1, **step_kwargs)
         return cls(step, k2)
 
-    def with_banks(self, banks: SongBanks):
-        """Return a new SequenceEmbedder with swapped entity banks."""
-        new_step = set_banks(self.step_embedder, banks)
-        return eqx.tree_at(lambda m: m.step_embedder, self, new_step)
-
-    def __call__(self, song_tokens):
+    def __call__(self, song_tokens, banks):
         S = song_tokens.shape[0]
-        content = jax.vmap(self.step_embedder)(song_tokens)   # (S, 4, d)
+        content = jax.vmap(lambda step: self.step_embedder(step, banks))(song_tokens)  # (S, 4, d)
         global_pos = self.global_position(jnp.arange(S))      # (S, d)
         phrase_pos = self.phrase_position(
             jnp.arange(S) % STEPS_PER_PHRASE
-        )                                                     # (S, d)
-        channel_pos = self.channel_position()                 # (4, d)
+        )                                                      # (S, d)
+        channel_pos = self.channel_position()                  # (4, d)
         return (
             content
             + global_pos[:, None, :]

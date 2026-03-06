@@ -410,18 +410,18 @@ def entity_alignment_loss(model, hiddens, target_tokens, banks):
     groove_q     = jax.vmap(lambda ctx: heads.groove_decoder.encode(ctx, N_GROOVE_SLOTS))(groove_ctx) # (T, table_entity_dim)
 
     # Embedder-side keys
-    instr_emb   = step_emb.instrument_embedder
-    table_emb   = step_emb.fx_embedder.embedders['value'].embedders['table_fx']
-    synth_emb   = step_emb.instrument_embedder.embedder.embedders['softsynth']
-    groove_emb  = step_emb.fx_embedder.embedders['value'].embedders['groove']
+    instr_emb  = step_emb.instrument_embedder
+    table_emb  = step_emb.fx_embedder.embedders['value'].embedders['table_fx']
+    synth_emb  = step_emb.instrument_embedder.embedder.embedders['synth_wave']
+    groove_emb = step_emb.fx_embedder.embedders['value'].embedders['groove']
 
     groove_ids = t_flat[:, ENTITY_HEADS['groove_id']]             # (T,)
 
-    instr_k    = jax.vmap(instr_emb)(instr_ids)         # (T, entity_dim)
-    it_table_k = jax.vmap(table_emb)(it_table_ids)      # (T, entity_dim)
-    pt_table_k = jax.vmap(table_emb)(pt_ids)            # (T, entity_dim)
-    synth_k    = jax.vmap(synth_emb)(it_softsynth_ids)  # (T, entity_dim)
-    groove_k   = jax.vmap(groove_emb)(groove_ids)        # (T, entity_dim)
+    instr_k    = jax.vmap(lambda x: instr_emb(x, banks))(instr_ids)         # (T, entity_dim)
+    it_table_k = jax.vmap(lambda x: table_emb(x, banks))(it_table_ids)      # (T, entity_dim)
+    pt_table_k = jax.vmap(lambda x: table_emb(x, banks))(pt_ids)            # (T, entity_dim)
+    synth_k    = jax.vmap(lambda x: synth_emb(x, banks))(it_softsynth_ids)  # (T, entity_dim)
+    groove_k   = jax.vmap(lambda x: groove_emb(x, banks))(groove_ids)       # (T, entity_dim)
 
     def _cos_loss(a, b):
         sim = jnp.dot(a, b) / (jnp.linalg.norm(a) + 1e-8) / (jnp.linalg.norm(b) + 1e-8)
@@ -497,7 +497,6 @@ class LSDJTransformer(eqx.Module):
         num_heads_t: int = 4,
         num_heads_c: int = 2,
         num_blocks: int = 6,
-        banks: SongBanks | None = None,
         **embedder_kwargs,
     ):
         self.metadata = {
@@ -505,7 +504,7 @@ class LSDJTransformer(eqx.Module):
             "instr_entity_dim": instr_entity_dim,
             "table_entity_dim": table_entity_dim,
             "softsynth_entity_dim": softsynth_entity_dim,
-            "num_heads_t": num_heads_t, 
+            "num_heads_t": num_heads_t,
             "num_heads_c": num_heads_c,
             "num_blocks": num_blocks,
             "embedder": {k: v for k, v in embedder_kwargs.items() if isinstance(v, int)},
@@ -513,7 +512,7 @@ class LSDJTransformer(eqx.Module):
         keys = jr.split(key, num_blocks + 3)
         self.d_model = d_model
         self.embedder = SequenceEmbedder.create(
-            keys[0], banks=banks, out_dim=d_model * 4, **embedder_kwargs,
+            keys[0], out_dim=d_model * 4, **embedder_kwargs,
         )
         self.blocks = [
             AxialTransformerBlock(d_model, num_heads_t, num_heads_c, keys[i + 1])
@@ -522,20 +521,16 @@ class LSDJTransformer(eqx.Module):
         self.final_norm   = eqx.nn.LayerNorm(d_model)
         self.output_heads = OutputHeads(d_model, instr_entity_dim, table_entity_dim, softsynth_entity_dim, keys[-1])
 
-    def encode(self, song_tokens: Array) -> Array:
-        x = self.embedder(song_tokens)
+    def encode(self, song_tokens: Array, banks: SongBanks) -> Array:
+        x = self.embedder(song_tokens, banks)
         S = x.shape[0]
         causal_mask = jnp.tril(jnp.ones((S, S), dtype=bool))
         for block in self.blocks:
             x = block(x, causal_mask)
         return _norm2d(self.final_norm, x)
 
-    def __call__(self, song_tokens: Array):
-        return jax.vmap(jax.vmap(self.output_heads))(self.encode(song_tokens))
-
-    def with_banks(self, banks: SongBanks):
-        new_embedder = self.embedder.with_banks(banks)
-        return eqx.tree_at(lambda m: m.embedder, self, new_embedder)
+    def __call__(self, song_tokens: Array, banks: SongBanks):
+        return jax.vmap(jax.vmap(self.output_heads))(self.encode(song_tokens, banks))
 
     def write_metadata(self, filepath):
         with open(filepath, "w") as f:

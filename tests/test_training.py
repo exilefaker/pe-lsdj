@@ -112,12 +112,15 @@ class TestTrainStep:
         optimizer = optax.adam(1e-3)
         opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
-        tokens = jr.randint(jr.PRNGKey(3), (2, 9, 4, 21), 0, 10).astype(jnp.float32)
+        B = 2
+        tokens = jr.randint(jr.PRNGKey(3), (B, 9, 4, 21), 0, 10).astype(jnp.float32)
         inputs = tokens[:, :-1]
         targets = tokens[:, 1:]
+        # train_step uses multi_track_batch_loss which vmaps over banks (in_axes=0)
+        batched_banks = jax.tree.map(lambda x: jnp.stack([x] * B), banks)
 
         new_model, new_opt_state, loss = train_step(
-            model, opt_state, optimizer, inputs, targets, banks,
+            model, opt_state, optimizer, inputs, targets, batched_banks,
         )
 
         # Parameters should have changed

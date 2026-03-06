@@ -4,6 +4,7 @@ from pe_lsdj.embedding.base import (
     ConcatEmbedder,
     EnumEmbedder,
     EntityEmbedder,
+    EntityType,
     GatedNormedEmbedder,
     SumEmbedder,
     _offsets,
@@ -15,9 +16,9 @@ import jax.random as jr
 
 
 class GrooveEntityEmbedder(EntityEmbedder):
-    def __init__(self, out_dim, key, grooves, **kwargs):
+    def __init__(self, out_dim, key):
         super().__init__(
-            grooves,
+            EntityType.GROOVES,
             GatedNormedEmbedder(
                 out_dim,
                 key,
@@ -25,7 +26,6 @@ class GrooveEntityEmbedder(EntityEmbedder):
                 0,
                 255,
             ),
-            **kwargs
         )
 
 
@@ -123,11 +123,11 @@ class TableEmbedder(BaseEmbedder):
         self.in_dim = STEPS_PER_TABLE * step_in_dim
         self.out_dim = out_dim
 
-    def _embed_step(self, x):
+    def _embed_step(self, x, banks):
         """Embed one table step (TABLE_STEP_WIDTH,) -> (step_concat_dim,)."""
         embeddings = []
         for name, e in self.embedders.items():
-            emb = e(x[self.offsets[name]:self.offsets[name] + e.in_dim])
+            emb = e(x[self.offsets[name]:self.offsets[name] + e.in_dim], banks)
             if name == 'fx1':
                 emb = emb + self.fx_col_position(jnp.array(0))
             elif name == 'fx2':
@@ -135,7 +135,7 @@ class TableEmbedder(BaseEmbedder):
             embeddings.append(emb)
         return jnp.concatenate(embeddings)
 
-    def __call__(self, x):
+    def __call__(self, x, banks):
         steps = x.reshape(STEPS_PER_TABLE, -1)
-        step_embs = jax.vmap(self._embed_step)(steps)
+        step_embs = jax.vmap(lambda step: self._embed_step(step, banks))(steps)
         return self.projection(step_embs.reshape(-1))

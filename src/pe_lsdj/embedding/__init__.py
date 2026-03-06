@@ -8,10 +8,9 @@ from pe_lsdj.embedding.fx import (
 from pe_lsdj.embedding.instrument import (
     InstrumentEmbedder,
     InstrumentEntityEmbedder,
-    SoftsynthEmbedder,
-    SoftsynthEntityEmbedder,
+    SynthWavesEmbedder,
+    SynthWavesEntityEmbedder,
     WaveframeEmbedder,
-    WaveFrameEntityEmbedder,
 )
 from pe_lsdj.embedding.base import (
     BaseEmbedder,
@@ -31,5 +30,4 @@ from pe_lsdj.embedding.song import (
     SongBanks,
     SongStepEmbedder,
     SequenceEmbedder,
-    set_banks,
 )
