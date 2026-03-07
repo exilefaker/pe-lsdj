@@ -378,6 +378,7 @@ def train(
                     loss_log_str += f",{validation_loss:.4f}"
                 loss_log_str += "\n"
                 g.write(loss_log_str)
+                g.flush()
 
     if checkpoint_path is not None:
         g.close()
