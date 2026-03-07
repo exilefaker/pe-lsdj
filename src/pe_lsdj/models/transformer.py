@@ -481,7 +481,6 @@ class AxialTransformerBlock(eqx.Module):
 class LSDJTransformer(eqx.Module):
     embedder:     SequenceEmbedder
     blocks:       list[AxialTransformerBlock]
-    input_norm:   eqx.nn.LayerNorm
     final_norm:   eqx.nn.LayerNorm
     output_heads: OutputHeads
     d_model:      int
@@ -523,7 +522,6 @@ class LSDJTransformer(eqx.Module):
             AxialTransformerBlock(d_model, num_heads_t, num_heads_c, keys[i + 1])
             for i in range(num_blocks)
         ]
-        self.input_norm   = eqx.nn.LayerNorm(d_model)
         self.final_norm   = eqx.nn.LayerNorm(d_model)
         self.output_heads = OutputHeads(d_model, instr_entity_dim, table_entity_dim, softsynth_entity_dim, keys[-1])
 
@@ -531,7 +529,9 @@ class LSDJTransformer(eqx.Module):
         x = self.embedder(song_tokens, banks)
         x = _norm2d(self.input_norm, x)
         if key is not None and self.noise_std > 0.0:
-            x = x + jr.normal(key, x.shape) * self.noise_std
+            scale = jnp.mean(jnp.linalg.norm(x, axis=-1))
+            x = x + jr.normal(key, x.shape) * (self.noise_std * scale)
+            # x = x + jr.normal(key, x.shape) * self.noise_std
         S = x.shape[0]
         causal_mask = jnp.tril(jnp.ones((S, S), dtype=bool))
         for block in self.blocks:
