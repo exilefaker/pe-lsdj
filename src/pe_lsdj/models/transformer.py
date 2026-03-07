@@ -455,8 +455,9 @@ class AxialTransformerBlock(eqx.Module):
     norm_t:        eqx.nn.LayerNorm
     norm_c:        eqx.nn.LayerNorm
     norm_mlp:      eqx.nn.LayerNorm
+    dropout:       eqx.nn.Dropout
 
-    def __init__(self, d_model, num_heads_t, num_heads_c, key):
+    def __init__(self, d_model, num_heads_t, num_heads_c, key, dropout_p=0.0):
         k1, k2, k3 = jr.split(key, 3)
         self.temporal_attn = eqx.nn.MultiheadAttention(num_heads_t, d_model, key=k1)
         self.channel_attn  = eqx.nn.MultiheadAttention(num_heads_c, d_model, key=k2)
@@ -464,17 +465,31 @@ class AxialTransformerBlock(eqx.Module):
         self.norm_t   = eqx.nn.LayerNorm(d_model)
         self.norm_c   = eqx.nn.LayerNorm(d_model)
         self.norm_mlp = eqx.nn.LayerNorm(d_model)
+        self.dropout  = eqx.nn.Dropout(p=dropout_p)
 
-    def __call__(self, x: Array, causal_mask: Bool[Array, "S S"]) -> Array:
+    def __call__(self, x: Array, causal_mask: Bool[Array, "S S"],
+                 key: Key | None = None) -> Array:
+        inference = key is None
+        k1, k2, k3 = jr.split(key, 3) if key is not None else (None, None, None)
+
         normed = _norm2d(self.norm_c, x)
-        x = x + jax.vmap(lambda x_t: self.channel_attn(x_t, x_t, x_t))(normed)
+        x = x + self.dropout(
+            jax.vmap(lambda x_t: self.channel_attn(x_t, x_t, x_t))(normed),
+            key=k1, inference=inference,
+        )
         normed = _norm2d(self.norm_t, x)
-        x = x + jax.vmap(
-            lambda x_ch: self.temporal_attn(x_ch, x_ch, x_ch, mask=causal_mask),
-            in_axes=1, out_axes=1,
-        )(normed)
+        x = x + self.dropout(
+            jax.vmap(
+                lambda x_ch: self.temporal_attn(x_ch, x_ch, x_ch, mask=causal_mask),
+                in_axes=1, out_axes=1,
+            )(normed),
+            key=k2, inference=inference,
+        )
         normed = _norm2d(self.norm_mlp, x)
-        x = x + jax.vmap(jax.vmap(self.mlp))(normed)
+        x = x + self.dropout(
+            jax.vmap(jax.vmap(self.mlp))(normed),
+            key=k3, inference=inference,
+        )
         return x
 
 
@@ -499,6 +514,7 @@ class LSDJTransformer(eqx.Module):
         num_heads_c: int = 2,
         num_blocks: int = 6,
         noise_sd: float = 0.0,
+        dropout_p: float = 0.0,
         **embedder_kwargs,
     ):
         self.metadata = {
@@ -510,6 +526,7 @@ class LSDJTransformer(eqx.Module):
             "num_heads_c": num_heads_c,
             "num_blocks": num_blocks,
             "noise_sd": noise_sd,
+            "dropout_p": dropout_p,
             "embedder": {k: v for k, v in embedder_kwargs.items() if isinstance(v, int)},
         }
         keys = jr.split(key, num_blocks + 3)
@@ -519,7 +536,7 @@ class LSDJTransformer(eqx.Module):
             keys[0], out_dim=d_model * 4, **embedder_kwargs,
         )
         self.blocks = [
-            AxialTransformerBlock(d_model, num_heads_t, num_heads_c, keys[i + 1])
+            AxialTransformerBlock(d_model, num_heads_t, num_heads_c, keys[i + 1], dropout_p)
             for i in range(num_blocks)
         ]
         self.final_norm   = eqx.nn.LayerNorm(d_model)
@@ -527,14 +544,19 @@ class LSDJTransformer(eqx.Module):
 
     def encode(self, song_tokens: Array, banks: SongBanks, *, key: Key | None = None) -> Array:
         x = self.embedder(song_tokens, banks)
-        if key is not None and self.noise_sd > 0.0:
-            scale = jnp.mean(jnp.linalg.norm(x, axis=-1))
-            x = x + jr.normal(key, x.shape) * (self.noise_sd * scale)
-            # x = x + jr.normal(key, x.shape) * self.noise_sd
+        if key is not None:
+            # Split one key for noise, one per block for dropout
+            keys = jr.split(key, len(self.blocks) + 1)
+            noise_key, block_keys = keys[0], keys[1:]
+            if self.noise_sd > 0.0:
+                scale = jnp.mean(jnp.linalg.norm(x, axis=-1))
+                x = x + jr.normal(noise_key, x.shape) * (self.noise_sd * scale)
+        else:
+            block_keys = [None] * len(self.blocks)
         S = x.shape[0]
         causal_mask = jnp.tril(jnp.ones((S, S), dtype=bool))
-        for block in self.blocks:
-            x = block(x, causal_mask)
+        for block, bkey in zip(self.blocks, block_keys):
+            x = block(x, causal_mask, bkey)
         return _norm2d(self.final_norm, x)
 
     def __call__(self, song_tokens: Array, banks: SongBanks, *, key: Key | None = None):

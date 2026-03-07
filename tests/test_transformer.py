@@ -245,8 +245,8 @@ class TestHardTargetsAndLoss:
                                  instr_entity_dim=ENTITY_DIM, table_entity_dim=ENTITY_DIM,
                                  softsynth_entity_dim=ENTITY_DIM,
                                  num_heads_t=2, num_heads_c=2, num_blocks=1,
-                                 instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
-                                 value_out_dim=ENTITY_DIM, synth_waves_dim=ENTITY_DIM)
+                                 instr_dim=ENTITY_DIM, value_out_dim=ENTITY_DIM,
+                                 synth_waves_dim=ENTITY_DIM)
         L = 4
         banks   = SongBanks.default()
         tokens  = jnp.zeros((L, 4, 21), dtype=jnp.float32)
@@ -262,8 +262,8 @@ class TestHardTargetsAndLoss:
                                  instr_entity_dim=ENTITY_DIM, table_entity_dim=ENTITY_DIM,
                                  softsynth_entity_dim=ENTITY_DIM,
                                  num_heads_t=2, num_heads_c=2, num_blocks=1,
-                                 instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
-                                 value_out_dim=ENTITY_DIM, synth_waves_dim=ENTITY_DIM)
+                                 instr_dim=ENTITY_DIM, value_out_dim=ENTITY_DIM,
+                                 synth_waves_dim=ENTITY_DIM)
         L = 4
         banks   = SongBanks.default()
         tokens  = jnp.zeros((L, 4, 21), dtype=jnp.float32)
@@ -284,8 +284,8 @@ class TestLSDJTransformer:
             instr_entity_dim=ENTITY_DIM, table_entity_dim=ENTITY_DIM,
             softsynth_entity_dim=ENTITY_DIM,
             num_heads_t=2, num_heads_c=2, num_blocks=2,
-            instr_dim=ENTITY_DIM, table_dim=ENTITY_DIM,
-            value_out_dim=ENTITY_DIM, synth_waves_dim=ENTITY_DIM,
+            instr_dim=ENTITY_DIM, value_out_dim=ENTITY_DIM,
+            synth_waves_dim=ENTITY_DIM,
         )
 
     @pytest.fixture(scope="class")
@@ -346,3 +346,50 @@ class TestLSDJTransformer:
     def test_encode_shape(self, model, banks):
         hiddens = model.encode(jnp.zeros((8, 4, 21)), banks)
         assert hiddens.shape == (8, 4, D_MODEL)
+
+    def test_zero_dropout_key_is_noop(self, model, banks):
+        """dropout_p=0 model should give identical output with or without a key."""
+        tokens = jnp.zeros((4, 4, 21))
+        out_key    = model.encode(tokens, banks, key=jr.PRNGKey(0))
+        out_no_key = model.encode(tokens, banks)
+        assert jnp.allclose(out_key, out_no_key)
+
+
+class TestDropout:
+
+    @pytest.fixture(scope="class")
+    def model_with_dropout(self):
+        return LSDJTransformer(
+            KEY, d_model=D_MODEL,
+            instr_entity_dim=ENTITY_DIM, table_entity_dim=ENTITY_DIM,
+            softsynth_entity_dim=ENTITY_DIM,
+            num_heads_t=2, num_heads_c=2, num_blocks=2,
+            instr_dim=ENTITY_DIM, value_out_dim=ENTITY_DIM,
+            synth_waves_dim=ENTITY_DIM,
+            dropout_p=0.1,
+        )
+
+    @pytest.fixture(scope="class")
+    def banks(self):
+        return SongBanks.default()
+
+    def test_dropout_active_with_key(self, model_with_dropout, banks):
+        """Training mode (key provided) should differ from inference mode (no key)."""
+        tokens = jnp.zeros((4, 4, 21))
+        out_train = model_with_dropout.encode(tokens, banks, key=jr.PRNGKey(0))
+        out_infer = model_with_dropout.encode(tokens, banks)
+        assert not jnp.allclose(out_train, out_infer)
+
+    def test_dropout_inactive_without_key(self, model_with_dropout, banks):
+        """Inference mode (no key) should be deterministic."""
+        tokens = jnp.zeros((4, 4, 21))
+        out1 = model_with_dropout.encode(tokens, banks)
+        out2 = model_with_dropout.encode(tokens, banks)
+        assert jnp.allclose(out1, out2)
+
+    def test_different_keys_differ(self, model_with_dropout, banks):
+        """Different training keys should produce different outputs."""
+        tokens = jnp.zeros((4, 4, 21))
+        out1 = model_with_dropout.encode(tokens, banks, key=jr.PRNGKey(0))
+        out2 = model_with_dropout.encode(tokens, banks, key=jr.PRNGKey(1))
+        assert not jnp.allclose(out1, out2)

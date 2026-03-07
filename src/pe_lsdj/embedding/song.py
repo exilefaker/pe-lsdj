@@ -152,7 +152,6 @@ class SongStepEmbedder(eqx.Module):
         note_dim: int = 128,
         instr_dim: int = 128,
         fx_dim: int = 128,
-        table_dim: int = 64,
         transpose_dim: int = 16,
         value_out_dim: int = 64,
         synth_waves_dim: int = 64,
@@ -160,6 +159,8 @@ class SongStepEmbedder(eqx.Module):
         assert out_dim % 4 == 0, f"out_dim must be divisible by 4, got {out_dim}"
         per_ch_dim = out_dim // 4
         self.per_ch_dim = per_ch_dim
+        # NOTE that value_out_dim (the dimension of FX value embeddings before being combined with FX commands)
+        # governs the dimensionality of the table and groove representations (since tables and grooves are possible FX values).
 
         keys = jr.split(key, 12)
 
@@ -178,13 +179,13 @@ class SongStepEmbedder(eqx.Module):
         dummy_table_fx = DummyEmbedder(1, value_out_dim)
         fxv0 = FXValueEmbedder(dummy_table_fx, shared_embedders)
         fx0 = FXEmbedder(keys[3], fxv0, fx_dim)
-        table_embedder_0 = TableEmbedder(table_dim, keys[4], fx0)
+        table_embedder_0 = TableEmbedder(value_out_dim, keys[4], fx0)
 
         # --- Tier 1: trace entity for TABLE_FX ---
         trace_embedder = EntityEmbedder(EntityType.TRACES, table_embedder_0)
         fxv1 = FXValueEmbedder(trace_embedder, shared_embedders)
         fx1 = FXEmbedder(keys[5], fxv1, fx_dim, _projection=fx0.projection)
-        table_table_embedder = TableEmbedder(table_dim, keys[6], fx1, _projection=table_embedder_0.projection)
+        table_table_embedder = TableEmbedder(value_out_dim, keys[6], fx1, _projection=table_embedder_0.projection)
 
         # --- Phrase/instr level: table entity for TABLE_FX ---
         table_embedder = EntityEmbedder(EntityType.TABLES, table_table_embedder)
