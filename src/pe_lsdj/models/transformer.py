@@ -523,6 +523,7 @@ class LSDJTransformer(eqx.Module):
             AxialTransformerBlock(d_model, num_heads_t, num_heads_c, keys[i + 1])
             for i in range(num_blocks)
         ]
+        self.input_norm   = eqx.nn.LayerNorm(d_model)
         self.final_norm   = eqx.nn.LayerNorm(d_model)
         self.output_heads = OutputHeads(d_model, instr_entity_dim, table_entity_dim, softsynth_entity_dim, keys[-1])
 
