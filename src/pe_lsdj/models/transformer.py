@@ -481,7 +481,7 @@ class AxialTransformerBlock(eqx.Module):
 class LSDJTransformer(eqx.Module):
     embedder:     SequenceEmbedder
     blocks:       list[AxialTransformerBlock]
-    input_norm: eqx.nn.Layernorm
+    input_norm:   eqx.nn.LayerNorm
     final_norm:   eqx.nn.LayerNorm
     output_heads: OutputHeads
     d_model:      int
