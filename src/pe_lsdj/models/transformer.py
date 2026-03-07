@@ -484,7 +484,7 @@ class LSDJTransformer(eqx.Module):
     final_norm:   eqx.nn.LayerNorm
     output_heads: OutputHeads
     d_model:      int
-    noise_std:    float
+    noise_sd:    float
     metadata:     dict
 
     def __init__(
@@ -498,7 +498,7 @@ class LSDJTransformer(eqx.Module):
         num_heads_t: int = 4,
         num_heads_c: int = 2,
         num_blocks: int = 6,
-        noise_std: float = 0.0,
+        noise_sd: float = 0.0,
         **embedder_kwargs,
     ):
         self.metadata = {
@@ -509,12 +509,12 @@ class LSDJTransformer(eqx.Module):
             "num_heads_t": num_heads_t,
             "num_heads_c": num_heads_c,
             "num_blocks": num_blocks,
-            "noise_std": noise_std,
+            "noise_sd": noise_sd,
             "embedder": {k: v for k, v in embedder_kwargs.items() if isinstance(v, int)},
         }
         keys = jr.split(key, num_blocks + 3)
         self.d_model = d_model
-        self.noise_std = noise_std
+        self.noise_sd = noise_sd
         self.embedder = SequenceEmbedder.create(
             keys[0], out_dim=d_model * 4, **embedder_kwargs,
         )
@@ -527,11 +527,10 @@ class LSDJTransformer(eqx.Module):
 
     def encode(self, song_tokens: Array, banks: SongBanks, *, key: Key | None = None) -> Array:
         x = self.embedder(song_tokens, banks)
-        x = _norm2d(self.input_norm, x)
-        if key is not None and self.noise_std > 0.0:
+        if key is not None and self.noise_sd > 0.0:
             scale = jnp.mean(jnp.linalg.norm(x, axis=-1))
-            x = x + jr.normal(key, x.shape) * (self.noise_std * scale)
-            # x = x + jr.normal(key, x.shape) * self.noise_std
+            x = x + jr.normal(key, x.shape) * (self.noise_sd * scale)
+            # x = x + jr.normal(key, x.shape) * self.noise_sd
         S = x.shape[0]
         causal_mask = jnp.tril(jnp.ones((S, S), dtype=bool))
         for block in self.blocks:
