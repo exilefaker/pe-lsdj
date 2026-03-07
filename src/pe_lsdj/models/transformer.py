@@ -481,6 +481,7 @@ class AxialTransformerBlock(eqx.Module):
 class LSDJTransformer(eqx.Module):
     embedder:     SequenceEmbedder
     blocks:       list[AxialTransformerBlock]
+    input_norm: eqx.nn.Layernorm
     final_norm:   eqx.nn.LayerNorm
     output_heads: OutputHeads
     d_model:      int
@@ -527,6 +528,7 @@ class LSDJTransformer(eqx.Module):
 
     def encode(self, song_tokens: Array, banks: SongBanks, *, key: Key | None = None) -> Array:
         x = self.embedder(song_tokens, banks)
+        x = _norm2d(self.input_norm, x)
         if key is not None and self.noise_std > 0.0:
             x = x + jr.normal(key, x.shape) * self.noise_std
         S = x.shape[0]
