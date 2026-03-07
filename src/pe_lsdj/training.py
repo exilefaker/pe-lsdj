@@ -375,7 +375,7 @@ def train(
 
                 loss_log_str = f"{step:5d},{names_str},{loss:.4f}"
                 if validation_songs is not None:
-                    loss_log_str += f"{validation_loss:.4f}"
+                    loss_log_str += f",{validation_loss:.4f}"
                 loss_log_str += "\n"
                 g.write(loss_log_str)
 
