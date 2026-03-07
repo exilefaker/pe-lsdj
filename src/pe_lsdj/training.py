@@ -138,16 +138,18 @@ def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key):
     return inputs, targets, batched_banks, idxs
 
 
-def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongBanks):
+def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongBanks,
+                  key: Key | None = None):
     """
     Teacher-forcing loss for one sequence: token CE + scalar entity CE + conditional entity CE.
 
     input_tokens:  (L, 4, 21)
     target_tokens: (L, 4, 21)
     banks:         SongBanks for the current song (null rows pre-included)
+    key:           optional PRNGKey for embedding noise (None = no noise, e.g. at validation)
     Returns: scalar — mean loss per (channel × timestep)
     """
-    hiddens = model.encode(input_tokens, banks)                   # (L, 4, d_model)
+    hiddens = model.encode(input_tokens, banks, key=key)          # (L, 4, d_model)
     logits  = jax.vmap(jax.vmap(model.output_heads))(hiddens)    # dict of (L, 4, ...)
 
     # Token cross-entropy (note, fx_cmd, fx values, transpose)
@@ -182,18 +184,31 @@ def batch_loss(model, input_batch: Array, target_batch: Array, banks: SongBanks)
     return jnp.mean(losses)
 
 
-def multi_track_batch_loss(model, input_batch: Array, target_batch: Array, batched_banks: SongBanks):
-    """Cross-track/song batch loss:
-    Vmap over sequences and stacked banks pulled from distinct tracks"""
-    losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, 0))(model, input_batch, target_batch, batched_banks)
+def multi_track_batch_loss(model, input_batch: Array, target_batch: Array,
+                           batched_banks: SongBanks, noise_keys=None):
+    """Cross-track/song batch loss.
+    noise_keys: (B,) array of PRNGKeys for per-item embedding noise, or None for no noise.
+    """
+    if noise_keys is None:
+        losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, 0, None))(
+            model, input_batch, target_batch, batched_banks, None
+        )
+    else:
+        losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, 0, 0))(
+            model, input_batch, target_batch, batched_banks, noise_keys
+        )
     return jnp.mean(losses)
 
 
 @eqx.filter_jit
-def train_step(model, opt_state, optimizer, input_batch, target_batch, banks):
-    """One gradient step. Returns (model, opt_state, loss)."""
+def train_step(model, opt_state, optimizer, input_batch, target_batch, banks, key):
+    """One gradient step. Returns (model, opt_state, loss).
+    key is split into per-item noise keys for embedding perturbation.
+    """
+    B = input_batch.shape[0]
+    noise_keys = jr.split(key, B)
     loss, grads = eqx.filter_value_and_grad(multi_track_batch_loss)(
-        model, input_batch, target_batch, banks
+        model, input_batch, target_batch, banks, noise_keys
     )
     updates, opt_state = optimizer.update(grads, opt_state, model)
     model = eqx.apply_updates(model, updates)
@@ -299,7 +314,11 @@ def train(
         log_mode = "a" if resuming else "w"
         g = open(os.path.join(session_path, "losses.txt"), log_mode)
         if not resuming:
-            g.write("step,song,loss\n")
+            header_str = "step,song,loss"
+            if validation_songs is not None:
+                header_str += ",val"
+            header_str += "\n"
+            g.write(header_str)
 
         if validation_songs is not None:
             h = open(os.path.join(session_path, "validate_losses.txt"), log_mode)
@@ -321,16 +340,16 @@ def train(
         val_sequences = get_validate_sequences(validation_songs, validation_banks, crop_len)
 
     for step in range(start_step, num_steps):
-        key, k_crop = jr.split(key)
+        key, k_crop, k_noise = jr.split(key, 3)
 
         # Sample multi-song batch
         inputs, targets, banks, batch_idxs = make_multi_track_batch(
             songs, all_banks, batch_size, crop_len, k_crop,
         )
 
-        # Gradient step
+        # Gradient step (k_noise is split per-item inside train_step)
         model, opt_state, loss = train_step(
-            model, opt_state, optimizer, inputs, targets, banks
+            model, opt_state, optimizer, inputs, targets, banks, k_noise
         )
 
         if step % log_every == 0:
@@ -353,12 +372,13 @@ def train(
             if checkpoint_path is not None:
                 ckpt_file = os.path.join(session_path, f"step_{step:06d}.eqx")
                 save_checkpoint(ckpt_file, model, opt_state, step)
-                g.write(f"{step:5d},{names_str},{loss:.4f}\n")
+
+                loss_log_str = f"{step:5d},{names_str},{loss:.4f}"
                 if validation_songs is not None:
-                    h.write(f"{step:5d},{validation_loss:.4f}\n")
+                    loss_log_str += f"{validation_loss:.4f}"
+                loss_log_str += "\n"
+                g.write(loss_log_str)
 
     if checkpoint_path is not None:
         g.close()
-        if validation_songs is not None:
-            h.close()
     return model, opt_state

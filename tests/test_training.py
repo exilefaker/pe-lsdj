@@ -174,7 +174,7 @@ class TestTrainStep:
         batched_banks = jax.tree.map(lambda x: jnp.stack([x] * B), banks)
 
         new_model, new_opt_state, loss = train_step(
-            model, opt_state, optimizer, inputs, targets, batched_banks,
+            model, opt_state, optimizer, inputs, targets, batched_banks, jr.PRNGKey(99),
         )
 
         # Parameters should have changed

@@ -484,6 +484,7 @@ class LSDJTransformer(eqx.Module):
     final_norm:   eqx.nn.LayerNorm
     output_heads: OutputHeads
     d_model:      int
+    noise_std:    float
     metadata:     dict
 
     def __init__(
@@ -497,6 +498,7 @@ class LSDJTransformer(eqx.Module):
         num_heads_t: int = 4,
         num_heads_c: int = 2,
         num_blocks: int = 6,
+        noise_std: float = 0.0,
         **embedder_kwargs,
     ):
         self.metadata = {
@@ -507,10 +509,12 @@ class LSDJTransformer(eqx.Module):
             "num_heads_t": num_heads_t,
             "num_heads_c": num_heads_c,
             "num_blocks": num_blocks,
+            "noise_std": noise_std,
             "embedder": {k: v for k, v in embedder_kwargs.items() if isinstance(v, int)},
         }
         keys = jr.split(key, num_blocks + 3)
         self.d_model = d_model
+        self.noise_std = noise_std
         self.embedder = SequenceEmbedder.create(
             keys[0], out_dim=d_model * 4, **embedder_kwargs,
         )
@@ -521,16 +525,18 @@ class LSDJTransformer(eqx.Module):
         self.final_norm   = eqx.nn.LayerNorm(d_model)
         self.output_heads = OutputHeads(d_model, instr_entity_dim, table_entity_dim, softsynth_entity_dim, keys[-1])
 
-    def encode(self, song_tokens: Array, banks: SongBanks) -> Array:
+    def encode(self, song_tokens: Array, banks: SongBanks, *, key: Key | None = None) -> Array:
         x = self.embedder(song_tokens, banks)
+        if key is not None and self.noise_std > 0.0:
+            x = x + jr.normal(key, x.shape) * self.noise_std
         S = x.shape[0]
         causal_mask = jnp.tril(jnp.ones((S, S), dtype=bool))
         for block in self.blocks:
             x = block(x, causal_mask)
         return _norm2d(self.final_norm, x)
 
-    def __call__(self, song_tokens: Array, banks: SongBanks):
-        return jax.vmap(jax.vmap(self.output_heads))(self.encode(song_tokens, banks))
+    def __call__(self, song_tokens: Array, banks: SongBanks, *, key: Key | None = None):
+        return jax.vmap(jax.vmap(self.output_heads))(self.encode(song_tokens, banks, key=key))
 
     def write_metadata(self, filepath):
         with open(filepath, "w") as f:
