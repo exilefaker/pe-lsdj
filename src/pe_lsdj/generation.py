@@ -823,8 +823,9 @@ def generate_step(
 
 DEFAULT_NUM_STEPS = 128
 
-def generate(
-    model: eqx.Module, 
+
+def _generate(
+    model: eqx.Module,
     input_tokens: Array,
     key: Key,
     banks: SongBanks | None = None,
@@ -858,3 +859,41 @@ def generate(
         generate_step_fn, (input_tokens, banks), keys
     )
     return jnp.concatenate([input_tokens, new_tokens], axis=0), final_banks
+
+
+def generate(
+    model: eqx.Module,
+    input_tokens: Array,
+    key: Key,
+    num_samples: int = 1,
+    banks: SongBanks | None = None,
+    num_steps: int = DEFAULT_NUM_STEPS,
+    instr_match_threshold: float = 0.05,
+    groove_match_threshold: float = 0.05,
+    table_match_threshold: float = 0.05,
+    softsynth_match_threshold: float = 0.05,
+) -> tuple[Array, SongBanks]:
+    """
+    Generate `num_samples` independent samples from the same seed.
+
+    Each sample receives a unique random key derived from `key`, so stochastic
+    choices (token sampling, entity creation) diverge across samples while the
+    seed context and initial banks are shared.
+
+    Returns:
+        tokens: (num_samples, S + num_steps, NUM_CHANNELS, 21) uint16
+        banks:  SongBanks where each field has a leading num_samples dimension.
+                To extract one sample's banks: jax.tree.map(lambda x: x[i], banks)
+    """
+    input_tokens = jnp.asarray(input_tokens, dtype=jnp.uint16)
+    banks = banks or SongBanks.default()
+    sample_keys = jr.split(key, num_samples)
+
+    def _one_sample(k):
+        return _generate(
+            model, input_tokens, k, banks, num_steps,
+            instr_match_threshold, groove_match_threshold,
+            table_match_threshold, softsynth_match_threshold,
+        )
+
+    return jax.vmap(_one_sample)(sample_keys)

@@ -51,6 +51,16 @@ def load_checkpoint(path, ref_model, ref_opt_state):
         return model, None, 0
 
 
+def _find_latest_checkpoint_in_session(session_path):
+    ckpts = sorted(
+        f for f in os.listdir(session_path)
+        if f.startswith("step_") and f.endswith(".eqx")
+    )
+    if not ckpts:
+        return session_path, None
+    return session_path, os.path.join(session_path, ckpts[-1])
+
+
 def _find_latest_checkpoint(checkpoint_path):
     """Return (session_path, checkpoint_file) for the most recent saved step.
     Returns (None, None) if no checkpoints exist."""
@@ -60,14 +70,9 @@ def _find_latest_checkpoint(checkpoint_path):
     )
     if not sessions:
         return None, None
+    
     session_path = os.path.join(checkpoint_path, sessions[-1])
-    ckpts = sorted(
-        f for f in os.listdir(session_path)
-        if f.startswith("step_") and f.endswith(".eqx")
-    )
-    if not ckpts:
-        return session_path, None
-    return session_path, os.path.join(session_path, ckpts[-1])
+    return _find_latest_checkpoint_in_session(session_path)
 
 
 def load_songs(song_paths: list[str]) -> list[SongFile]:
