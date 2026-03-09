@@ -499,8 +499,7 @@ class LSDJTransformer(eqx.Module):
     final_norm:   eqx.nn.LayerNorm
     output_heads: OutputHeads
     d_model:      int
-    noise_sd:    float
-    metadata:     dict
+    noise_sd:     float
 
     def __init__(
         self,
@@ -517,18 +516,6 @@ class LSDJTransformer(eqx.Module):
         dropout_p: float = 0.0,
         **embedder_kwargs,
     ):
-        self.metadata = {
-            "d_model": d_model,
-            "instr_entity_dim": instr_entity_dim,
-            "table_entity_dim": table_entity_dim,
-            "softsynth_entity_dim": softsynth_entity_dim,
-            "num_heads_t": num_heads_t,
-            "num_heads_c": num_heads_c,
-            "num_blocks": num_blocks,
-            "noise_sd": noise_sd,
-            "dropout_p": dropout_p,
-            "embedder": {k: v for k, v in embedder_kwargs.items() if isinstance(v, int)},
-        }
         keys = jr.split(key, num_blocks + 3)
         self.d_model = d_model
         self.noise_sd = noise_sd
@@ -563,5 +550,25 @@ class LSDJTransformer(eqx.Module):
         return jax.vmap(jax.vmap(self.output_heads))(self.encode(song_tokens, banks, key=key))
 
     def write_metadata(self, filepath):
+        step  = self.embedder.step_embedder
+        heads = self.output_heads
+        block = self.blocks[0]
+        metadata = {
+            "d_model":             self.d_model,
+            "instr_entity_dim":    heads.instr_to_table_proj.in_features,
+            "table_entity_dim":    heads.table_proj.out_features,
+            "softsynth_entity_dim": heads.instr_decoder.softsynth_decoder.linear_in.out_features,
+            "num_heads_t":         block.temporal_attn.num_heads,
+            "num_heads_c":         block.channel_attn.num_heads,
+            "num_blocks":          len(self.blocks),
+            "noise_sd":            self.noise_sd,
+            "dropout_p":           block.dropout.p,
+            "note_dim":        step.note_embedder.out_dim,
+            "instr_dim":       step.instrument_embedder.out_dim,
+            "fx_dim":          step.fx_embedder.out_dim,
+            "transpose_dim":   step.transpose_embedder.out_dim,
+            "value_out_dim":   heads.table_proj.out_features,
+            "synth_waves_dim": step.instrument_embedder.embedder.embedders["synth_wave"].out_dim,
+        }
         with open(filepath, "w") as f:
-            f.write(json.dumps(self.metadata))
+            f.write(json.dumps(metadata))

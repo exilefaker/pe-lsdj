@@ -6,6 +6,7 @@ import equinox as eqx
 from pe_lsdj.models import LSDJTransformer
 from pe_lsdj.generation import (
     _generate,
+    generate,
     match_groove,
     match_trace,
     match_table,
@@ -284,6 +285,46 @@ def test_null_type_returns_null_instr_id(model, step_logits):
     )
     assert int(iid) == 0
     assert not jnp.any(banks_out.instrs_occupied[1:])
+
+
+# ---------------------------------------------------------------------------
+# Batch generation (generate)
+# ---------------------------------------------------------------------------
+
+class TestBatchGenerate:
+    S_IN = 4
+    NUM_STEPS = 2
+
+    @pytest.fixture(scope="class")
+    def seed_tokens(self):
+        return jnp.zeros((self.S_IN, 4, 21), dtype=jnp.uint16)
+
+    def test_batch_shape(self, model, seed_tokens):
+        M = 3
+        tokens, _ = generate(model, seed_tokens, KEY, num_samples=M, num_steps=self.NUM_STEPS)
+        assert tokens.shape == (M, self.S_IN + self.NUM_STEPS, 4, 21)
+
+    def test_banks_have_batch_dim(self, model, seed_tokens):
+        M = 3
+        _, banks = generate(model, seed_tokens, KEY, num_samples=M, num_steps=self.NUM_STEPS)
+        assert banks.instruments.shape[0] == M
+
+    def test_samples_differ(self, model, seed_tokens):
+        """Different keys must produce different token sequences."""
+        M = 2
+        tokens, _ = generate(model, seed_tokens, KEY, num_samples=M, num_steps=self.NUM_STEPS)
+        assert not jnp.all(tokens[0] == tokens[1])
+
+    def test_single_sample_consistent_with_generate(self, model, seed_tokens):
+        """num_samples=1 should match _generate called with the same derived key."""
+        sample_key = jr.split(KEY, 1)[0]
+        tokens_batch, _ = generate(model, seed_tokens, KEY, num_samples=1, num_steps=self.NUM_STEPS)
+        tokens_single, _ = _generate(model, seed_tokens, sample_key, num_steps=self.NUM_STEPS)
+        assert jnp.array_equal(tokens_batch[0], tokens_single)
+
+    def test_jit_smoke(self, model, seed_tokens):
+        out, _ = eqx.filter_jit(generate)(model, seed_tokens, KEY, num_samples=2, num_steps=self.NUM_STEPS)
+        assert out.shape == (2, self.S_IN + self.NUM_STEPS, 4, 21)
 
 
 def test_wav_creates_softsynth_non_wav_does_not(model, step_logits):
