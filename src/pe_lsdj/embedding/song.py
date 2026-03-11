@@ -24,7 +24,6 @@ from pe_lsdj.embedding.instrument import (
     SynthWavesEntityEmbedder,
 )
 from pe_lsdj.embedding.position import (
-    SinusoidalPositionEncoding,
     PhrasePositionEmbedder,
     ChannelPositionEmbedder,
 )
@@ -255,7 +254,6 @@ class SequenceEmbedder(eqx.Module):
     Output: (S, 4, per_ch_dim)
     """
     step_embedder: SongStepEmbedder
-    global_position: SinusoidalPositionEncoding
     phrase_position: PhrasePositionEmbedder
     channel_position: ChannelPositionEmbedder
 
@@ -263,7 +261,6 @@ class SequenceEmbedder(eqx.Module):
         k1, k2 = jr.split(key)
         self.step_embedder = step_embedder
         d = step_embedder.per_ch_dim
-        self.global_position = SinusoidalPositionEncoding(d)
         self.phrase_position = PhrasePositionEmbedder(d, k1)
         self.channel_position = ChannelPositionEmbedder(d, k2)
 
@@ -273,17 +270,15 @@ class SequenceEmbedder(eqx.Module):
         step = SongStepEmbedder(k1, **step_kwargs)
         return cls(step, k2)
 
-    def __call__(self, song_tokens, banks):
+    def __call__(self, song_tokens, banks, positions=None):
         S = song_tokens.shape[0]
+        if positions is None:
+            positions = jnp.arange(S)
         content = jax.vmap(lambda step: self.step_embedder(step, banks))(song_tokens)  # (S, 4, d)
-        global_pos = self.global_position(jnp.arange(S))      # (S, d)
-        phrase_pos = self.phrase_position(
-            jnp.arange(S) % STEPS_PER_PHRASE
-        )                                                      # (S, d)
-        channel_pos = self.channel_position()                  # (4, d)
+        phrase_pos = self.phrase_position(positions % STEPS_PER_PHRASE)  # (S, d)
+        channel_pos = self.channel_position()                          # (4, d)
         return (
             content
-            + global_pos[:, None, :]
             + phrase_pos[:, None, :]
             + channel_pos[None, :, :]
         )

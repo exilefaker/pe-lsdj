@@ -47,7 +47,7 @@ class TestAxialTransformerBlock:
     def test_shape(self, block):
         x = jnp.ones((16, 4, D_MODEL))
         mask = jnp.tril(jnp.ones((16, 16), dtype=bool))
-        out = block(x, mask)
+        out = block(x, mask, jnp.arange(16))
         assert out.shape == (16, 4, D_MODEL)
 
     def test_causal(self, block):
@@ -55,8 +55,8 @@ class TestAxialTransformerBlock:
         mask = jnp.tril(jnp.ones((S, S), dtype=bool))
         x1 = jr.normal(jr.PRNGKey(1), (S, 4, d))
         x2 = x1.at[5].set(jr.normal(jr.PRNGKey(2), (4, d)))
-        out1 = block(x1, mask)
-        out2 = block(x2, mask)
+        out1 = block(x1, mask, jnp.arange(S))
+        out2 = block(x2, mask, jnp.arange(S))
         assert jnp.allclose(out1[:5], out2[:5], atol=1e-5)
         assert not jnp.allclose(out1[5:], out2[5:])
 

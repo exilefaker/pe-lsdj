@@ -23,7 +23,9 @@
 |   v4    | LSDJTransformer | true hierarchical decoding mirroring embedding structure. Predict individual groove/table steps rather than a single value | ❌ (OOM) |
 |   v5    | LSDJTransformer | Conditionally generate FX values | ✅ |
 |   v6    | LSDJTransformer | Add constrative loss for entity embedder/decoder | ❌ (OOM) |
-|   v5.1* | LSDJTransformer | Adds instr_to_table_proj for conditioning table generation
+|   v5.1  | LSDJTransformer | Adds instr_to_table_proj for conditioning table generation
+|   v6    | LSDJTransformer | Add dropout and Gaussian noise on embedding | ✅ |
+|   v7*   | LSDJTransformer | Use Rotary Position Embeddings (RoPE) | ? |
 
 \* current model
 

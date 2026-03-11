@@ -6,6 +6,7 @@ import equinox as eqx
 from pe_lsdj.models import LSDJTransformer
 from pe_lsdj.generation import (
     _generate,
+    _generate_cached,
     generate,
     match_groove,
     match_trace,
@@ -369,6 +370,41 @@ class TestWindowLen:
         W = 4
         tokens, _ = generate(model, seed_tokens, KEY, num_samples=2, num_steps=self.NUM_STEPS, window_len=W)
         assert tokens.shape == (2, W + self.NUM_STEPS, 4, 21)
+
+
+# ---------------------------------------------------------------------------
+# KV-cached generation
+# ---------------------------------------------------------------------------
+
+class TestKVCachedGenerate:
+    S_IN = 8
+    NUM_STEPS = 3
+
+    @pytest.fixture(scope="class")
+    def seed_tokens(self):
+        return jnp.zeros((self.S_IN, 4, 21), dtype=jnp.uint16)
+
+    def test_cached_matches_uncached(self, model, seed_tokens):
+        """_generate_cached must produce the same tokens as _generate."""
+        tokens_ref, _ = _generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS)
+        tokens_cached, _ = _generate_cached(model, seed_tokens, KEY, num_steps=self.NUM_STEPS)
+        assert jnp.array_equal(tokens_ref, tokens_cached)
+
+    def test_cached_shape(self, model, seed_tokens):
+        tokens, _ = _generate_cached(model, seed_tokens, KEY, num_steps=self.NUM_STEPS)
+        assert tokens.shape == (self.S_IN + self.NUM_STEPS, 4, 21)
+
+    def test_cached_jit_smoke(self, model, seed_tokens):
+        out, _ = eqx.filter_jit(_generate_cached)(model, seed_tokens, KEY, num_steps=self.NUM_STEPS)
+        assert out.shape == (self.S_IN + self.NUM_STEPS, 4, 21)
+
+    def test_cached_and_uncached_consistent_via_generate(self, model, seed_tokens):
+        """generate(use_kv_cache=True/False) must produce the same tokens."""
+        t_cached, _ = generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS,
+                                num_samples=1, use_kv_cache=True)
+        t_plain,  _ = generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS,
+                                num_samples=1, use_kv_cache=False)
+        assert jnp.array_equal(t_cached[0], t_plain[0])
 
 
 def test_wav_creates_softsynth_non_wav_does_not(model, step_logits):

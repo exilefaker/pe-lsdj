@@ -785,8 +785,8 @@ def resolve_step(
 
 
 def generate_step(
-    carry: tuple[Array, SongBanks], 
-    key: Key, 
+    carry: tuple[Array, SongBanks],
+    xs: tuple,
     model,
     instr_match_threshold: float,
     table_match_threshold: float,
@@ -794,12 +794,21 @@ def generate_step(
     softsynth_match_threshold: float,
 ) -> tuple[Array, SongBanks]:
     """
-    `carry` contains 
+    `carry` contains
         (generated_sequence, song_banks)
+    `xs` contains
+        (key, step_idx) — random key and 0-based step counter
+
+    Absolute positions are assigned consistently with the cached path: at step i,
+    the context window represents tokens at positions [i, i+1, ..., W-1+i], so
+    phrase_pos = (i + j) % STEPS_PER_PHRASE for the j-th context slot.
     """
     input_tokens, banks_in = carry
+    key, step_idx = xs
+    W = input_tokens.shape[0]
+    positions = step_idx + jnp.arange(W)
 
-    hiddens                   = model.encode(input_tokens, banks_in)           # (S, 4, d_model)
+    hiddens                   = model.encode(input_tokens, banks_in, positions=positions)  # (S, 4, d_model)
     last                      = hiddens[-1]                                   # (4, d_model)
     logits_dict, latents      = jax.vmap(model.output_heads.generation_outputs)(last)
 
@@ -822,6 +831,123 @@ def generate_step(
 
 
 DEFAULT_NUM_STEPS = 128
+
+
+def generate_step_cached(
+    carry: tuple,
+    xs: tuple,
+    model,
+    prompt_len: int,
+    instr_match_threshold: float,
+    table_match_threshold: float,
+    groove_match_threshold: float,
+    softsynth_match_threshold: float,
+) -> tuple:
+    """
+    One KV-cached autoregressive generation step.
+
+    Unlike generate_step, this does NOT re-encode the full context window.
+    Instead it:
+      1. Uses the stored hidden state from the previous step to predict the next token.
+      2. Embeds the new token at its absolute position (prompt_len + step_idx).
+      3. Runs it through all transformer blocks via the KV cache with RoPE.
+
+    The phrase position embedding in the embedder uses abs_pos % STEPS_PER_PHRASE,
+    giving the correct intra-phrase position for each generated step.
+    RoPE is applied inside the transformer blocks using new_pos, so Q·K encodes
+    only relative distance regardless of where old tokens sit in the cache.
+
+    carry : (last_hidden, banks, k_cache, v_cache)
+        last_hidden : (4, d_model)       — hidden state from the most recently processed token
+        k_cache     : (B, W, 4, d_model) — post-RoPE keys for each block
+        v_cache     : (B, W, 4, d_model)
+    xs    : (key, step_idx) — scanned values
+    Returns updated carry and the new token (4, 21).
+    """
+    last_hidden, banks_in, k_cache, v_cache = carry
+    key, step_idx = xs
+    abs_pos = prompt_len + step_idx
+
+    # Predict from the previous hidden state
+    logits_dict, latents = jax.vmap(model.output_heads.generation_outputs)(last_hidden)
+    next_token, banks_out = resolve_step(
+        model.output_heads, banks_in, key, logits_dict, latents,
+        instr_match_threshold, table_match_threshold,
+        groove_match_threshold, softsynth_match_threshold,
+    )
+
+    # Embed the new token at its absolute position (for phrase position encoding)
+    x_new = model.embedder(
+        next_token[None], banks_out,
+        positions=jnp.asarray(abs_pos)[None],
+    )  # (1, 4, d_model)
+
+    # Process through all blocks with KV cache; RoPE applied at abs_pos
+    new_hidden, k_cache, v_cache = model._encode_one_cached(x_new, k_cache, v_cache, abs_pos)
+
+    return (new_hidden, banks_out, k_cache, v_cache), next_token
+
+
+def _generate_cached(
+    model: eqx.Module,
+    input_tokens: Array,
+    key: Key,
+    banks: SongBanks | None = None,
+    num_steps: int = DEFAULT_NUM_STEPS,
+    instr_match_threshold: float = 0.05,
+    groove_match_threshold: float = 0.05,
+    table_match_threshold: float = 0.05,
+    softsynth_match_threshold: float = 0.05,
+    window_len: int | None = None,
+) -> tuple[Array, SongBanks]:
+    """
+    KV-cached generation. Equivalent to _generate but ~W× faster per step,
+    where W is the context window size.
+
+    Instead of re-running the full transformer over all W context tokens at every
+    step (O(W * d_model^2) per step), we:
+      1. Pre-fill the KV cache with one full forward pass over the prompt.
+      2. At each step, embed only the new token and run it through the cached
+         attention (O(d_model^2) per step, independent of W).
+
+    See _generate for parameter docs. window_len behaves identically.
+    """
+    input_tokens = jnp.asarray(input_tokens, dtype=jnp.uint16)
+    banks = banks or SongBanks.default()
+
+    if window_len is not None:
+        S = input_tokens.shape[0]
+        if window_len < S:
+            input_tokens = input_tokens[-window_len:]
+        elif window_len > S:
+            pad = jnp.zeros(
+                (window_len - S, input_tokens.shape[1], input_tokens.shape[2]),
+                dtype=jnp.uint16,
+            )
+            input_tokens = jnp.concatenate([pad, input_tokens], axis=0)
+
+    W = input_tokens.shape[0]
+    prompt_len = W  # first generated token is at absolute position W
+
+    # Pre-fill: one full forward pass over the prompt to build the KV cache.
+    # Positions 0..W-1 are used; K is stored post-RoPE for correct sliding-window attn.
+    last_hidden, k_cache, v_cache = model.prefill(input_tokens, banks)
+
+    keys = jr.split(key, num_steps)
+    step_fn = partial(
+        generate_step_cached,
+        model=model,
+        prompt_len=prompt_len,
+        instr_match_threshold=instr_match_threshold,
+        table_match_threshold=table_match_threshold,
+        groove_match_threshold=groove_match_threshold,
+        softsynth_match_threshold=softsynth_match_threshold,
+    )
+    (_, final_banks, _, _), new_tokens = jax.lax.scan(
+        step_fn, (last_hidden, banks, k_cache, v_cache),
+        (keys, jnp.arange(num_steps)),
+    )
+    return jnp.concatenate([input_tokens, new_tokens], axis=0), final_banks
 
 
 def _generate(
@@ -874,7 +1000,7 @@ def _generate(
     )
 
     (_, final_banks), new_tokens = jax.lax.scan(
-        generate_step_fn, (input_tokens, banks), keys
+        generate_step_fn, (input_tokens, banks), (keys, jnp.arange(num_steps))
     )
     return jnp.concatenate([input_tokens, new_tokens], axis=0), final_banks
 
@@ -891,6 +1017,7 @@ def generate(
     table_match_threshold: float = 0.05,
     softsynth_match_threshold: float = 0.05,
     window_len: int | None = None,
+    use_kv_cache: bool = True,
 ) -> tuple[Array, SongBanks]:
     """
     Generate `num_samples` independent samples from the same seed.
@@ -899,8 +1026,9 @@ def generate(
     choices (token sampling, entity creation) diverge across samples while the
     seed context and initial banks are shared.
 
-    window_len: see _generate. Applied once before vmapping, so all samples
-        share the same (possibly resized) prompt window.
+    window_len   : see _generate. Applied once before vmapping.
+    use_kv_cache : if True (default), uses KV-cached generation (~W× faster per step).
+                   Set to False to use the simpler full-reencoding path (e.g. for debugging).
 
     Returns:
         tokens: (num_samples, S + num_steps, NUM_CHANNELS, 21) uint16
@@ -911,9 +1039,10 @@ def generate(
     input_tokens = jnp.asarray(input_tokens, dtype=jnp.uint16)
     banks = banks or SongBanks.default()
     sample_keys = jr.split(key, num_samples)
+    _gen = _generate_cached if use_kv_cache else _generate
 
     def _one_sample(k):
-        return _generate(
+        return _gen(
             model, input_tokens, k, banks, num_steps,
             instr_match_threshold, groove_match_threshold,
             table_match_threshold, softsynth_match_threshold,

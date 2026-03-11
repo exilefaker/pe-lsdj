@@ -448,6 +448,101 @@ def _norm2d(norm, x):
     return jax.vmap(jax.vmap(norm))(x)
 
 
+def apply_rope(x: Array, positions: Array) -> Array:
+    """
+    Apply Rotary Position Embeddings to a Q or K tensor.
+
+    Rotates each (head_dim/2)-pair of dimensions by m*theta_i, where m is the
+    absolute token position and theta_i is a geometric frequency. The dot product
+    Q·K then depends only on the relative distance (m-n), not absolute positions.
+    This means cached K values remain valid as the sliding window advances.
+
+    x         : (S, H, head_dim) — head_dim must be even
+    positions : (S,) integer position indices (absolute, 0-based)
+    Returns   : (S, H, head_dim) with each head_dim/2 pair rotated by m*theta_i
+    """
+    S, H, head_dim = x.shape
+    half = head_dim // 2
+    inv_freq = 10000.0 ** (-jnp.arange(half, dtype=jnp.float32) * 2 / head_dim)
+    angles = positions.astype(jnp.float32)[:, None] * inv_freq[None, :]  # (S, half)
+    cos_a = jnp.cos(angles)[:, None, :]   # (S, 1, half) — broadcast over H
+    sin_a = jnp.sin(angles)[:, None, :]
+    x_even = x[:, :, 0::2]                # (S, H, half)
+    x_odd  = x[:, :, 1::2]
+    out_even = x_even * cos_a - x_odd * sin_a
+    out_odd  = x_even * sin_a + x_odd * cos_a
+    # stack + reshape interleaves: [e0, o0, e1, o1, ...]
+    return jnp.stack([out_even, out_odd], axis=-1).reshape(S, H, head_dim)
+
+
+def _rope_full_attention(attn, x_ch, positions, causal_mask):
+    """
+    Full-sequence multi-head attention with RoPE applied to Q and K, for one channel.
+
+    RoPE is applied after projecting Q and K, so the dot product Q·K encodes only
+    relative distance. V is not rotated. Used in both encode and prefill.
+
+    attn       : eqx.nn.MultiheadAttention
+    x_ch       : (S, d_model) — pre-norm input for this channel
+    positions  : (S,) integer absolute positions
+    causal_mask: (S, S) bool — True where attention is allowed
+    Returns    : (S, d_model)
+    """
+    S, d = x_ch.shape
+    H = attn.num_heads
+    head_dim = d // H
+
+    Q = jax.vmap(attn.query_proj)(x_ch).reshape(S, H, head_dim)
+    K = jax.vmap(attn.key_proj)(x_ch).reshape(S, H, head_dim)
+    V = jax.vmap(attn.value_proj)(x_ch).reshape(S, H, head_dim)
+
+    Q = apply_rope(Q, positions)
+    K = apply_rope(K, positions)   # V is NOT rotated
+
+    scale  = head_dim ** -0.5
+    scores = jnp.einsum('qhd,khd->qkh', Q, K) * scale      # (S, S, H)
+    scores = jnp.where(causal_mask[:, :, None], scores, -jnp.inf)
+    weights = jax.nn.softmax(scores, axis=1)                 # softmax over keys
+    out    = jnp.einsum('qkh,khd->qhd', weights, V)         # (S, H, head_dim)
+    out    = jax.vmap(attn.output_proj)(out.reshape(S, d))
+    return out                                               # (S, d_model)
+
+
+def _rope_cached_attention(attn, q_ch, k_cache_ch, v_cache_ch, new_pos):
+    """
+    Single-query attention against a post-RoPE K cache, for one channel.
+
+    The cache stores K values that were already rotated by their absolute positions
+    at prefill time. Here we rotate Q by new_pos and attend against the cached K —
+    the Q·K dot product automatically encodes the relative distance, regardless of
+    where old tokens sit in the sliding window.
+
+    attn       : eqx.nn.MultiheadAttention
+    q_ch       : (1, d_model)  — new token input (will be Q-projected + RoPE'd)
+    k_cache_ch : (W, d_model)  — cached POST-ROPE projected keys
+    v_cache_ch : (W, d_model)  — cached projected values (NOT RoPE'd)
+    new_pos    : scalar int    — absolute position of the new token
+    Returns    : (1, d_model)
+    """
+    d = q_ch.shape[-1]
+    H = attn.num_heads
+    head_dim = d // H
+    W = k_cache_ch.shape[0]
+
+    q = attn.query_proj(q_ch[0]).reshape(1, H, head_dim)
+    q = apply_rope(q, jnp.asarray(new_pos)[None])[0]      # (H, head_dim) — RoPE at new_pos
+
+    k = k_cache_ch.reshape(W, H, head_dim)                 # post-RoPE cached K
+    v = v_cache_ch.reshape(W, H, head_dim)
+
+    scale   = head_dim ** -0.5
+    scores  = jnp.einsum('hd,whd->hw', q, k) * scale      # (H, W)
+    weights = jax.nn.softmax(scores, axis=-1)              # (H, W)
+    out     = jnp.einsum('hw,whd->hd', weights, v)        # (H, head_dim)
+    out     = attn.output_proj(out.reshape(d))
+    return out[None]                                       # (1, d_model)
+
+
 class AxialTransformerBlock(eqx.Module):
     temporal_attn: eqx.nn.MultiheadAttention
     channel_attn:  eqx.nn.MultiheadAttention
@@ -468,7 +563,7 @@ class AxialTransformerBlock(eqx.Module):
         self.dropout  = eqx.nn.Dropout(p=dropout_p)
 
     def __call__(self, x: Array, causal_mask: Bool[Array, "S S"],
-                 key: Key | None = None) -> Array:
+                 positions: Array, key: Key | None = None) -> Array:
         inference = key is None
         k1, k2, k3 = jr.split(key, 3) if key is not None else (None, None, None)
 
@@ -480,7 +575,7 @@ class AxialTransformerBlock(eqx.Module):
         normed = _norm2d(self.norm_t, x)
         x = x + self.dropout(
             jax.vmap(
-                lambda x_ch: self.temporal_attn(x_ch, x_ch, x_ch, mask=causal_mask),
+                lambda x_ch: _rope_full_attention(self.temporal_attn, x_ch, positions, causal_mask),
                 in_axes=1, out_axes=1,
             )(normed),
             key=k2, inference=inference,
@@ -491,6 +586,98 @@ class AxialTransformerBlock(eqx.Module):
             key=k3, inference=inference,
         )
         return x
+
+    def build_layer_cache(self, x: Array, positions: Array) -> tuple[Array, Array, Array]:
+        """
+        Full forward pass for this block (inference only — no dropout), also
+        returning the KV cache tensors for the temporal attention layer.
+
+        K is stored POST-ROPE: each key vector has already been rotated by its
+        absolute position. This is essential for correctness — when the sliding
+        window advances, the cached K values remain valid because Q·K depends
+        only on relative distance (new_pos - cached_pos), not absolute positions.
+        V is stored without rotation.
+
+        x         : (W, 4, d_model) — input to this block
+        positions : (W,) integer absolute positions
+        Returns   : (x_out, K, V) where K and V are (W, 4, d_model).
+        """
+        W = x.shape[0]
+        d_model = x.shape[-1]
+        H = self.temporal_attn.num_heads
+        head_dim = d_model // H
+        causal_mask = jnp.tril(jnp.ones((W, W), dtype=bool))
+
+        # Channel attention (across 4 channels at each timestep)
+        normed = _norm2d(self.norm_c, x)
+        x = x + jax.vmap(lambda x_t: self.channel_attn(x_t, x_t, x_t))(normed)
+
+        # Post-RoPE K for caching; V without RoPE
+        normed = _norm2d(self.norm_t, x)
+        def _proj_and_rope_k(x_ch):
+            K = jax.vmap(self.temporal_attn.key_proj)(x_ch).reshape(W, H, head_dim)
+            return apply_rope(K, positions).reshape(W, d_model)
+        K = jax.vmap(_proj_and_rope_k, in_axes=1, out_axes=1)(normed)  # (W, 4, d_model) post-RoPE
+        V = jax.vmap(jax.vmap(self.temporal_attn.value_proj))(normed)  # (W, 4, d_model) no RoPE
+
+        x = x + jax.vmap(
+            lambda x_ch: _rope_full_attention(self.temporal_attn, x_ch, positions, causal_mask),
+            in_axes=1, out_axes=1,
+        )(normed)
+
+        # MLP
+        normed = _norm2d(self.norm_mlp, x)
+        x = x + jax.vmap(jax.vmap(self.mlp))(normed)
+        return x, K, V
+
+    def cached_step(self, x_new: Array, k_cache: Array, v_cache: Array,
+                    new_pos) -> tuple[Array, Array, Array]:
+        """
+        Process a single new token through this block using the KV cache.
+
+        K for the new token is stored POST-ROPE (rotated by new_pos) before being
+        appended to the cache, matching the format of the prefilled cache from
+        build_layer_cache. Q is rotated by new_pos inside _rope_cached_attention,
+        so Q·K encodes only relative distance. V is not rotated.
+
+        x_new   : (1, 4, d_model) — embedded new token
+        k_cache : (W, 4, d_model) — cached POST-ROPE keys from all prior positions
+        v_cache : (W, 4, d_model) — cached values (no RoPE)
+        new_pos : scalar int      — absolute position of the new token
+        Returns : (x_new_out, new_k_cache, new_v_cache)
+        """
+        d_model = x_new.shape[-1]
+        H = self.temporal_attn.num_heads
+        head_dim = d_model // H
+
+        # Channel attention — only the new timestep attends to itself (4 channels)
+        normed = _norm2d(self.norm_c, x_new)
+        x_new = x_new + jax.vmap(lambda x_t: self.channel_attn(x_t, x_t, x_t))(normed)
+
+        # Project + RoPE K for new token; project V without RoPE
+        normed = _norm2d(self.norm_t, x_new)
+        def _new_k_ch(x_ch):  # x_ch: (1, d_model)
+            K = jax.vmap(self.temporal_attn.key_proj)(x_ch).reshape(1, H, head_dim)
+            return apply_rope(K, jnp.asarray(new_pos)[None]).reshape(1, d_model)
+        k_new = jax.vmap(_new_k_ch, in_axes=1, out_axes=1)(normed)        # (1, 4, d_model) post-RoPE
+        v_new = jax.vmap(jax.vmap(self.temporal_attn.value_proj))(normed)  # (1, 4, d_model) no RoPE
+
+        k_cache = jnp.concatenate([k_cache[1:], k_new], axis=0)            # (W, 4, d_model)
+        v_cache = jnp.concatenate([v_cache[1:], v_new], axis=0)
+
+        # Temporal attention: single query against the full W-length post-RoPE cache
+        attn_out = jax.vmap(
+            lambda q_ch, k_ch, v_ch: _rope_cached_attention(
+                self.temporal_attn, q_ch, k_ch, v_ch, new_pos
+            ),
+            in_axes=(1, 1, 1), out_axes=1,
+        )(normed, k_cache, v_cache)                                         # (1, 4, d_model)
+        x_new = x_new + attn_out
+
+        # MLP
+        normed = _norm2d(self.norm_mlp, x_new)
+        x_new = x_new + jax.vmap(jax.vmap(self.mlp))(normed)
+        return x_new, k_cache, v_cache
 
 
 class LSDJTransformer(eqx.Module):
@@ -516,6 +703,9 @@ class LSDJTransformer(eqx.Module):
         dropout_p: float = 0.0,
         **embedder_kwargs,
     ):
+        assert (d_model // num_heads_t) % 2 == 0, (
+            f"head_dim = d_model // num_heads_t = {d_model // num_heads_t} must be even for RoPE"
+        )
         keys = jr.split(key, num_blocks + 3)
         self.d_model = d_model
         self.noise_sd = noise_sd
@@ -529,8 +719,9 @@ class LSDJTransformer(eqx.Module):
         self.final_norm   = eqx.nn.LayerNorm(d_model)
         self.output_heads = OutputHeads(d_model, instr_entity_dim, table_entity_dim, softsynth_entity_dim, keys[-1])
 
-    def encode(self, song_tokens: Array, banks: SongBanks, *, key: Key | None = None) -> Array:
-        x = self.embedder(song_tokens, banks)
+    def encode(self, song_tokens: Array, banks: SongBanks, *,
+               positions: Array | None = None, key: Key | None = None) -> Array:
+        x = self.embedder(song_tokens, banks, positions=positions)
         if key is not None:
             # Split one key for noise, one per block for dropout
             keys = jr.split(key, len(self.blocks) + 1)
@@ -541,13 +732,69 @@ class LSDJTransformer(eqx.Module):
         else:
             block_keys = [None] * len(self.blocks)
         S = x.shape[0]
+        if positions is None:
+            positions = jnp.arange(S)
         causal_mask = jnp.tril(jnp.ones((S, S), dtype=bool))
         for block, bkey in zip(self.blocks, block_keys):
-            x = block(x, causal_mask, bkey)
+            x = block(x, causal_mask, positions, bkey)
         return _norm2d(self.final_norm, x)
 
     def __call__(self, song_tokens: Array, banks: SongBanks, *, key: Key | None = None):
         return jax.vmap(jax.vmap(self.output_heads))(self.encode(song_tokens, banks, key=key))
+
+    def prefill(self, input_tokens: Array, banks: SongBanks) -> tuple[Array, Array, Array]:
+        """
+        Run a full forward pass on the prompt and return the last hidden state plus
+        the KV cache pre-filled for all prompt positions.
+
+        This is the setup step for KV-cached autoregressive generation:
+          - last_hidden provides the first prediction (what comes after the prompt)
+          - k_cache / v_cache allow subsequent steps to run in O(d_model^2) per step
+            rather than O(W * d_model^2) by reusing the projected keys and values
+            from all prior positions.
+
+        input_tokens : (W, 4, 21)
+        Returns : (last_hidden, k_cache, v_cache)
+            last_hidden : (4, d_model)
+            k_cache     : (num_blocks, W, 4, d_model)
+            v_cache     : (num_blocks, W, 4, d_model)
+        """
+        x = self.embedder(input_tokens, banks)
+        W = x.shape[0]
+        positions = jnp.arange(W)
+        all_K, all_V = [], []
+        for block in self.blocks:
+            x, K, V = block.build_layer_cache(x, positions)
+            all_K.append(K)
+            all_V.append(V)
+        x = _norm2d(self.final_norm, x)          # (W, 4, d_model)
+        last_hidden = x[-1]                       # (4, d_model)
+        return last_hidden, jnp.stack(all_K), jnp.stack(all_V)
+
+    def _encode_one_cached(self, x_new: Array, k_cache: Array, v_cache: Array,
+                           new_pos) -> tuple[Array, Array, Array]:
+        """
+        Process one already-embedded new token through all blocks using the KV cache.
+
+        new_pos is the absolute position of the new token (prompt_len + step_idx).
+        It is passed to each block's cached_step to apply RoPE at the correct position.
+
+        x_new   : (1, 4, d_model) — embedded new token (output of embedder)
+        k_cache : (num_blocks, W, 4, d_model)
+        v_cache : (num_blocks, W, 4, d_model)
+        new_pos : scalar int — absolute position of the new token
+        Returns : (hidden, new_k_cache, new_v_cache)
+            hidden      : (4, d_model) — hidden state for output heads
+            new_k_cache : (num_blocks, W, 4, d_model)
+            new_v_cache : (num_blocks, W, 4, d_model)
+        """
+        new_Ks, new_Vs = [], []
+        for i, block in enumerate(self.blocks):
+            x_new, k_i, v_i = block.cached_step(x_new, k_cache[i], v_cache[i], new_pos)
+            new_Ks.append(k_i)
+            new_Vs.append(v_i)
+        x_new = _norm2d(self.final_norm, x_new)  # (1, 4, d_model)
+        return x_new[0], jnp.stack(new_Ks), jnp.stack(new_Vs)
 
     def write_metadata(self, filepath):
         step  = self.embedder.step_embedder
