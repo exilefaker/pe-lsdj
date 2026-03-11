@@ -834,10 +834,17 @@ def _generate(
     groove_match_threshold: float = 0.05,
     table_match_threshold: float = 0.05,
     softsynth_match_threshold: float = 0.05,
+    window_len: int | None = None,
 ) -> tuple[Array, SongBanks]:
     """
     Generate a (num_steps, NUM_CHANNELS=4, feature_dim) sample conditioned on `input_tokens`.
     Use `banks` as prior entities.
+
+    window_len: if given, the model conditions on at most this many tokens at each step.
+        Prompts shorter than window_len are zero-padded at the front; longer prompts are
+        truncated to the last window_len tokens. If None, the prompt length is used as-is.
+        Note: lax.scan already enforces a fixed context size equal to the carry shape, so
+        this parameter controls that size independently of the prompt length.
 
     Returns (input_tokens ++ new_tokens, final_banks).
     """
@@ -845,6 +852,17 @@ def _generate(
 
     input_tokens = jnp.asarray(input_tokens, dtype=jnp.uint16)
     banks = banks or SongBanks.default()
+
+    if window_len is not None:
+        S = input_tokens.shape[0]
+        if window_len < S:
+            input_tokens = input_tokens[-window_len:]
+        elif window_len > S:
+            pad = jnp.zeros(
+                (window_len - S, input_tokens.shape[1], input_tokens.shape[2]),
+                dtype=jnp.uint16,
+            )
+            input_tokens = jnp.concatenate([pad, input_tokens], axis=0)
 
     generate_step_fn = partial(
         generate_step,
@@ -872,6 +890,7 @@ def generate(
     groove_match_threshold: float = 0.05,
     table_match_threshold: float = 0.05,
     softsynth_match_threshold: float = 0.05,
+    window_len: int | None = None,
 ) -> tuple[Array, SongBanks]:
     """
     Generate `num_samples` independent samples from the same seed.
@@ -880,8 +899,12 @@ def generate(
     choices (token sampling, entity creation) diverge across samples while the
     seed context and initial banks are shared.
 
+    window_len: see _generate. Applied once before vmapping, so all samples
+        share the same (possibly resized) prompt window.
+
     Returns:
         tokens: (num_samples, S + num_steps, NUM_CHANNELS, 21) uint16
+                where S is the effective prompt length (after window_len applied).
         banks:  SongBanks where each field has a leading num_samples dimension.
                 To extract one sample's banks: jax.tree.map(lambda x: x[i], banks)
     """
@@ -894,6 +917,7 @@ def generate(
             model, input_tokens, k, banks, num_steps,
             instr_match_threshold, groove_match_threshold,
             table_match_threshold, softsynth_match_threshold,
+            window_len=window_len,
         )
 
     return jax.vmap(_one_sample)(sample_keys)

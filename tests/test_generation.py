@@ -327,6 +327,50 @@ class TestBatchGenerate:
         assert out.shape == (2, self.S_IN + self.NUM_STEPS, 4, 21)
 
 
+# ---------------------------------------------------------------------------
+# Sliding context window (window_len)
+# ---------------------------------------------------------------------------
+
+class TestWindowLen:
+    S_IN = 8
+    NUM_STEPS = 2
+
+    @pytest.fixture(scope="class")
+    def seed_tokens(self):
+        return jnp.zeros((self.S_IN, 4, 21), dtype=jnp.uint16)
+
+    def test_truncate_shape(self, model, seed_tokens):
+        """window_len < S_in → output has window_len + num_steps steps."""
+        W = 4
+        tokens, _ = _generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS, window_len=W)
+        assert tokens.shape == (W + self.NUM_STEPS, 4, 21)
+
+    def test_pad_shape(self, model, seed_tokens):
+        """window_len > S_in → output has window_len + num_steps steps."""
+        W = 12
+        tokens, _ = _generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS, window_len=W)
+        assert tokens.shape == (W + self.NUM_STEPS, 4, 21)
+
+    def test_exact_shape(self, model, seed_tokens):
+        """window_len == S_in → identical to no window_len."""
+        tokens_w, _ = _generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS, window_len=self.S_IN)
+        tokens_n, _ = _generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS)
+        assert jnp.array_equal(tokens_w, tokens_n)
+
+    def test_different_window_affects_output(self, model, seed_tokens):
+        """A shorter window changes what the model conditions on → different output."""
+        tokens_full, _ = _generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS)
+        tokens_short, _ = _generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS, window_len=2)
+        # The generated (new) tokens may differ when context is truncated
+        assert not jnp.array_equal(tokens_full[-self.NUM_STEPS:], tokens_short[-self.NUM_STEPS:])
+
+    def test_window_len_in_batch_generate(self, model, seed_tokens):
+        """window_len threads through generate correctly."""
+        W = 4
+        tokens, _ = generate(model, seed_tokens, KEY, num_samples=2, num_steps=self.NUM_STEPS, window_len=W)
+        assert tokens.shape == (2, W + self.NUM_STEPS, 4, 21)
+
+
 def test_wav_creates_softsynth_non_wav_does_not(model, step_logits):
     """WAV instrument must allocate a softsynth slot; PU instrument must not."""
     logits, latents = step_logits
