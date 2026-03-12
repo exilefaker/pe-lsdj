@@ -788,6 +788,7 @@ def generate_step(
     carry: tuple[Array, SongBanks],
     xs: tuple,
     model,
+    song_length: int,
     instr_match_threshold: float,
     table_match_threshold: float,
     groove_match_threshold: float,
@@ -802,13 +803,15 @@ def generate_step(
     Absolute positions are assigned consistently with the cached path: at step i,
     the context window represents tokens at positions [i, i+1, ..., W-1+i], so
     phrase_pos = (i + j) % STEPS_PER_PHRASE for the j-th context slot.
+    song_length is used for the progress embedding (passed from _generate).
     """
     input_tokens, banks_in = carry
     key, step_idx = xs
     W = input_tokens.shape[0]
     positions = step_idx + jnp.arange(W)
 
-    hiddens                   = model.encode(input_tokens, banks_in, positions=positions)  # (S, 4, d_model)
+    hiddens = model.encode(input_tokens, banks_in, positions=positions,
+                           song_length=song_length)  # (S, 4, d_model)
     last                      = hiddens[-1]                                   # (4, d_model)
     logits_dict, latents      = jax.vmap(model.output_heads.generation_outputs)(last)
 
@@ -838,6 +841,7 @@ def generate_step_cached(
     xs: tuple,
     model,
     prompt_len: int,
+    song_length: int,
     instr_match_threshold: float,
     table_match_threshold: float,
     groove_match_threshold: float,
@@ -876,10 +880,11 @@ def generate_step_cached(
         groove_match_threshold, softsynth_match_threshold,
     )
 
-    # Embed the new token at its absolute position (for phrase position encoding)
+    # Embed the new token at its absolute position (for phrase position + progress encoding)
     x_new = model.embedder(
         next_token[None], banks_out,
         positions=jnp.asarray(abs_pos)[None],
+        song_length=song_length,
     )  # (1, 4, d_model)
 
     # Process through all blocks with KV cache; RoPE applied at abs_pos
@@ -928,16 +933,18 @@ def _generate_cached(
 
     W = input_tokens.shape[0]
     prompt_len = W  # first generated token is at absolute position W
+    song_length = W + num_steps  # prompt covers 0..W-1; generation continues to W+num_steps-1
 
     # Pre-fill: one full forward pass over the prompt to build the KV cache.
     # Positions 0..W-1 are used; K is stored post-RoPE for correct sliding-window attn.
-    last_hidden, k_cache, v_cache = model.prefill(input_tokens, banks)
+    last_hidden, k_cache, v_cache = model.prefill(input_tokens, banks, song_length=song_length)
 
     keys = jr.split(key, num_steps)
     step_fn = partial(
         generate_step_cached,
         model=model,
         prompt_len=prompt_len,
+        song_length=song_length,
         instr_match_threshold=instr_match_threshold,
         table_match_threshold=table_match_threshold,
         groove_match_threshold=groove_match_threshold,
@@ -990,9 +997,13 @@ def _generate(
             )
             input_tokens = jnp.concatenate([pad, input_tokens], axis=0)
 
+    W = input_tokens.shape[0]
+    song_length = W + num_steps  # prompt covers positions 0..W-1; generation continues to W+num_steps-1
+
     generate_step_fn = partial(
         generate_step,
         model=model,
+        song_length=song_length,
         instr_match_threshold=instr_match_threshold,
         table_match_threshold=table_match_threshold,
         groove_match_threshold=groove_match_threshold,

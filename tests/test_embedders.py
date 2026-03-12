@@ -492,6 +492,39 @@ class TestSequenceEmbedder:
         assert out.shape == (32, 4, 256)
         assert jnp.linalg.norm(out) > 0
 
+    def test_progress_different_positions(self, song_step_embedder, default_banks):
+        """Different absolute positions → different embedding (progress signal active)."""
+        seq_emb = SequenceEmbedder(song_step_embedder, KEY)
+        tokens = jnp.zeros((8, 4, 21))
+        out_early = seq_emb(tokens, default_banks, positions=jnp.arange(8),       song_length=64)
+        out_late  = seq_emb(tokens, default_banks, positions=jnp.arange(8) + 32,  song_length=64)
+        assert not jnp.allclose(out_early, out_late)
+
+    def test_progress_different_song_length(self, song_step_embedder, default_banks):
+        """Same positions but different song_length → different progress fraction → different embedding."""
+        seq_emb = SequenceEmbedder(song_step_embedder, KEY)
+        tokens = jnp.zeros((8, 4, 21))
+        positions = jnp.arange(8)
+        out_short = seq_emb(tokens, default_banks, positions=positions, song_length=16)
+        out_long  = seq_emb(tokens, default_banks, positions=positions, song_length=256)
+        assert not jnp.allclose(out_short, out_long)
+
+    def test_progress_none_song_length_finite(self, song_step_embedder, default_banks):
+        """song_length=None falls back to crop length; output should be finite."""
+        seq_emb = SequenceEmbedder(song_step_embedder, KEY)
+        tokens = jnp.zeros((8, 4, 21))
+        out = seq_emb(tokens, default_banks)
+        assert jnp.all(jnp.isfinite(out))
+
+    def test_progress_crop_start_shifts_output(self, song_step_embedder, default_banks):
+        """Crops at different song offsets (same content) should produce different embeddings."""
+        seq_emb = SequenceEmbedder(song_step_embedder, KEY)
+        tokens = jnp.zeros((8, 4, 21))
+        # simulate two crops from same song at different offsets
+        out_start = seq_emb(tokens, default_banks, positions=jnp.arange(8),      song_length=128)
+        out_mid   = seq_emb(tokens, default_banks, positions=jnp.arange(8) + 64, song_length=128)
+        assert not jnp.allclose(out_start, out_mid)
+
 
 # ===================================================================
 # SongBanks

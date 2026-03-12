@@ -252,17 +252,25 @@ class SequenceEmbedder(eqx.Module):
 
     Input:  song_tokens (S, 4, 21), banks: SongBanks
     Output: (S, 4, per_ch_dim)
+
+    song_length: total length of the source song (not the crop).  Used to
+    compute a normalised song-progress signal positions / song_length ∈ [0, 1).
+    Defaults to the crop length S when not provided (crop-relative fallback).
+    During training, pass the actual song length per item so that the signal
+    is consistent across songs and precisely reflects global position.
     """
     step_embedder: SongStepEmbedder
     phrase_position: PhrasePositionEmbedder
     channel_position: ChannelPositionEmbedder
+    progress_proj: eqx.nn.Linear
 
     def __init__(self, step_embedder, key):
-        k1, k2 = jr.split(key)
+        k1, k2, k3 = jr.split(key, 3)
         self.step_embedder = step_embedder
         d = step_embedder.per_ch_dim
         self.phrase_position = PhrasePositionEmbedder(d, k1)
         self.channel_position = ChannelPositionEmbedder(d, k2)
+        self.progress_proj = eqx.nn.Linear(1, d, key=k3)
 
     @classmethod
     def create(cls, key: Key, **step_kwargs):
@@ -270,15 +278,22 @@ class SequenceEmbedder(eqx.Module):
         step = SongStepEmbedder(k1, **step_kwargs)
         return cls(step, k2)
 
-    def __call__(self, song_tokens, banks, positions=None):
+    def __call__(self, song_tokens, banks, positions=None, song_length=None):
         S = song_tokens.shape[0]
         if positions is None:
             positions = jnp.arange(S)
+        _song_length = (
+            jnp.float32(S) if song_length is None
+            else jnp.asarray(song_length, dtype=jnp.float32)
+        )
         content = jax.vmap(lambda step: self.step_embedder(step, banks))(song_tokens)  # (S, 4, d)
         phrase_pos = self.phrase_position(positions % STEPS_PER_PHRASE)  # (S, d)
-        channel_pos = self.channel_position()                          # (4, d)
+        channel_pos = self.channel_position()                             # (4, d)
+        progress = positions.astype(jnp.float32) / _song_length          # (S,) in [0, 1)
+        progress_emb = jax.vmap(lambda p: self.progress_proj(p[None]))(progress)  # (S, d)
         return (
             content
             + phrase_pos[:, None, :]
             + channel_pos[None, :, :]
+            + progress_emb[:, None, :]
         )

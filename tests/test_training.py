@@ -133,7 +133,7 @@ class TestGetValidateSequences:
         S, crop_len = 49, 16
         song = FakeSong(jr.randint(jr.PRNGKey(0), (S, 4, 21), 0, 10).astype(jnp.uint16))
         seqs = get_validate_sequences([song], [SongBanks.default()], crop_len)
-        for inp, tgt, _ in seqs:
+        for inp, tgt, _, _start, _slen in seqs:
             assert inp.shape == (crop_len, 4, 21)
             assert tgt.shape == (crop_len, 4, 21)
 
@@ -141,20 +141,21 @@ class TestGetValidateSequences:
         S, crop_len = 32, 16
         song = FakeSong(jr.randint(jr.PRNGKey(0), (S, 4, 21), 0, 10).astype(jnp.float32))
         seqs = get_validate_sequences([song], [SongBanks.default()], crop_len)
-        for inp, tgt, _ in seqs:
+        for inp, tgt, _, _start, _slen in seqs:
             assert jnp.allclose(tgt[:-1], inp[1:])
 
     def test_banks_passed_through(self):
         song = FakeSong(jr.randint(jr.PRNGKey(0), (32, 4, 21), 0, 10).astype(jnp.uint16))
         banks = SongBanks.default()
         seqs = get_validate_sequences([song], [banks], crop_len=16)
-        for _, _, bnk in seqs:
+        for _, _, bnk, _start, _slen in seqs:
             assert bnk is banks
 
     def test_val_loss_finite(self, model, banks):
         song = FakeSong(jr.randint(jr.PRNGKey(0), (32, 4, 21), 0, 10).astype(jnp.uint16))
         seqs = get_validate_sequences([song], [banks], crop_len=16)
-        val_losses = [sequence_loss(model, inp, tgt, bnk) for inp, tgt, bnk in seqs]
+        val_losses = [sequence_loss(model, inp, tgt, bnk, None, start, slen)
+                      for inp, tgt, bnk, start, slen in seqs]
         assert all(jnp.isfinite(l) for l in val_losses)
 
 

@@ -108,9 +108,10 @@ def sample_crop(song_tokens: Array, crop_len: int, key: Key):
     Sample random crop from one song's token sequence for teacher forcing.
 
     song_tokens: (S, 4, 21)
-    Returns (inputs, targets):
-        inputs:  (B, 4, 21)
-        targets: (B, 4, 21)
+    Returns (inputs, targets, crop_start):
+        inputs:     (crop_len, 4, 21)
+        targets:    (crop_len, 4, 21)
+        crop_start: scalar int — absolute position of inputs[0] in the full song
     """
     S = song_tokens.shape[0]
     max_start = S - crop_len  # need crop_len + 1 total steps for shift
@@ -119,13 +120,14 @@ def sample_crop(song_tokens: Array, crop_len: int, key: Key):
     full = jax.lax.dynamic_slice(
         song_tokens, (start, 0, 0), (crop_len + 1, 4, 21)
     )
-    return full[:-1], full[1:]
+    return full[:-1], full[1:], start
 
 
 def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key):
     """Sample one crop per batch item, each from a randomly chosen song.
-    Returns (inputs, targets, batched_banks, idxs) where idxs is a JAX
-    int array of the selected song indices (useful for logging).
+    Returns (inputs, targets, batched_banks, idxs, crop_starts, song_lengths).
+        crop_starts:  (B,) int — absolute position of each crop within its song
+        song_lengths: (B,) int — full length of each selected song
     """
     k1, k2 = jr.split(key)
     idxs = jr.choice(k1, len(songs), shape=(batch_size,), replace=False)
@@ -136,15 +138,17 @@ def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key):
     ]
     inputs = jnp.stack([c[0] for c in crops])
     targets = jnp.stack([c[1] for c in crops])
+    crop_starts = jnp.stack([c[2] for c in crops])
+    song_lengths = jnp.array([songs[i].song_tokens.shape[0] for i in idxs], dtype=jnp.int32)
     batched_banks = jax.tree.map(
         lambda *xs: jnp.stack(xs),
         *[all_banks[i] for i in idxs],
     )
-    return inputs, targets, batched_banks, idxs
+    return inputs, targets, batched_banks, idxs, crop_starts, song_lengths
 
 
 def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongBanks,
-                  key: Key | None = None):
+                  key: Key | None = None, crop_start=None, song_length=None):
     """
     Teacher-forcing loss for one sequence: token CE + scalar entity CE + conditional entity CE.
 
@@ -152,9 +156,15 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
     target_tokens: (L, 4, 21)
     banks:         SongBanks for the current song (null rows pre-included)
     key:           optional PRNGKey for embedding noise (None = no noise, e.g. at validation)
+    crop_start:    absolute position of input_tokens[0] within the full song (int scalar).
+                   Used together with song_length for the progress embedding.
+    song_length:   total length of the source song (int scalar).
     Returns: scalar — mean loss per (channel × timestep)
     """
-    hiddens = model.encode(input_tokens, banks, key=key)          # (L, 4, d_model)
+    L = input_tokens.shape[0]
+    positions = jnp.arange(L) if crop_start is None else jnp.arange(L) + crop_start
+    hiddens = model.encode(input_tokens, banks, key=key,
+                           positions=positions, song_length=song_length)  # (L, 4, d_model)
     logits  = jax.vmap(jax.vmap(model.output_heads))(hiddens)    # dict of (L, 4, ...)
 
     # Token cross-entropy (note, fx_cmd, fx values, transpose)
@@ -190,30 +200,41 @@ def batch_loss(model, input_batch: Array, target_batch: Array, banks: SongBanks)
 
 
 def multi_track_batch_loss(model, input_batch: Array, target_batch: Array,
-                           batched_banks: SongBanks, noise_keys=None):
+                           batched_banks: SongBanks, noise_keys=None,
+                           crop_starts=None, song_lengths=None):
     """Cross-track/song batch loss.
-    noise_keys: (B,) array of PRNGKeys for per-item embedding noise, or None for no noise.
+    noise_keys:   (B,) array of PRNGKeys for per-item embedding noise, or None for no noise.
+    crop_starts:  (B,) int — absolute crop start positions within each song.
+    song_lengths: (B,) int — total length of each source song.
     """
+    B = input_batch.shape[0]
+    if crop_starts is None:
+        crop_starts = jnp.zeros(B, dtype=jnp.int32)
+    if song_lengths is None:
+        song_lengths = jnp.full(B, input_batch.shape[1], dtype=jnp.int32)
     if noise_keys is None:
-        losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, 0, None))(
-            model, input_batch, target_batch, batched_banks, None
+        losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, 0, None, 0, 0))(
+            model, input_batch, target_batch, batched_banks, None, crop_starts, song_lengths
         )
     else:
-        losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, 0, 0))(
-            model, input_batch, target_batch, batched_banks, noise_keys
+        losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, 0, 0, 0, 0))(
+            model, input_batch, target_batch, batched_banks, noise_keys, crop_starts, song_lengths
         )
     return jnp.mean(losses)
 
 
 @eqx.filter_jit
-def train_step(model, opt_state, optimizer, input_batch, target_batch, banks, key):
+def train_step(model, opt_state, optimizer, input_batch, target_batch, banks, key,
+               crop_starts=None, song_lengths=None):
     """One gradient step. Returns (model, opt_state, loss).
     key is split into per-item noise keys for embedding perturbation.
+    crop_starts / song_lengths: passed through to multi_track_batch_loss for
+    the progress embedding (see sequence_loss for details).
     """
     B = input_batch.shape[0]
     noise_keys = jr.split(key, B)
     loss, grads = eqx.filter_value_and_grad(multi_track_batch_loss)(
-        model, input_batch, target_batch, banks, noise_keys
+        model, input_batch, target_batch, banks, noise_keys, crop_starts, song_lengths
     )
     updates, opt_state = optimizer.update(grads, opt_state, model)
     model = eqx.apply_updates(model, updates)
@@ -223,7 +244,7 @@ def train_step(model, opt_state, optimizer, input_batch, target_batch, banks, ke
 def get_validate_sequences(val_songs, val_banks, crop_len):
     """
     Pre-gather non-overlapping crops from each validation song (remainder dropped).
-    Returns a list of (input, target, banks) triples, one per crop window.
+    Returns a list of (input, target, banks, crop_start, song_length) tuples.
     """
     results = []
     for song, banks in zip(val_songs, val_banks):
@@ -233,7 +254,7 @@ def get_validate_sequences(val_songs, val_banks, crop_len):
         for i in range(B):
             start = i * crop_len
             full = tokens[start : start + crop_len + 1]
-            results.append((full[:-1], full[1:], banks))
+            results.append((full[:-1], full[1:], banks, start, S))
     return results
 
 
@@ -348,13 +369,14 @@ def train(
         key, k_crop, k_noise = jr.split(key, 3)
 
         # Sample multi-song batch
-        inputs, targets, banks, batch_idxs = make_multi_track_batch(
+        inputs, targets, banks, batch_idxs, crop_starts, song_lengths = make_multi_track_batch(
             songs, all_banks, batch_size, crop_len, k_crop,
         )
 
         # Gradient step (k_noise is split per-item inside train_step)
         model, opt_state, loss = train_step(
-            model, opt_state, optimizer, inputs, targets, banks, k_noise
+            model, opt_state, optimizer, inputs, targets, banks, k_noise,
+            crop_starts, song_lengths,
         )
 
         if step % log_every == 0:
@@ -365,8 +387,8 @@ def train(
             # Compute validation loss if applicable
             if validation_songs is not None:
                 val_losses = [
-                    _val_seq_loss(model, inp, tgt, bnk)
-                    for inp, tgt, bnk in val_sequences
+                    _val_seq_loss(model, inp, tgt, bnk, None, start, slen)
+                    for inp, tgt, bnk, start, slen in val_sequences
                 ]
                 validation_loss = jnp.mean(jnp.stack(val_losses))
                 loss_str += f" | val {validation_loss:.4f}"

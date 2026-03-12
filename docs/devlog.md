@@ -25,7 +25,8 @@
 |   v6    | LSDJTransformer | Add constrative loss for entity embedder/decoder | ❌ (OOM) |
 |   v5.1  | LSDJTransformer | Adds instr_to_table_proj for conditioning table generation
 |   v6    | LSDJTransformer | Add dropout and Gaussian noise on embedding | ✅ |
-|   v7*   | LSDJTransformer | Use Rotary Position Embeddings (RoPE) | ? |
+|   v7    | LSDJTransformer | Use Rotary Position Embeddings (RoPE) | ? |
+|   v8*   | LSDJTransformer | Add global position scalar; jax.nn attention kernel | ? |
 
 \* current model
 

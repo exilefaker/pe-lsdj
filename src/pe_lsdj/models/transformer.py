@@ -3,7 +3,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-from jaxtyping import Array, Bool, Key
+from jaxtyping import Array, Key
 
 from pe_lsdj.embedding.song import SequenceEmbedder, SongBanks
 from pe_lsdj.constants import SOFTSYNTH_WIDTH
@@ -475,18 +475,20 @@ def apply_rope(x: Array, positions: Array) -> Array:
     return jnp.stack([out_even, out_odd], axis=-1).reshape(S, H, head_dim)
 
 
-def _rope_full_attention(attn, x_ch, positions, causal_mask):
+def _rope_full_attention(attn, x_ch, positions):
     """
     Full-sequence multi-head attention with RoPE applied to Q and K, for one channel.
 
     RoPE is applied after projecting Q and K, so the dot product Q·K encodes only
     relative distance. V is not rotated. Used in both encode and prefill.
 
-    attn       : eqx.nn.MultiheadAttention
-    x_ch       : (S, d_model) — pre-norm input for this channel
-    positions  : (S,) integer absolute positions
-    causal_mask: (S, S) bool — True where attention is allowed
-    Returns    : (S, d_model)
+    Uses jax.nn.dot_product_attention with is_causal=True for memory-efficient
+    Flash Attention — no O(S²) score matrix is materialised.
+
+    attn      : eqx.nn.MultiheadAttention
+    x_ch      : (S, d_model) — pre-norm input for this channel
+    positions : (S,) integer absolute positions
+    Returns   : (S, d_model)
     """
     S, d = x_ch.shape
     H = attn.num_heads
@@ -499,12 +501,9 @@ def _rope_full_attention(attn, x_ch, positions, causal_mask):
     Q = apply_rope(Q, positions)
     K = apply_rope(K, positions)   # V is NOT rotated
 
-    scale  = head_dim ** -0.5
-    scores = jnp.einsum('qhd,khd->qkh', Q, K) * scale      # (S, S, H)
-    scores = jnp.where(causal_mask[:, :, None], scores, -jnp.inf)
-    weights = jax.nn.softmax(scores, axis=1)                 # softmax over keys
-    out    = jnp.einsum('qkh,khd->qhd', weights, V)         # (S, H, head_dim)
-    out    = jax.vmap(attn.output_proj)(out.reshape(S, d))
+    # (S, H, head_dim) — Flash Attention handles causal masking internally
+    out = jax.nn.dot_product_attention(Q, K, V, is_causal=True)
+    out = jax.vmap(attn.output_proj)(out.reshape(S, d))
     return out                                               # (S, d_model)
 
 
@@ -562,8 +561,7 @@ class AxialTransformerBlock(eqx.Module):
         self.norm_mlp = eqx.nn.LayerNorm(d_model)
         self.dropout  = eqx.nn.Dropout(p=dropout_p)
 
-    def __call__(self, x: Array, causal_mask: Bool[Array, "S S"],
-                 positions: Array, key: Key | None = None) -> Array:
+    def __call__(self, x: Array, positions: Array, key: Key | None = None) -> Array:
         inference = key is None
         k1, k2, k3 = jr.split(key, 3) if key is not None else (None, None, None)
 
@@ -575,7 +573,7 @@ class AxialTransformerBlock(eqx.Module):
         normed = _norm2d(self.norm_t, x)
         x = x + self.dropout(
             jax.vmap(
-                lambda x_ch: _rope_full_attention(self.temporal_attn, x_ch, positions, causal_mask),
+                lambda x_ch: _rope_full_attention(self.temporal_attn, x_ch, positions),
                 in_axes=1, out_axes=1,
             )(normed),
             key=k2, inference=inference,
@@ -606,7 +604,6 @@ class AxialTransformerBlock(eqx.Module):
         d_model = x.shape[-1]
         H = self.temporal_attn.num_heads
         head_dim = d_model // H
-        causal_mask = jnp.tril(jnp.ones((W, W), dtype=bool))
 
         # Channel attention (across 4 channels at each timestep)
         normed = _norm2d(self.norm_c, x)
@@ -621,7 +618,7 @@ class AxialTransformerBlock(eqx.Module):
         V = jax.vmap(jax.vmap(self.temporal_attn.value_proj))(normed)  # (W, 4, d_model) no RoPE
 
         x = x + jax.vmap(
-            lambda x_ch: _rope_full_attention(self.temporal_attn, x_ch, positions, causal_mask),
+            lambda x_ch: _rope_full_attention(self.temporal_attn, x_ch, positions),
             in_axes=1, out_axes=1,
         )(normed)
 
@@ -720,8 +717,9 @@ class LSDJTransformer(eqx.Module):
         self.output_heads = OutputHeads(d_model, instr_entity_dim, table_entity_dim, softsynth_entity_dim, keys[-1])
 
     def encode(self, song_tokens: Array, banks: SongBanks, *,
-               positions: Array | None = None, key: Key | None = None) -> Array:
-        x = self.embedder(song_tokens, banks, positions=positions)
+               positions: Array | None = None, song_length=None,
+               key: Key | None = None) -> Array:
+        x = self.embedder(song_tokens, banks, positions=positions, song_length=song_length)
         if key is not None:
             # Split one key for noise, one per block for dropout
             keys = jr.split(key, len(self.blocks) + 1)
@@ -734,15 +732,15 @@ class LSDJTransformer(eqx.Module):
         S = x.shape[0]
         if positions is None:
             positions = jnp.arange(S)
-        causal_mask = jnp.tril(jnp.ones((S, S), dtype=bool))
         for block, bkey in zip(self.blocks, block_keys):
-            x = block(x, causal_mask, positions, bkey)
+            x = block(x, positions, bkey)
         return _norm2d(self.final_norm, x)
 
     def __call__(self, song_tokens: Array, banks: SongBanks, *, key: Key | None = None):
         return jax.vmap(jax.vmap(self.output_heads))(self.encode(song_tokens, banks, key=key))
 
-    def prefill(self, input_tokens: Array, banks: SongBanks) -> tuple[Array, Array, Array]:
+    def prefill(self, input_tokens: Array, banks: SongBanks,
+               song_length=None) -> tuple[Array, Array, Array]:
         """
         Run a full forward pass on the prompt and return the last hidden state plus
         the KV cache pre-filled for all prompt positions.
@@ -754,12 +752,14 @@ class LSDJTransformer(eqx.Module):
             from all prior positions.
 
         input_tokens : (W, 4, 21)
+        song_length  : total expected song length (prompt + generation steps), used
+                       for the progress embedding. Defaults to W if not provided.
         Returns : (last_hidden, k_cache, v_cache)
             last_hidden : (4, d_model)
             k_cache     : (num_blocks, W, 4, d_model)
             v_cache     : (num_blocks, W, 4, d_model)
         """
-        x = self.embedder(input_tokens, banks)
+        x = self.embedder(input_tokens, banks, song_length=song_length)
         W = x.shape[0]
         positions = jnp.arange(W)
         all_K, all_V = [], []
