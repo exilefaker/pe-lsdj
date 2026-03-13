@@ -10,7 +10,10 @@ from pe_lsdj.training import (
     batch_loss,
     train_step,
     get_validate_sequences,
+    _transpose,
+    _swap_pulse,
 )
+from pe_lsdj.constants import NUM_NOTES
 from pe_lsdj.models.transformer import LSDJTransformer
 from pe_lsdj.embedding.song import SongBanks
 
@@ -66,6 +69,72 @@ class TestSampleCrops:
         # target[0] = input[1], target[1] = input[2], ..., target[L-2] = input[L-1]
         # and target[L-1] = song[start+L] (one step beyond input)
         assert jnp.allclose(targets[0, :-1], inputs[0, 1:])
+
+
+class TestTranspose:
+
+    def _make_tokens(self, note_val=10):
+        """(8, 4, 21) tokens: known note in channels 0-2, zero in channel 3."""
+        tokens = jnp.zeros((8, 4, 21), dtype=jnp.float32)
+        tokens = tokens.at[:, :3, 0].set(note_val)   # non-null notes in PU1/PU2/WAV
+        return tokens
+
+    def test_shifts_non_null_notes(self):
+        tokens = self._make_tokens(note_val=10)
+        out = _transpose(tokens, 3)
+        assert jnp.all(out[:, :3, 0] == 13)
+
+    def test_null_notes_unchanged(self):
+        tokens = jnp.zeros((8, 4, 21), dtype=jnp.float32)   # all notes = 0 (NULL)
+        out = _transpose(tokens, 5)
+        assert jnp.all(out[:, :3, 0] == 0)
+
+    def test_noise_channel_unchanged(self):
+        tokens = jnp.zeros((8, 4, 21), dtype=jnp.float32).at[:, :, 0].set(10)
+        out = _transpose(tokens, 7)
+        assert jnp.all(out[:, 3, 0] == 10)   # channel 3 untouched
+
+    def test_clamps_at_upper_bound(self):
+        tokens = self._make_tokens(note_val=NUM_NOTES - 1)
+        out = _transpose(tokens, 5)
+        assert jnp.all(out[:, :3, 0] == NUM_NOTES)
+
+    def test_clamps_at_lower_bound(self):
+        tokens = self._make_tokens(note_val=2)
+        out = _transpose(tokens, -5)
+        assert jnp.all(out[:, :3, 0] == 1)
+
+    def test_non_note_fields_unchanged(self):
+        tokens = jnp.ones((8, 4, 21), dtype=jnp.float32)
+        out = _transpose(tokens, 3)
+        assert jnp.all(out[:, :, 1:] == 1)   # fields 1..20 untouched
+
+
+class TestSwapPulse:
+
+    def _make_tokens(self):
+        """(8, 4, 21) tokens where each channel has a distinct constant value."""
+        tokens = jnp.zeros((8, 4, 21), dtype=jnp.float32)
+        for ch in range(4):
+            tokens = tokens.at[:, ch, :].set(float(ch + 1))
+        return tokens
+
+    def test_pu1_pu2_swapped(self):
+        tokens = self._make_tokens()
+        out = _swap_pulse(tokens)
+        assert jnp.all(out[:, 0, :] == 2.0)   # PU1 now has PU2's values
+        assert jnp.all(out[:, 1, :] == 1.0)   # PU2 now has PU1's values
+
+    def test_other_channels_unchanged(self):
+        tokens = self._make_tokens()
+        out = _swap_pulse(tokens)
+        assert jnp.all(out[:, 2, :] == 3.0)   # WAV unchanged
+        assert jnp.all(out[:, 3, :] == 4.0)   # NOI unchanged
+
+    def test_swap_is_involution(self):
+        """Swapping twice returns the original."""
+        tokens = self._make_tokens()
+        assert jnp.allclose(_swap_pulse(_swap_pulse(tokens)), tokens)
 
 
 class TestSequenceLoss:

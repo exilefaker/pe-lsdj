@@ -11,6 +11,7 @@ from jaxtyping import Array, Key
 from typing import Any, NamedTuple
 
 from pe_lsdj import SongFile
+from pe_lsdj.constants import NUM_NOTES
 from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.models.transformer import (
     TOKEN_HEADS, hard_targets, entity_loss, conditional_entity_loss,
@@ -123,19 +124,71 @@ def sample_crop(song_tokens: Array, crop_len: int, key: Key):
     return full[:-1], full[1:], start
 
 
-def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key):
+def _transpose(tokens: Array, k) -> Array:
+    """
+    Shift all non-null note tokens by k semitones.
+
+    tokens : (seq_len, 4, 21) float32
+    k      : scalar int — semitones to shift (negative = down)
+
+    Note tokens sit at position 0. Token 0 = NULL (left unchanged).
+    Tokens 1..NUM_NOTES represent notes; out-of-range results are clamped
+    to the boundary so no note disappears due to a large transposition.
+
+    The noise channel (index 3) is excluded: noise "notes" are periodic
+    noise frequency values whose perceptual meaning doesn't map to semitones —
+    transposing them may degrade percussion sounds.
+    """
+    notes = tokens[:, :3, 0]  # PU1, PU2, WAV only — skip noise channel
+    shifted = jnp.where(notes > 0, jnp.clip(notes + k, 1, NUM_NOTES), 0)
+    return tokens.at[:, :3, 0].set(shifted)
+
+
+def _swap_pulse(tokens: Array) -> Array:
+    """Swap PU1 (channel 0) and PU2 (channel 1). All 21 token fields are swapped."""
+    return tokens.at[:, :2, :].set(tokens[:, :2, :][:, ::-1, :])
+
+
+def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key,
+                           transpose_range: int = 0,
+                           swap_pulse: bool = False):
     """Sample one crop per batch item, each from a randomly chosen song.
     Returns (inputs, targets, batched_banks, idxs, crop_starts, song_lengths).
         crop_starts:  (B,) int — absolute position of each crop within its song
         song_lengths: (B,) int — full length of each selected song
+
+    transpose_range: if > 0, each crop is shifted by a uniform random number of
+        semitones in [-transpose_range, +transpose_range]. Only note tokens
+        (position 0) are affected; null notes and all other fields are unchanged.
+        Default 0 = no augmentation.
+    swap_pulse: if True, each crop independently has a 50% chance of swapping
+        PU1 and PU2 channels (all 21 token fields). Default False.
     """
-    k1, k2 = jr.split(key)
+    k1, k2, k3, k4 = jr.split(key, 4)
     idxs = jr.choice(k1, len(songs), shape=(batch_size,), replace=False)
     subkeys = jr.split(k2, batch_size)
     crops = [
         sample_crop(songs[i].song_tokens.astype(jnp.float32), crop_len, subkeys[j])
         for j, i in enumerate(idxs)
     ]
+
+    if transpose_range > 0:
+        transpose_keys = jr.split(k3, batch_size)
+        def _apply(crop, tk):
+            inp, tgt, start = crop
+            k = jr.randint(tk, (), -transpose_range, transpose_range + 1)
+            return _transpose(inp, k), _transpose(tgt, k), start
+        crops = [_apply(crop, tk) for crop, tk in zip(crops, transpose_keys)]
+
+    if swap_pulse:
+        swap_keys = jr.split(k4, batch_size)
+        def _apply_swap(crop, sk):
+            inp, tgt, start = crop
+            do_swap = jr.bernoulli(sk)
+            inp = jax.lax.cond(do_swap, _swap_pulse, lambda x: x, inp)
+            tgt = jax.lax.cond(do_swap, _swap_pulse, lambda x: x, tgt)
+            return inp, tgt, start
+        crops = [_apply_swap(crop, sk) for crop, sk in zip(crops, swap_keys)]
     inputs = jnp.stack([c[0] for c in crops])
     targets = jnp.stack([c[1] for c in crops])
     crop_starts = jnp.stack([c[2] for c in crops])
@@ -271,6 +324,8 @@ def train(
     log_every: int = 50,
     checkpoint_path: str | None = None,
     resume_from_checkpoint: bool = False,
+    transpose_range: int = 0,
+    swap_pulse: bool = False,
 ):
     """
     Multi-song batching training loop.
@@ -370,7 +425,7 @@ def train(
 
         # Sample multi-song batch
         inputs, targets, banks, batch_idxs, crop_starts, song_lengths = make_multi_track_batch(
-            songs, all_banks, batch_size, crop_len, k_crop,
+            songs, all_banks, batch_size, crop_len, k_crop, transpose_range, swap_pulse,
         )
 
         # Gradient step (k_noise is split per-item inside train_step)
@@ -381,7 +436,7 @@ def train(
 
         if step % log_every == 0:
             batch_names = [songs[i].name for i in batch_idxs.tolist()]
-            names_str = ','.join(batch_names)
+            names_str = '+'.join(batch_names)
             loss_str = f"step {step:5d} | {names_str} | loss {loss:.4f}"
 
             # Compute validation loss if applicable
