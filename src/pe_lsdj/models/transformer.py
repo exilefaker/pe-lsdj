@@ -69,11 +69,17 @@ def _ce_loss_grouped(flat_logits, row, groups):
     return total / n_total
 
 
-def _mse_loss(cont_logits, row, cont_cols_array, max_vals_array):
-    """Vectorized MSE regression for continuous fields (single bank row)."""
-    targets = row[cont_cols_array].astype(jnp.float32) / max_vals_array
-    preds   = jax.nn.sigmoid(cont_logits)
-    return jnp.mean((preds - targets) ** 2)
+def _gaussian_nll_loss(raw, row, cont_cols_array, max_vals_array):
+    """Gaussian NLL for continuous fields (single bank row).
+    raw: (2*n,) — first n are mu logits, last n are log_var logits.
+    """
+    n         = cont_cols_array.shape[0]
+    mu_raw    = raw[:n]
+    log_var   = jnp.clip(raw[n:], -10.0, 10.0)
+    mu        = jax.nn.sigmoid(mu_raw)
+    targets   = row[cont_cols_array].astype(jnp.float32) / max_vals_array
+    precision = jnp.exp(-log_var)
+    return jnp.mean(0.5 * (log_var + (targets - mu) ** 2 * precision))
 
 
 def table_loss(prediction, target):
@@ -86,8 +92,8 @@ def table_loss(prediction, target):
 
     return [
         _ce_loss_grouped(prediction['cat'], target, _TABLE_SCALAR_CAT_GROUPS),
-        _mse_loss(prediction['cont'], target,
-                  _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES),
+        _gaussian_nll_loss(prediction['cont'], target,
+                           _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES),
     ]
 
 
@@ -103,21 +109,20 @@ def softsynth_loss(prediction, target):
         synth_target, 
         _SOFTSYNTH_CAT_GROUPS
     ))
-    synth_losses.append(_mse_loss(
-        prediction['cont'], 
+    synth_losses.append(_gaussian_nll_loss(
+        prediction['cont'],
         synth_target,
-        _SOFTSYNTH_CONT_COLS_ARRAY, 
-        _SOFTSYNTH_CONT_MAX_VALUES
+        _SOFTSYNTH_CONT_COLS_ARRAY,
+        _SOFTSYNTH_CONT_MAX_VALUES,
     ))
 
     # Waveframes
-    waveframes_prediction = prediction['waveframes']
-    synth_losses.append(jnp.mean(
-        (
-            jax.nn.sigmoid(waveframes_prediction) 
-            - wf_target.astype(jnp.float32) / 15.0
-        ) ** 2
-    ))
+    wf_raw = prediction['waveframes']
+    wf_n   = WAVEFRAME_DIM
+    wf_mu  = jax.nn.sigmoid(wf_raw[:wf_n])
+    wf_lv  = jnp.clip(wf_raw[wf_n:], -10.0, 10.0)
+    wf_tgt = wf_target.astype(jnp.float32) / 15.0
+    synth_losses.append(jnp.mean(0.5 * (wf_lv + (wf_tgt - wf_mu) ** 2 * jnp.exp(-wf_lv))))
 
     return synth_losses
 
@@ -133,10 +138,10 @@ def instr_scalar_loss(prediction, target):
             target, 
             _INSTR_SCALAR_CAT_GROUPS,
         ),
-        _mse_loss(
-            prediction['cont'], 
+        _gaussian_nll_loss(
+            prediction['cont'],
             target,
-            _INSTR_SCALAR_CONT_COLS_ARRAY, 
+            _INSTR_SCALAR_CONT_COLS_ARRAY,
             _INSTR_SCALAR_CONT_MAX_VALUES,
         )
     ]
@@ -164,11 +169,13 @@ def instr_loss(instr_prediction, instr_target, banks):
 
 
 def groove_loss(prediction, target):
-
-    return jnp.mean(
-        (jax.nn.sigmoid(prediction)
-         - target.astype(jnp.float32) / _GROOVE_CONT_MAX) ** 2
-    )
+    """Gaussian NLL for one groove row. prediction: (2 * GROOVE_CONT_N,) mu || log_var."""
+    n         = GROOVE_CONT_N
+    mu        = jax.nn.sigmoid(prediction[:n])
+    log_var   = jnp.clip(prediction[n:], -10.0, 10.0)
+    tgt       = target.astype(jnp.float32) / _GROOVE_CONT_MAX
+    precision = jnp.exp(-log_var)
+    return jnp.mean(0.5 * (log_var + (tgt - mu) ** 2 * precision))
 
 
 def entity_loss(entity_preds, banks: SongBanks, target_tokens):
@@ -222,8 +229,7 @@ def _groove_loss_vmap(groove_decoder, table_h, table_row, groove_rows):
 
     def groove_step(slot_idx, groove_id, groove_row):
         logits = groove_decoder(table_h, slot_idx)
-        tgt = groove_row.astype(jnp.float32) / _GROOVE_CONT_MAX
-        loss = jnp.mean((jax.nn.sigmoid(logits) - tgt) ** 2)
+        loss = groove_loss(logits, groove_row)
         return jnp.where(groove_id != 0, loss, jnp.float32(0.0))
 
     losses = jax.vmap(groove_step)(
@@ -247,8 +253,8 @@ def score_one_trace(heads, h, sidx, tr_row, tgr_rows):
     cat_logits = jnp.where(_TABLE_CAT_TRACE_MASK, -jnp.inf,
                            heads.table_decoder.cat_out(trace_h))
     cat_s    = _ce_loss_grouped(cat_logits, tr_row, _TABLE_SCALAR_CAT_GROUPS)
-    cont_s   = _mse_loss(heads.table_decoder.cont_out(trace_h), tr_row,
-                         _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES)
+    cont_s   = _gaussian_nll_loss(heads.table_decoder.cont_out(trace_h), tr_row,
+                                  _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES)
     groove_s = _groove_loss_vmap(heads.groove_decoder, trace_h, tr_row, tgr_rows)
     return cat_s + cont_s + groove_s
 
@@ -341,8 +347,8 @@ def conditional_entity_loss(heads, hiddens, target_tokens, banks):
             cat_logits = jnp.where(_TABLE_CAT_TRACE_MASK, -jnp.inf,
                                    heads.table_decoder.cat_out(trace_h))
             cat_loss   = _ce_loss_grouped(cat_logits, tr_row, _TABLE_SCALAR_CAT_GROUPS)
-            cont_loss  = _mse_loss(heads.table_decoder.cont_out(trace_h), tr_row,
-                                   _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES)
+            cont_loss  = _gaussian_nll_loss(heads.table_decoder.cont_out(trace_h), tr_row,
+                                           _TABLE_SCALAR_CONT_COLS_ARRAY, _TABLE_SCALAR_CONT_MAX_VALUES)
             groove_loss = _groove_loss_vmap(heads.groove_decoder, trace_h, tr_row, tgr_rows)
             return jnp.where(valid, cat_loss + cont_loss + groove_loss, jnp.float32(0.0))
 

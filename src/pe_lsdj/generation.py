@@ -39,6 +39,7 @@ from pe_lsdj.models.transformer import (
     _SOFTSYNTH_CONT_MAX_VALUES,
     _TABLE_CAT_TRACE_MASK,
     _GROOVE_CONT_MAX,
+    GROOVE_CONT_N,
     N_GROOVE_SLOTS,
     N_TABLE_SLOTS,
     instr_loss,
@@ -96,7 +97,27 @@ def _score_table_traces(banks, heads, table_h):
     )      
 
 
-def _build_table(logits, key) -> Array:
+def _sample_cont(raw, max_vals, temperature, key):
+    """Sample continuous values from a Gaussian NLL head output (mu || log_var).
+
+    raw:       (2n,) — first n: mu logits, last n: log_var logits
+    max_vals:  (n,)  — scale factors mapping [0,1] back to token range
+    temperature: static Python float; 0.0 → deterministic sigmoid(mu)
+    key:       PRNGKey — only used when temperature > 0
+    """
+    n      = max_vals.shape[0]
+    mu_raw = raw[:n]
+    if temperature == 0.0:
+        sample = jax.nn.sigmoid(mu_raw)
+    else:
+        log_var = jnp.clip(raw[n:], -10.0, 10.0)
+        sigma   = jnp.exp(0.5 * log_var)
+        noise   = jr.normal(key, mu_raw.shape)
+        sample  = jax.nn.sigmoid(mu_raw + jnp.sqrt(jnp.float32(temperature)) * sigma * noise)
+    return jnp.round(sample * max_vals).astype(jnp.uint16)
+
+
+def _build_table(logits, key, temperature=0.0) -> Array:
     table = jnp.zeros(TABLE_WIDTH, dtype=jnp.uint16)
     categorical, continuous = logits['cat'], logits['cont']
     keys = jr.split(key, len(_TABLE_SCALAR_CAT_GROUPS))
@@ -111,16 +132,14 @@ def _build_table(logits, key) -> Array:
         ).astype(jnp.uint16)
         table = table.at[cols].set(cat_values)
 
-    cont_values = jnp.round(jax.nn.sigmoid(
-        continuous
-    ) * _TABLE_SCALAR_CONT_MAX_VALUES).astype(jnp.uint16)
-
+    k_cont, key = jr.split(key)
+    cont_values = _sample_cont(continuous, _TABLE_SCALAR_CONT_MAX_VALUES, temperature, k_cont)
     table = table.at[_TABLE_SCALAR_CONT_COLS_ARRAY].set(cont_values)
 
     return table
 
 
-def _build_softsynth(logits, key) -> Array:
+def _build_softsynth(logits, key, temperature=0.0) -> Array:
     """
     Sample softsynth parameters and waveframes from predicted logits.
 
@@ -136,14 +155,12 @@ def _build_softsynth(logits, key) -> Array:
         cat_values = jr.categorical(keys[i], field_logits, axis=-1).astype(jnp.uint16)
         synth_row = synth_row.at[cols].set(cat_values)
 
-    cont_values = jnp.round(
-        jax.nn.sigmoid(logits['cont']) * _SOFTSYNTH_CONT_MAX_VALUES
-    ).astype(jnp.uint16)
+    k_cont, k_wf = jr.split(key)
+    cont_values = _sample_cont(logits['cont'], _SOFTSYNTH_CONT_MAX_VALUES, temperature, k_cont)
     synth_row = synth_row.at[_SOFTSYNTH_CONT_COLS_ARRAY].set(cont_values)
 
-    waveframe_row = jnp.round(
-        jax.nn.sigmoid(logits['waveframes']) * 15.0
-    ).astype(jnp.uint16)
+    wf_max = jnp.full(WAVEFRAME_DIM, 15.0)
+    waveframe_row = _sample_cont(logits['waveframes'], wf_max, temperature, k_wf)
 
     return jnp.concatenate([synth_row, waveframe_row])
 
@@ -273,6 +290,7 @@ def match_groove(
     groove_ctx: Array,  # table_entity_dim context for the groove decoder
     slot_idx: Array,    # scalar int32 — 0..N_GROOVE_SLOTS-1
     threshold: float,
+    temperature: float = 0.0,
 ) -> tuple[Array, SongBanks]:
     """
     Find or create a bank groove for one G-command slot.
@@ -306,9 +324,9 @@ def match_groove(
     )
 
     def _create_new_groove():
-        groove_row = jnp.round(
-            jax.nn.sigmoid(predicted) * _GROOVE_CONT_MAX
-        ).astype(jnp.uint16)
+        groove_row = _sample_cont(
+            predicted, jnp.full(GROOVE_CONT_N, _GROOVE_CONT_MAX), temperature, jr.PRNGKey(0),
+        )
         return banks._replace(
             grooves=banks.grooves.at[groove_id].set(groove_row),
             grooves_occupied=banks.grooves_occupied.at[groove_id].set(True),
@@ -565,7 +583,7 @@ def match_softsynth(
     return synth_id, banks_out
 
 
-def _build_instrument(logits, key, instr_type=None) -> Array:
+def _build_instrument(logits, key, instr_type=None, temperature=0.0) -> Array:
     """
     Sample instrument fields from predicted logits.
 
@@ -584,9 +602,8 @@ def _build_instrument(logits, key, instr_type=None) -> Array:
         cat_values = jr.categorical(keys[i], field_logits, axis=-1).astype(jnp.uint16)
         instr = instr.at[cols].set(cat_values)
 
-    cont_values = jnp.round(jax.nn.sigmoid(
-        continuous
-    ) * _INSTR_SCALAR_CONT_MAX_VALUES).astype(jnp.uint16)
+    k_cont, key = jr.split(key)
+    cont_values = _sample_cont(continuous, _INSTR_SCALAR_CONT_MAX_VALUES, temperature, k_cont)
     instr = instr.at[_INSTR_SCALAR_CONT_COLS_ARRAY].set(cont_values)
 
     if instr_type is not None:

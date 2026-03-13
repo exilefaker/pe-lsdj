@@ -68,7 +68,7 @@ class TestGrooveDecoder:
     def test_single_slot_shape(self, dec):
         ctx = jnp.ones(ENTITY_DIM)
         out = dec(ctx, 0)
-        assert out.shape == (GROOVE_CONT_N,)
+        assert out.shape == (2 * GROOVE_CONT_N,)  # mu || log_var (Gaussian NLL)
 
     def test_encode_shape(self, dec):
         ctx = jnp.ones(ENTITY_DIM)
@@ -79,7 +79,7 @@ class TestGrooveDecoder:
         """Slot index N_GROOVE_SLOTS is the phrase-level slot."""
         ctx = jnp.ones(ENTITY_DIM)
         out = dec(ctx, N_GROOVE_SLOTS)
-        assert out.shape == (GROOVE_CONT_N,)
+        assert out.shape == (2 * GROOVE_CONT_N,)  # mu || log_var (Gaussian NLL)
 
     def test_phrase_slot_differs_from_table_slots(self, dec):
         ctx = jr.normal(KEY, (ENTITY_DIM,))
@@ -104,7 +104,7 @@ class TestTableDecoder:
 
     def test_cont_shape(self, table_dec):
         out = table_dec(jnp.ones(ENTITY_DIM))
-        assert out['cont'].shape == (TABLE_SCALAR_CONT_N,)
+        assert out['cont'].shape == (2 * TABLE_SCALAR_CONT_N,)  # mu || log_var
 
     def test_slot_embeds_shape(self, table_dec):
         assert table_dec.slot_embeds.shape == (N_TABLE_SLOTS, ENTITY_DIM)
@@ -146,32 +146,32 @@ class TestOutputHeads:
 
     def test_instr_cont_shape(self, heads):
         out = heads(jnp.ones(D_MODEL))
-        assert out['instr']['cont'].shape == (INSTR_SCALAR_CONT_N,)
+        assert out['instr']['cont'].shape == (2 * INSTR_SCALAR_CONT_N,)  # mu || log_var
 
     def test_instr_table_shape(self, heads):
         out = heads(jnp.ones(D_MODEL))
         t = out['instr']['table']
         assert set(t.keys()) == {'cat', 'cont'}
         assert t['cat'].shape  == (TABLE_SCALAR_CAT_TOTAL_VOCAB,)
-        assert t['cont'].shape == (TABLE_SCALAR_CONT_N,)
+        assert t['cont'].shape == (2 * TABLE_SCALAR_CONT_N,)  # mu || log_var
 
     def test_softsynth_shapes(self, heads):
         out = heads(jnp.ones(D_MODEL))
         ss = out['instr']['softsynth']
-        assert ss['cat'].shape       == (SOFTSYNTH_CAT_TOTAL_VOCAB,)
-        assert ss['cont'].shape      == (SOFTSYNTH_CONT_N,)
-        assert ss['waveframes'].shape == (WAVEFRAME_DIM,)
+        assert ss['cat'].shape        == (SOFTSYNTH_CAT_TOTAL_VOCAB,)
+        assert ss['cont'].shape       == (2 * SOFTSYNTH_CONT_N,)   # mu || log_var
+        assert ss['waveframes'].shape == (2 * WAVEFRAME_DIM,)       # mu || log_var
 
     def test_phrase_table_shape(self, heads):
         out = heads(jnp.ones(D_MODEL))
         t = out['table']
         assert set(t.keys()) == {'cat', 'cont'}
         assert t['cat'].shape  == (TABLE_SCALAR_CAT_TOTAL_VOCAB,)
-        assert t['cont'].shape == (TABLE_SCALAR_CONT_N,)
+        assert t['cont'].shape == (2 * TABLE_SCALAR_CONT_N,)  # mu || log_var
 
     def test_phrase_groove_shape(self, heads):
         out = heads(jnp.ones(D_MODEL))
-        assert out['groove'].shape == (GROOVE_CONT_N,)
+        assert out['groove'].shape == (2 * GROOVE_CONT_N,)  # mu || log_var
 
     def test_phrase_groove_uses_shared_decoder(self, heads):
         """Phrase groove must route through the shared GrooveDecoder (phrase slot)."""
@@ -318,17 +318,17 @@ class TestLSDJTransformer:
         t = out['instr']['table']
         assert set(t.keys()) == {'cat', 'cont'}
         assert t['cat'].shape  == (S, 4, TABLE_SCALAR_CAT_TOTAL_VOCAB)
-        assert t['cont'].shape == (S, 4, TABLE_SCALAR_CONT_N)
+        assert t['cont'].shape == (S, 4, 2 * TABLE_SCALAR_CONT_N)  # mu || log_var
 
     def test_phrase_groove_shape(self, model, banks):
         S = 8
         out = model(jnp.zeros((S, 4, 21)), banks)
-        assert out['groove'].shape == (S, 4, GROOVE_CONT_N)
+        assert out['groove'].shape == (S, 4, 2 * GROOVE_CONT_N)  # mu || log_var
 
     def test_waveframe_shape(self, model, banks):
         S = 8
         out = model(jnp.zeros((S, 4, 21)), banks)
-        assert out['instr']['softsynth']['waveframes'].shape == (S, 4, WAVEFRAME_DIM)
+        assert out['instr']['softsynth']['waveframes'].shape == (S, 4, 2 * WAVEFRAME_DIM)  # mu || log_var
 
     def test_default_banks(self):
         model = LSDJTransformer(jr.PRNGKey(42), d_model=D_MODEL, num_heads_t=2,

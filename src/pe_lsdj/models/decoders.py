@@ -305,13 +305,13 @@ class GrooveDecoder(eqx.Module):
     """
     slot_embeds: Array          # (N_GROOVE_SLOTS + 1, context_dim)
     linear_in:   eqx.nn.Linear  # context_dim → context_dim
-    linear_out:  eqx.nn.Linear  # context_dim → GROOVE_CONT_N
+    linear_out:  eqx.nn.Linear  # context_dim → GROOVE_CONT_N * 2  (mu || log_var)
 
     def __init__(self, context_dim, key):
         k1, k2, k3 = jr.split(key, 3)
         self.slot_embeds = jr.normal(k1, (N_GROOVE_SLOTS + 1, context_dim)) * 0.02
-        self.linear_in   = eqx.nn.Linear(context_dim, context_dim,   use_bias=False, key=k2)
-        self.linear_out  = eqx.nn.Linear(context_dim, GROOVE_CONT_N, use_bias=False, key=k3)
+        self.linear_in   = eqx.nn.Linear(context_dim, context_dim,       use_bias=False, key=k2)
+        self.linear_out  = eqx.nn.Linear(context_dim, GROOVE_CONT_N * 2, use_bias=False, key=k3)
 
     def __call__(self, context, slot_idx):
         """context: (entity_dim,) → (GROOVE_CONT_N,) groove logits."""
@@ -340,14 +340,14 @@ class TableDecoder(eqx.Module):
     slot_embeds: Array          # (N_TABLE_SLOTS, context_dim) — for trace sub-slot context
     linear_in:   eqx.nn.Linear  # context_dim → context_dim
     cat_out:     eqx.nn.Linear  # context_dim → TABLE_SCALAR_CAT_TOTAL_VOCAB
-    cont_out:    eqx.nn.Linear  # context_dim → TABLE_SCALAR_CONT_N
+    cont_out:    eqx.nn.Linear  # context_dim → TABLE_SCALAR_CONT_N * 2  (mu || log_var)
 
     def __init__(self, context_dim, key):
         k1, k2, k3, k4 = jr.split(key, 4)
         self.slot_embeds = jr.normal(k1, (N_TABLE_SLOTS, context_dim)) * 0.02
-        self.linear_in   = eqx.nn.Linear(context_dim, context_dim,               use_bias=False, key=k2)
-        self.cat_out     = eqx.nn.Linear(context_dim, TABLE_SCALAR_CAT_TOTAL_VOCAB, use_bias=False, key=k3)
-        self.cont_out    = eqx.nn.Linear(context_dim, TABLE_SCALAR_CONT_N,      use_bias=False, key=k4)
+        self.linear_in   = eqx.nn.Linear(context_dim, context_dim,                   use_bias=False, key=k2)
+        self.cat_out     = eqx.nn.Linear(context_dim, TABLE_SCALAR_CAT_TOTAL_VOCAB,  use_bias=False, key=k3)
+        self.cont_out    = eqx.nn.Linear(context_dim, TABLE_SCALAR_CONT_N * 2,       use_bias=False, key=k4)
 
     def __call__(self, context):
         """context: (entity_dim,) → {
@@ -369,15 +369,15 @@ class SoftSynthDecoder(eqx.Module):
     """
     linear_in:     eqx.nn.Linear   # in_dim → out_dim
     cat_out:       eqx.nn.Linear   # out_dim → SOFTSYNTH_CAT_TOTAL_VOCAB
-    cont_out:      eqx.nn.Linear   # out_dim → SOFTSYNTH_CONT_N
-    waveframe_out: eqx.nn.Linear   # out_dim → WAVEFRAME_DIM
+    cont_out:      eqx.nn.Linear   # out_dim → SOFTSYNTH_CONT_N * 2  (mu || log_var)
+    waveframe_out: eqx.nn.Linear   # out_dim → WAVEFRAME_DIM * 2     (mu || log_var)
 
     def __init__(self, in_dim, out_dim, key):
         k1, k2, k3, k4 = jr.split(key, 4)
-        self.linear_in     = eqx.nn.Linear(in_dim,  out_dim,                  use_bias=False, key=k1)
+        self.linear_in     = eqx.nn.Linear(in_dim,  out_dim,                   use_bias=False, key=k1)
         self.cat_out       = eqx.nn.Linear(out_dim, SOFTSYNTH_CAT_TOTAL_VOCAB, use_bias=False, key=k2)
-        self.cont_out      = eqx.nn.Linear(out_dim, SOFTSYNTH_CONT_N,         use_bias=False, key=k3)
-        self.waveframe_out = eqx.nn.Linear(out_dim, WAVEFRAME_DIM,            use_bias=False, key=k4)
+        self.cont_out      = eqx.nn.Linear(out_dim, SOFTSYNTH_CONT_N * 2,      use_bias=False, key=k3)
+        self.waveframe_out = eqx.nn.Linear(out_dim, WAVEFRAME_DIM * 2,         use_bias=False, key=k4)
 
     def __call__(self, instr_h):
         """instr_h: (entity_dim,) GELU'd instrument latent."""
@@ -401,14 +401,14 @@ class InstrumentDecoder(eqx.Module):
     """
     linear_in:         eqx.nn.Linear    # d_model → instr_dim
     cat_out:           eqx.nn.Linear    # instr_dim → INSTR_SCALAR_CAT_TOTAL_VOCAB
-    cont_out:          eqx.nn.Linear    # instr_dim → INSTR_SCALAR_CONT_N
+    cont_out:          eqx.nn.Linear    # instr_dim → INSTR_SCALAR_CONT_N * 2  (mu || log_var)
     softsynth_decoder: SoftSynthDecoder
 
     def __init__(self, d_model, instr_dim, softsynth_dim, key):
         k1, k2, k3, k4 = jr.split(key, 4)
-        self.linear_in         = eqx.nn.Linear(d_model,    instr_dim,               use_bias=False, key=k1)
-        self.cat_out           = eqx.nn.Linear(instr_dim,  INSTR_SCALAR_CAT_TOTAL_VOCAB, use_bias=False, key=k2)
-        self.cont_out          = eqx.nn.Linear(instr_dim,  INSTR_SCALAR_CONT_N,     use_bias=False, key=k3)
+        self.linear_in         = eqx.nn.Linear(d_model,   instr_dim,                   use_bias=False, key=k1)
+        self.cat_out           = eqx.nn.Linear(instr_dim, INSTR_SCALAR_CAT_TOTAL_VOCAB, use_bias=False, key=k2)
+        self.cont_out          = eqx.nn.Linear(instr_dim, INSTR_SCALAR_CONT_N * 2,      use_bias=False, key=k3)
         self.softsynth_decoder = SoftSynthDecoder(instr_dim, softsynth_dim, k4)
 
     def __call__(self, x):
