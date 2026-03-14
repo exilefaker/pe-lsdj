@@ -1,6 +1,7 @@
 import os
 import json
 import datetime
+from functools import partial
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -201,7 +202,8 @@ def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key,
 
 
 def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongBanks,
-                  key: Key | None = None, crop_start=None, song_length=None):
+                  key: Key | None = None, crop_start=None, song_length=None,
+                  label_smoothing: float = 0.0):
     """
     Teacher-forcing loss for one sequence: token CE + scalar entity CE + conditional entity CE.
 
@@ -223,9 +225,12 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
     # Token cross-entropy (note, fx_cmd, fx values, transpose)
     targets  = jax.vmap(jax.vmap(hard_targets))(target_tokens)
     token_ce = 0.0
-    for name in TOKEN_HEADS:
-        log_probs  = jax.nn.log_softmax(logits[name], axis=-1)
-        token_ce  -= jnp.sum(targets[name] * log_probs)
+    for name, (_, vocab) in TOKEN_HEADS.items():
+        log_probs = jax.nn.log_softmax(logits[name], axis=-1)
+        t = targets[name]
+        if label_smoothing > 0.0:
+            t = (1.0 - label_smoothing) * t + label_smoothing / vocab
+        token_ce -= jnp.sum(t * log_probs)
 
     # Scalar entity loss: instrument scalars, table scalars, phrase groove.
     # Groove-slot and trace sub-entity losses are handled below.
@@ -254,23 +259,27 @@ def batch_loss(model, input_batch: Array, target_batch: Array, banks: SongBanks)
 
 def multi_track_batch_loss(model, input_batch: Array, target_batch: Array,
                            batched_banks: SongBanks, noise_keys=None,
-                           crop_starts=None, song_lengths=None):
+                           crop_starts=None, song_lengths=None,
+                           label_smoothing: float = 0.0):
     """Cross-track/song batch loss.
-    noise_keys:   (B,) array of PRNGKeys for per-item embedding noise, or None for no noise.
-    crop_starts:  (B,) int — absolute crop start positions within each song.
-    song_lengths: (B,) int — total length of each source song.
+    noise_keys:      (B,) array of PRNGKeys for per-item embedding noise, or None for no noise.
+    crop_starts:     (B,) int — absolute crop start positions within each song.
+    song_lengths:    (B,) int — total length of each source song.
+    label_smoothing: static float — token CE label smoothing ε (0 = disabled).
     """
     B = input_batch.shape[0]
     if crop_starts is None:
         crop_starts = jnp.zeros(B, dtype=jnp.int32)
     if song_lengths is None:
         song_lengths = jnp.full(B, input_batch.shape[1], dtype=jnp.int32)
+    # label_smoothing is a static Python float — use partial to avoid vmap axis issues
+    _seq_loss = partial(sequence_loss, label_smoothing=label_smoothing)
     if noise_keys is None:
-        losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, 0, None, 0, 0))(
+        losses = jax.vmap(_seq_loss, in_axes=(None, 0, 0, 0, None, 0, 0))(
             model, input_batch, target_batch, batched_banks, None, crop_starts, song_lengths
         )
     else:
-        losses = jax.vmap(sequence_loss, in_axes=(None, 0, 0, 0, 0, 0, 0))(
+        losses = jax.vmap(_seq_loss, in_axes=(None, 0, 0, 0, 0, 0, 0))(
             model, input_batch, target_batch, batched_banks, noise_keys, crop_starts, song_lengths
         )
     return jnp.mean(losses)
@@ -278,16 +287,18 @@ def multi_track_batch_loss(model, input_batch: Array, target_batch: Array,
 
 @eqx.filter_jit
 def train_step(model, opt_state, optimizer, input_batch, target_batch, banks, key,
-               crop_starts=None, song_lengths=None):
+               crop_starts=None, song_lengths=None, label_smoothing: float = 0.0):
     """One gradient step. Returns (model, opt_state, loss).
     key is split into per-item noise keys for embedding perturbation.
     crop_starts / song_lengths: passed through to multi_track_batch_loss for
     the progress embedding (see sequence_loss for details).
+    label_smoothing: static float — token CE label smoothing ε.
     """
     B = input_batch.shape[0]
     noise_keys = jr.split(key, B)
     loss, grads = eqx.filter_value_and_grad(multi_track_batch_loss)(
-        model, input_batch, target_batch, banks, noise_keys, crop_starts, song_lengths
+        model, input_batch, target_batch, banks, noise_keys, crop_starts, song_lengths,
+        label_smoothing,
     )
     updates, opt_state = optimizer.update(grads, opt_state, model)
     model = eqx.apply_updates(model, updates)
@@ -326,6 +337,8 @@ def train(
     resume_from_checkpoint: bool = False,
     transpose_range: int = 0,
     swap_pulse: bool = False,
+    label_smoothing: float = 0.0,
+    weight_decay: float = 0.0,
 ):
     """
     Multi-song batching training loop.
@@ -343,9 +356,14 @@ def train(
         warmup_steps=num_steps // 20,
         decay_steps=num_steps,
     )
+    def _wd_mask(params):
+        # Apply weight decay only to weight matrices (ndim >= 2); skip biases,
+        # LayerNorm scale/shift, and embeddings (all 1-D).
+        return jax.tree.map(lambda x: x is not None and x.ndim >= 2, params)
+
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
-        optax.adam(schedule),
+        optax.adamw(schedule, weight_decay=weight_decay, mask=_wd_mask),
     )
     opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
     start_step = 0
@@ -431,7 +449,7 @@ def train(
         # Gradient step (k_noise is split per-item inside train_step)
         model, opt_state, loss = train_step(
             model, opt_state, optimizer, inputs, targets, banks, k_noise,
-            crop_starts, song_lengths,
+            crop_starts, song_lengths, label_smoothing,
         )
 
         if step % log_every == 0:
