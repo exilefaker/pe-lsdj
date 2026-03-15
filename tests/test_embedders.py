@@ -10,6 +10,7 @@ from pe_lsdj.embedding.base import (
     EntityEmbedder,
     EntityType,
     GatedNormedEmbedder,
+    HelixEmbedder,
     SumEmbedder,
     ConcatEmbedder,
 )
@@ -414,6 +415,64 @@ class TestForwardPassShapes:
         out = step_emb(song_file.song_tokens[0], banks)
         assert out.shape == (4, 256)
         assert jnp.linalg.norm(out) > 0
+
+
+# ===================================================================
+# HelixEmbedder
+# ===================================================================
+
+class TestHelixEmbedder:
+    # LSDJ token mapping (token = NOTES_index + 1):
+    #   NOTES[0]='---', NOTES[1]='C 3', NOTES[13]='C 4', NOTES[25]='C 5'
+    #   NOTES[24]='B 4' → token 25,  NOTES[25]='C 5' → token 26
+    #   NOTES[26]='C#5' → token 27,  NOTES[27]='D 5' → token 28
+    #   NOTES[13]='C 4' → token 14,  NOTES[15]='D 4' → token 16
+
+    def test_output_shape(self):
+        e = HelixEmbedder(32, KEY, period=12, num_values=NUM_NOTES)
+        out = e(jnp.array([1], dtype=jnp.uint16))
+        assert out.shape == (32,)
+
+    def test_null_is_zero_vector(self):
+        """NULL token (0) → zero vector regardless of projection weights."""
+        e = HelixEmbedder(32, KEY, period=12, num_values=NUM_NOTES)
+        out = e(jnp.array([0], dtype=jnp.uint16))
+        assert jnp.all(out == 0.0)
+
+    def test_valid_note_nonzero(self):
+        """Any non-null note should produce a non-zero embedding."""
+        e = HelixEmbedder(32, KEY, period=12, num_values=NUM_NOTES)
+        out = e(jnp.array([14], dtype=jnp.uint16))  # C 4
+        assert jnp.linalg.norm(out) > 0
+
+    def test_enharmonic_distance(self):
+        """B4→C5 (1 semitone) is closer in helix space than B4→C#5 (2 semitones)."""
+        e = HelixEmbedder(32, KEY, period=12, num_values=NUM_NOTES)
+        # B4=token 25, C5=token 26, C#5=token 27
+        emb_b4  = e(jnp.array([25], dtype=jnp.uint16))
+        emb_c5  = e(jnp.array([26], dtype=jnp.uint16))
+        emb_cs5 = e(jnp.array([27], dtype=jnp.uint16))
+        dist_b4_c5  = jnp.linalg.norm(emb_b4 - emb_c5)
+        dist_b4_cs5 = jnp.linalg.norm(emb_b4 - emb_cs5)
+        assert dist_b4_c5 < dist_b4_cs5
+
+    def test_same_chroma_different_octave(self):
+        """C4 and C5 (same chroma, adjacent octave) are closer than C4 and D4 (2-semitone chroma step)."""
+        e = HelixEmbedder(32, KEY, period=12, num_values=NUM_NOTES)
+        # C4=token 14, C5=token 26, D4=token 16
+        emb_c4 = e(jnp.array([14], dtype=jnp.uint16))
+        emb_c5 = e(jnp.array([26], dtype=jnp.uint16))
+        emb_d4 = e(jnp.array([16], dtype=jnp.uint16))
+        dist_octave = jnp.linalg.norm(emb_c4 - emb_c5)
+        dist_chroma = jnp.linalg.norm(emb_c4 - emb_d4)
+        assert dist_octave < dist_chroma
+
+    def test_distinct_notes_distinct_outputs(self):
+        """Different notes produce different embeddings."""
+        e = HelixEmbedder(32, KEY, period=12, num_values=NUM_NOTES)
+        out1 = e(jnp.array([14], dtype=jnp.uint16))  # C 4
+        out2 = e(jnp.array([26], dtype=jnp.uint16))  # C 5
+        assert not jnp.allclose(out1, out2)
 
 
 # ===================================================================

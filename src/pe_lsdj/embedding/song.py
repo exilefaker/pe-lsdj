@@ -11,6 +11,7 @@ from pe_lsdj.embedding.base import (
     EntityEmbedder,
     EntityType,
     GatedNormedEmbedder,
+    HelixEmbedder,
 )
 from pe_lsdj.embedding.fx import (
     GrooveEntityEmbedder,
@@ -132,7 +133,7 @@ class SongStepEmbedder(eqx.Module):
 
     Output: (4 * per_ch_dim,) = (out_dim,)
     """
-    note_embedder: GatedNormedEmbedder
+    note_embedder: HelixEmbedder
     instrument_embedder: InstrumentEntityEmbedder
     fx_embedder: FXEmbedder
     transpose_embedder: GatedNormedEmbedder
@@ -164,10 +165,11 @@ class SongStepEmbedder(eqx.Module):
         keys = jr.split(key, 12)
 
         # --- Note ---
-        self.note_embedder = GatedNormedEmbedder(
+        self.note_embedder = HelixEmbedder(
             note_dim,
             keys[0],
-            max_value=NUM_NOTES,
+            period=12,
+            num_values=NUM_NOTES,
         )
 
         # --- Shared FX value sub-embedders (positions 1..11) ---

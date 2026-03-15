@@ -27,9 +27,9 @@
 |   v6    | LSDJTransformer | Add dropout and Gaussian noise on embedding | ✅ |
 |   v7    | LSDJTransformer | Use Rotary Position Embeddings (RoPE) | ✅ |
 |   v8    | LSDJTransformer | Add global position scalar; jax.nn attention kernel | ✅ |
-|   v8.1  | LSDJTransformer | Replace MSE loss with Gaussian energy loss for continuous outputs | ❌ (training unstable) |
-|   v8.2* | LSDJTransformer | Switch to Beta-NLL loss | ? |
-|   v8.3  | LSDJTransformer | Helix encoding for note values | ? |
+|   v9    | LSDJTransformer | Replace MSE loss with Gaussian energy loss for continuous outputs | ❌ (training unstable) |
+|   v9.1* | LSDJTransformer | Switch to Beta-NLL loss | ✅ |
+|   v10   | LSDJTransformer | Helix encoding for note values | ? |
 
 
 \* current model

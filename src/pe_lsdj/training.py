@@ -423,11 +423,6 @@ def train(
             header_str += "\n"
             g.write(header_str)
 
-        if validation_songs is not None:
-            h = open(os.path.join(session_path, "validate_losses.txt"), log_mode)
-            if not resuming:
-                h.write("step,validation_loss\n")
-
     assert batch_size <= len(songs), (
         f"batch_size ({batch_size}) must be <= number of training songs ({len(songs)}) "
         "for without-replacement sampling"

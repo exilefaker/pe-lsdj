@@ -17,6 +17,7 @@ from pe_lsdj.generation import (
 from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.models.transformer import (
     groove_loss,
+    GROOVE_CONT_N,
     N_GROOVE_SLOTS,
     _GROOVE_CONT_MAX,
 )
@@ -83,8 +84,9 @@ def test_match_loss_groove_ordering(model, step_logits):
     groove_ctx = latents['phrase_groove_ctx']
     predicted = model.output_heads.groove_decoder(groove_ctx, jnp.int32(N_GROOVE_SLOTS))
 
+    # predicted is (2 * GROOVE_CONT_N,): first half = mu, second half = log_var
     close_row = jnp.round(
-        jax.nn.sigmoid(predicted) * _GROOVE_CONT_MAX
+        jax.nn.sigmoid(predicted[:GROOVE_CONT_N]) * _GROOVE_CONT_MAX
     ).astype(jnp.uint8)
     far_row = jnp.zeros_like(close_row)
 

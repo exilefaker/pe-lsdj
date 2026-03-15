@@ -194,6 +194,47 @@ class ConcatEmbedder(BaseEmbedder):
         return self.projection(embeddings)
 
 
+class HelixEmbedder(eqx.Module):
+    """
+    Encodes a discrete cyclic token (e.g. a note) as a point on a helix:
+        (cos(2π·chroma/period), sin(2π·chroma/period), octave/max_octave)
+
+    The chroma dimension is circular (period-periodic), so adjacent values
+    at period boundaries (e.g. B→C in music) have small distance. The octave
+    dimension is linear and normalised to [0, 1].
+
+    NULL token (value 0) maps to the zero vector, which lies at the origin
+    and is never produced by the helix projection — geometrically distinct
+    from all valid tokens.
+
+    Input:  token — shape (1,) uint16, 0=NULL, 1..num_values=valid
+    Output: (out_dim,)
+    """
+    proj: eqx.nn.Linear   # Linear(3, out_dim, use_bias=False)
+    out_dim: int
+    period: int
+    num_values: int
+
+    def __init__(self, out_dim, key, period=12, num_values=72):
+        self.out_dim = out_dim
+        self.period = period
+        self.num_values = num_values
+        self.proj = eqx.nn.Linear(3, out_dim, use_bias=False, key=key)
+
+    def __call__(self, token, _banks=None):
+        val = token[0].astype(jnp.float32) - 1.0   # 0-indexed semitone; NULL → -1
+        is_null = token[0] == 0
+        chroma = val % float(self.period)
+        octave = val // float(self.period)
+        max_octave = float((self.num_values - 1) // self.period)
+        coords = jnp.array([
+            jnp.cos(2.0 * jnp.pi * chroma / float(self.period)),
+            jnp.sin(2.0 * jnp.pi * chroma / float(self.period)),
+            octave / max_octave,
+        ])
+        return jnp.where(is_null, jnp.zeros(self.out_dim), self.proj(coords))
+
+
 class DummyEmbedder(BaseEmbedder):
     def __init__(self, in_dim, out_dim):
         self.in_dim = in_dim

@@ -17,6 +17,7 @@ from pe_lsdj.embedding.base import (
     DummyEmbedder,
     EnumEmbedder,
     GatedNormedEmbedder,
+    HelixEmbedder,
     SumEmbedder,
     ConcatEmbedder,
     EntityEmbedder,
