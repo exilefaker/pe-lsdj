@@ -300,7 +300,7 @@ def train_step(model, opt_state, optimizer, input_batch, target_batch, banks, ke
         model, input_batch, target_batch, banks, noise_keys, crop_starts, song_lengths,
         label_smoothing,
     )
-    updates, opt_state = optimizer.update(grads, opt_state, model)
+    updates, opt_state = optimizer.update(grads, opt_state, eqx.filter(model, eqx.is_inexact_array))
     model = eqx.apply_updates(model, updates)
     return model, opt_state, loss
 
@@ -359,7 +359,11 @@ def train(
     def _wd_mask(params):
         # Apply weight decay only to weight matrices (ndim >= 2); skip biases,
         # LayerNorm scale/shift, and embeddings (all 1-D).
-        return jax.tree.map(lambda x: x is not None and x.ndim >= 2, params)
+        return jax.tree.map(
+            lambda x: eqx.is_inexact_array(x) and x.ndim >= 2,
+            params,
+            is_leaf=lambda x: x is None,
+        )
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
