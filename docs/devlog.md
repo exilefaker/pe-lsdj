@@ -29,7 +29,9 @@
 |   v8    | LSDJTransformer | Add global position scalar; jax.nn attention kernel | ✅ |
 |   v9    | LSDJTransformer | Replace MSE loss with Gaussian energy loss for continuous outputs | ❌ (training unstable) |
 |   v9.1* | LSDJTransformer | Switch to Beta-NLL loss | ✅ |
-|   v10   | LSDJTransformer | Helix encoding for note values | ? |
+|   v10   | LSDJTransformer | Helix encoding for note values | ✅ |
+|   v11   | LSDJTransformer | Conditional FX value generation | ? |
+|   v12   | LSDJTransformer | Helix encoding, MSE loss | ? |
 
 
 \* current model
