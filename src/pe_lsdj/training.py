@@ -1,5 +1,6 @@
 import os
 import json
+import numpy as np
 import datetime
 from functools import partial
 import jax
@@ -152,16 +153,20 @@ def _swap_pulse(tokens: Array) -> Array:
 
 def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key,
                            transpose_range: int = 0,
-                           swap_pulse: bool = False):
+                           swap_pulse: bool = False,
+                           p_transpose: float = 0.2):
     """Sample one crop per batch item, each from a randomly chosen song.
     Returns (inputs, targets, batched_banks, idxs, crop_starts, song_lengths).
         crop_starts:  (B,) int — absolute position of each crop within its song
         song_lengths: (B,) int — full length of each selected song
 
-    transpose_range: if > 0, each crop is shifted by a uniform random number of
-        semitones in [-transpose_range, +transpose_range]. Only note tokens
-        (position 0) are affected; null notes and all other fields are unchanged.
-        Default 0 = no augmentation.
+    transpose_range: if > 0, each crop may be shifted by a non-zero number of
+        semitones drawn from [-transpose_range, +transpose_range] \ {0}. Only
+        note tokens (position 0) are affected; null notes and other fields
+        unchanged. Default 0 = no augmentation.
+    p_transpose: probability of applying any transposition. The remaining
+        (1 - p_transpose) mass is placed on zero (no shift). Non-zero offsets
+        share p_transpose equally. Default 0.2. Ignored when transpose_range=0.
     swap_pulse: if True, each crop independently has a 50% chance of swapping
         PU1 and PU2 channels (all 21 token fields). Default False.
     """
@@ -174,10 +179,15 @@ def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key,
     ]
 
     if transpose_range > 0:
+        n_shifts = 2 * transpose_range
+        offsets = np.concatenate([[0], np.arange(-transpose_range, transpose_range + 1)[np.arange(-transpose_range, transpose_range + 1) != 0]])
+        weights = np.array([1 - p_transpose] + [p_transpose / n_shifts] * n_shifts, dtype=np.float32)
+        jax_offsets = jnp.array(offsets, dtype=jnp.int32)
+        jax_weights = jnp.array(weights)
         transpose_keys = jr.split(k3, batch_size)
         def _apply(crop, tk):
             inp, tgt, start = crop
-            k = jr.randint(tk, (), -transpose_range, transpose_range + 1)
+            k = jr.choice(tk, jax_offsets, p=jax_weights)
             return _transpose(inp, k), _transpose(tgt, k), start
         crops = [_apply(crop, tk) for crop, tk in zip(crops, transpose_keys)]
 
@@ -336,6 +346,7 @@ def train(
     checkpoint_path: str | None = None,
     resume_from_checkpoint: bool = False,
     transpose_range: int = 0,
+    p_transpose: float = 0.2,
     swap_pulse: bool = False,
     label_smoothing: float = 0.0,
     weight_decay: float = 0.0,
@@ -442,7 +453,8 @@ def train(
 
         # Sample multi-song batch
         inputs, targets, banks, batch_idxs, crop_starts, song_lengths = make_multi_track_batch(
-            songs, all_banks, batch_size, crop_len, k_crop, transpose_range, swap_pulse,
+            songs, all_banks, batch_size, crop_len, k_crop,
+            transpose_range, swap_pulse, p_transpose,
         )
 
         # Gradient step (k_noise is split per-item inside train_step)
