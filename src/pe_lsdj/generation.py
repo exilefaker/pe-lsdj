@@ -98,23 +98,13 @@ def _score_table_traces(banks, heads, table_h):
 
 
 def _sample_cont(raw, max_vals, temperature, key):
-    """Sample continuous values from a Gaussian NLL head output (mu || log_var).
+    """Decode continuous values from MSE head output.
 
-    raw:       (2n,) — first n: mu logits, last n: log_var logits
+    raw:       (n,) — sigmoid-space logits
     max_vals:  (n,)  — scale factors mapping [0,1] back to token range
-    temperature: static Python float; 0.0 → deterministic sigmoid(mu)
-    key:       PRNGKey — only used when temperature > 0
+    temperature, key: unused (retained for call-site compatibility)
     """
-    n      = max_vals.shape[0]
-    mu_raw = raw[:n]
-    if temperature == 0.0:
-        sample = jax.nn.sigmoid(mu_raw)
-    else:
-        log_var = jnp.clip(raw[n:], -10.0, 10.0)
-        sigma   = jnp.exp(0.5 * log_var)
-        noise   = jr.normal(key, mu_raw.shape)
-        sample  = jax.nn.sigmoid(mu_raw + jnp.sqrt(jnp.float32(temperature)) * sigma * noise)
-    return jnp.round(sample * max_vals).astype(jnp.uint16)
+    return jnp.round(jax.nn.sigmoid(raw) * max_vals).astype(jnp.uint16)
 
 
 def _build_table(logits, key, temperature=0.0) -> Array:
