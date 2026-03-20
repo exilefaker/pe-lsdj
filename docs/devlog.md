@@ -81,3 +81,41 @@ reliable proxy for musical naturalness — C→E (4 semitones) is a more common 
 than C→C# (1 semitone) — so there is no clean ordinal relationship to exploit.
 A Gaussian would impose a false metric. Current default: `p_transpose=0.2`.
 
+### Helix embedding findings and next steps
+
+Qualitative evaluation of v10 (helix, no augmentation, MSE loss) vs v8 showed:
+- Main melodies frequently missing or only appearing intermittently
+- More ±1 semitone pitch errors than v8, even without transpose augmentation
+- Validation loss plateau ~2 nats higher than v8 despite 4× lower training loss
+
+Hypothesis: the helix input geometry (circular chroma, linear octave) conflicts with
+the flat CE output head over 157 notes. The backbone is pulled in two directions —
+helix structure from the input side, uniform discrete discrimination from the output
+side. In a small-data regime this degrades note accuracy.
+
+**Conclusion**: helix is only expected to help when paired with a factorized chroma ×
+octave output head (Step 3 of post_v8_plan.md). Helix as a standalone input change
+appears to actively hurt note prediction.
+
+**Next**: implement Step 3 (factorized chroma × octave output head + NULL flag head)
+before training a new helix model. NULL note handling and valid-octave masking design
+discussed in conversation history.
+
+### Robustness to sparsity and prompt dropout (deferred)
+
+Two related problems:
+
+**Sparse cues (sustained chords, silence).** LSDJ represents sustained notes as a
+single trigger followed by null steps. The model sees null steps and must infer that
+something is still playing via long-range attention. The training signal from null
+steps is weak (predicting null is easy, so gradient contribution is small), risking
+the model learning to coast through sparse regions rather than maintaining harmonic
+state. Possible fix: explicitly propagate the last active note/instrument forward into
+null steps during tokenization — significant tokenizer change, deferred.
+
+**Exposure bias / cold-start robustness.** Teacher forcing makes the model brittle to
+weak or absent context at inference. Embedding noise (already in place) partially
+addresses this. A targeted extension: **prompt dropout** — with some probability, zero
+out the first k steps of each crop before feeding to the model, forcing generation from
+weak or absent context. Cheap to implement as an augmentation in `make_multi_track_batch`,
+no architecture changes. Deferred until Step 3 / helix architecture is settled.
