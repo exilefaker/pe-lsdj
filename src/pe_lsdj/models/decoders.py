@@ -11,6 +11,10 @@ from pe_lsdj.constants import *
 # Logit groups: direct softmax heads, same-vocab members batched.
 #    { group: [ (name, token position, vocab size), ...] }
 # ---------------------------------------------------------------------------
+
+# FX value groups: these heads are conditioned on the sampled/target fx_cmd.
+FX_VAL_GROUPS = ('byte_fx', 'small_enum_fx', 'nibble_fx')
+
 LOGIT_GROUPS = {
     'note':          [('note',             0, NUM_NOTES)],
     'fx_cmd':        [('fx_cmd',           2, 19)],
@@ -31,6 +35,10 @@ TOKEN_HEADS = {}
 for _members in LOGIT_GROUPS.values():
     for _name, _pos, _vocab in _members:
         TOKEN_HEADS[_name] = (_pos, _vocab)
+
+FX_VAL_HEAD_NAMES = frozenset(
+    name for gname in FX_VAL_GROUPS for name, _, _ in LOGIT_GROUPS[gname]
+)
 
 # Token positions for the three entity roots in song_tokens.
 ENTITY_HEADS = {
@@ -445,6 +453,7 @@ class OutputHeads(eqx.Module):
     instr_to_table_proj: instr_entity_dim → table_entity_dim bridge for instrument's table context
     """
     weights:             dict[str, Array]
+    fx_cmd_cond:         eqx.nn.Linear
     groove_decoder:      GrooveDecoder
     table_decoder:       TableDecoder
     instr_decoder:       InstrumentDecoder
@@ -453,7 +462,7 @@ class OutputHeads(eqx.Module):
     instr_to_table_proj: eqx.nn.Linear
 
     def __init__(self, d_model, instr_entity_dim, table_entity_dim, softsynth_entity_dim, key):
-        keys = jr.split(key, 7)
+        keys = jr.split(key, 8)
 
         # Logit-group heads
         weights = {}
@@ -463,34 +472,60 @@ class OutputHeads(eqx.Module):
             weights[group_name] = jr.normal(keys[0], (n, vocab, d_model)) / jnp.sqrt(d_model)
         self.weights = weights
 
+        # FX command conditioning: Linear(19, d_model) used as one_hot(fx_cmd) @ weight
+        self.fx_cmd_cond = eqx.nn.Linear(19, d_model, use_bias=False, key=keys[1])
+
         # Shared GrooveDecoder
-        self.groove_decoder = GrooveDecoder(table_entity_dim, keys[1])
+        self.groove_decoder = GrooveDecoder(table_entity_dim, keys[2])
 
         # Single TableDecoder — used for both table and trace predictions
         # (trace predictions in cond_entity_scan_loss reuse these same weights)
-        self.table_decoder = TableDecoder(table_entity_dim, keys[2])
+        self.table_decoder = TableDecoder(table_entity_dim, keys[3])
 
         # Instrument decoder
-        self.instr_decoder = InstrumentDecoder(d_model, instr_entity_dim, softsynth_entity_dim, keys[3])
+        self.instr_decoder = InstrumentDecoder(d_model, instr_entity_dim, softsynth_entity_dim, keys[4])
 
         # Phrase-level projections
-        self.table_proj          = eqx.nn.Linear(d_model, table_entity_dim,           use_bias=False, key=keys[4])
-        self.phrase_groove_proj  = eqx.nn.Linear(d_model, table_entity_dim,           use_bias=False, key=keys[5])
-        self.instr_to_table_proj = eqx.nn.Linear(instr_entity_dim, table_entity_dim,  use_bias=False, key=keys[6])
+        self.table_proj          = eqx.nn.Linear(d_model, table_entity_dim,           use_bias=False, key=keys[5])
+        self.phrase_groove_proj  = eqx.nn.Linear(d_model, table_entity_dim,           use_bias=False, key=keys[6])
+        self.instr_to_table_proj = eqx.nn.Linear(instr_entity_dim, table_entity_dim,  use_bias=False, key=keys[7])
     
 
 
-    def __call__(self, x):
+    def __call__(self, x, fx_cmd_token=None):
         """
         x: (d_model,) → nested output dict.
+        fx_cmd_token:
+          None (default, scalar) — inference mode: fx_cmd logits are computed first;
+            their softmax gives a soft expected conditioning signal for fx_val heads.
+            Differentiable and self-consistent (no external information needed).
+          scalar int — teacher-forcing mode: fx_val heads are conditioned on this
+            known target cmd via one-hot. Used by sequence_loss (per-channel scalar
+            after double-vmap over (S, 4)).
         Produces token heads, instrument/table scalar predictions, and phrase-level groove.
         Groove-slot and trace sub-entity losses are computed separately in cond_entity_loss.
         """
         result = {}
 
-        # Token heads
+        # FX cmd always computed from plain x (unconditioned)
+        fx_cmd_logits = (self.weights['fx_cmd'] @ x)[0]
+        result['fx_cmd'] = fx_cmd_logits
+
+        # Conditioning signal for fx_val heads
+        if fx_cmd_token is None:
+            # Inference: soft conditioning — expected embedding over predicted cmd distribution
+            fx_cmd_signal = jax.nn.softmax(fx_cmd_logits)
+        else:
+            # Teacher forcing: hard one-hot on the known target cmd
+            fx_cmd_signal = jax.nn.one_hot(jnp.int32(fx_cmd_token), 19)
+        x_cond = x + self.fx_cmd_cond(fx_cmd_signal)
+
+        # Token heads: fx_val groups conditioned on fx_cmd; all others use plain x
         for group_name, members in LOGIT_GROUPS.items():
-            logits = self.weights[group_name] @ x
+            if group_name == 'fx_cmd':
+                continue  # already done above
+            src = x_cond if group_name in FX_VAL_GROUPS else x
+            logits = self.weights[group_name] @ src
             for i, (name, _, _) in enumerate(members):
                 result[name] = logits[i]
 
@@ -509,21 +544,44 @@ class OutputHeads(eqx.Module):
 
         return result
 
+    def conditioned_fx_val_logits(self, x, fx_cmd):
+        """
+        Compute only the fx_val head logits, conditioned on a (sampled) fx_cmd.
+
+        x:      (d_model,) backbone repr
+        fx_cmd: scalar int — the sampled fx_cmd token value
+        Returns dict of {name: logits} for all names in FX_VAL_HEAD_NAMES.
+        """
+        x_cond = x + self.fx_cmd_cond(jax.nn.one_hot(jnp.int32(fx_cmd), 19))
+        result = {}
+        for group_name in FX_VAL_GROUPS:
+            logits = self.weights[group_name] @ x_cond
+            for i, (name, _, _) in enumerate(LOGIT_GROUPS[group_name]):
+                result[name] = logits[i]
+        return result
+
     def generation_outputs(self, x):
         """
-        Like __call__ but also returns the context vectors needed by match_*.
+        Like __call__ but also returns the context vectors needed by match_* and
+        the raw backbone repr 'x' needed for conditioned_fx_val_logits.
 
         Returns (logits, latents) where latents contains:
+          'x'              — (d_model,) raw backbone repr (for conditioned_fx_val_logits)
           'table_ctx'      — (table_entity_dim,) phrase-level table context
           'instr_table_ctx'— (table_entity_dim,) instrument's table context
+          'phrase_groove_ctx' — (table_entity_dim,) phrase-level groove context
 
         These are the 'table_hidden' arguments to match_table / match_groove /
         match_trace for the two table-matching call sites in resolve_step.
         Computing them here avoids recomputing inside the match functions.
+        Note: fx_cmd logits are included here with unconditioned x (fx_cmd is not yet known).
+        fx_val logits are NOT included here — call conditioned_fx_val_logits after sampling fx_cmd.
         """
         logits = {}
 
         for group_name, members in LOGIT_GROUPS.items():
+            if group_name in FX_VAL_GROUPS:
+                continue  # fx_val logits computed later via conditioned_fx_val_logits
             w = self.weights[group_name] @ x
             for i, (name, _, _) in enumerate(members):
                 logits[name] = w[i]
@@ -540,6 +598,7 @@ class OutputHeads(eqx.Module):
         logits['instr'] = instr_preds
 
         latents = {
+            'x':                 x,
             'table_ctx':         table_ctx,
             'instr_table_ctx':   instr_table_ctx,
             'phrase_groove_ctx': phrase_groove_ctx,
@@ -547,5 +606,5 @@ class OutputHeads(eqx.Module):
         return logits, latents
 
     def log_probs(self, x):
-        raw = self(x)
+        raw = self(x)  # uses soft inference-mode conditioning
         return {name: jax.nn.log_softmax(raw[name]) for name in TOKEN_HEADS}

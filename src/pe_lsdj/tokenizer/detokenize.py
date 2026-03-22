@@ -1,7 +1,24 @@
+import warnings
 import numpy as np
 import jax.numpy as jnp
 from jaxtyping import Array
 from pe_lsdj.constants import *
+
+
+def _nearest_phrase(p_notes, p_instr, p_fx_cmd,
+                    phrase_notes_out, phrase_instr_out, phrase_fx_cmd_out,
+                    n_allocated):
+    """Return the index of the most similar already-allocated phrase.
+
+    Uses weighted Hamming distance: note mismatches count 2×, instrument 1×,
+    fx_cmd 1×.  Only considers the first n_allocated rows (allocated so far).
+    Called only when the phrase budget (NUM_PHRASES) is exhausted.
+    """
+    note_diff  = np.sum(phrase_notes_out[:n_allocated]  != p_notes,  axis=1)
+    instr_diff = np.sum(phrase_instr_out[:n_allocated]  != p_instr,  axis=1)
+    fx_diff    = np.sum(phrase_fx_cmd_out[:n_allocated] != p_fx_cmd, axis=1)
+    dist = 2 * note_diff + instr_diff + fx_diff
+    return int(np.argmin(dist))
 
 # ----------- De-tokenizers (map back to raw bytes) -------------
 
@@ -453,6 +470,17 @@ def repack_song(
 
             if fp in phrase_map:
                 pid = phrase_map[fp]
+            elif next_phrase_id >= NUM_PHRASES:
+                # Phrase budget exhausted — fall back to nearest allocated phrase.
+                pid = _nearest_phrase(
+                    p_notes, p_instr, p_fx_cmd,
+                    phrase_notes_out, phrase_instr_out, phrase_fx_cmd_out,
+                    next_phrase_id,
+                )
+                warnings.warn(
+                    f"Phrase budget exhausted (>{NUM_PHRASES} unique phrases). "
+                    f"ch={ch}, block={p} mapped to nearest existing phrase {pid}."
+                )
             else:
                 pid = next_phrase_id
                 phrase_map[fp] = pid

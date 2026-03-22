@@ -230,7 +230,8 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
     positions = jnp.arange(L) if crop_start is None else jnp.arange(L) + crop_start
     hiddens = model.encode(input_tokens, banks, key=key,
                            positions=positions, song_length=song_length)  # (L, 4, d_model)
-    logits  = jax.vmap(jax.vmap(model.output_heads))(hiddens)    # dict of (L, 4, ...)
+    target_fx_cmd = target_tokens[:, :, 2]   # (L, 4) — teacher-forcing fx_cmd for val conditioning
+    logits  = jax.vmap(jax.vmap(model.output_heads))(hiddens, target_fx_cmd)    # dict of (L, 4, ...)
 
     # Token cross-entropy (note, fx_cmd, fx values, transpose)
     targets  = jax.vmap(jax.vmap(hard_targets))(target_tokens)

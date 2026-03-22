@@ -25,6 +25,7 @@ from pe_lsdj.constants import (
 )
 from pe_lsdj.models.transformer import (
     TOKEN_HEADS,
+    FX_VAL_HEAD_NAMES,
     ENTITY_HEADS,
     _GROOVE_FX_COLS_ARRAY,
     _TABLE_FX_COLS_ARRAY,
@@ -738,9 +739,24 @@ def resolve_step(
         #    and are absent from TOKEN_HEADS — they are filled in below.
         #    jr.fold_in(key, pos) gives a unique subkey per field without
         #    allocating a split array; positions 0-20 are safely below 100.
+        #
+        #    fx_cmd is sampled first so its sampled value can be used to compute
+        #    conditioned fx_val logits (hard one-hot conditioning, consistent with
+        #    the generative intent of the model).
         next_chan_tokens = jnp.zeros(21, dtype=jnp.uint16)
+
+        # Sample fx_cmd first (pos 2); ch_logits['fx_cmd'] is unconditioned
+        fx_cmd_val = jr.categorical(jr.fold_in(ch_key, 2), ch_logits['fx_cmd'])
+        next_chan_tokens = next_chan_tokens.at[2].set(fx_cmd_val.astype(jnp.uint16))
+
+        # Get fx_val logits conditioned on the sampled fx_cmd
+        cond_fx_logits = heads.conditioned_fx_val_logits(ch_latents['x'], fx_cmd_val)
+
         for name, (pos, _) in TOKEN_HEADS.items():
-            val = jr.categorical(jr.fold_in(ch_key, pos), ch_logits[name])
+            if name == 'fx_cmd':
+                continue  # already done
+            src_logits = cond_fx_logits[name] if name in FX_VAL_HEAD_NAMES else ch_logits[name]
+            val = jr.categorical(jr.fold_in(ch_key, pos), src_logits)
             next_chan_tokens = next_chan_tokens.at[pos].set(val.astype(jnp.uint16))
 
         # 2. Instrument → col 1.
