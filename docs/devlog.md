@@ -32,6 +32,7 @@
 |   v10   | LSDJTransformer | Helix encoding for note values | ✅ |
 |   v11   | LSDJTransformer | Conditional FX value generation | ? |
 |   v12   | LSDJTransformer | Helix encoding, MSE loss | ✅ |
+|   v13   | LSDJTransformer | Chroma/Octave decoder for notes | ? |
 
 
 \* current model
