@@ -16,7 +16,7 @@ from pe_lsdj import SongFile
 from pe_lsdj.constants import NUM_NOTES
 from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.models.transformer import (
-    TOKEN_HEADS, hard_targets, entity_loss, conditional_entity_loss,
+    TOKEN_HEADS, hard_targets, entity_loss, conditional_entity_loss, note_token_loss,
 )
 
 
@@ -233,7 +233,7 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
     target_fx_cmd = target_tokens[:, :, 2]   # (L, 4) — teacher-forcing fx_cmd for val conditioning
     logits  = jax.vmap(jax.vmap(model.output_heads))(hiddens, target_fx_cmd)    # dict of (L, 4, ...)
 
-    # Token cross-entropy (note, fx_cmd, fx values, transpose)
+    # Token cross-entropy (fx_cmd, fx values, transpose)
     targets  = jax.vmap(jax.vmap(hard_targets))(target_tokens)
     token_ce = 0.0
     for name, (_, vocab) in TOKEN_HEADS.items():
@@ -242,6 +242,12 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
         if label_smoothing > 0.0:
             t = (1.0 - label_smoothing) * t + label_smoothing / vocab
         token_ce -= jnp.sum(t * log_probs)
+
+    # Factorized note loss: chroma CE (always) + octave CE (masked when NULL)
+    note_tokens = jnp.int32(target_tokens[:, :, 0])   # (L, 4)
+    token_ce += jnp.sum(jax.vmap(jax.vmap(note_token_loss))(
+        logits['note_chroma'], logits['note_oct'], note_tokens,
+    ))
 
     # Scalar entity loss: instrument scalars, table scalars, phrase groove.
     # Groove-slot and trace sub-entity losses are handled below.

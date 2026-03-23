@@ -30,7 +30,7 @@ from pe_lsdj.models.transformer import (
 )
 from pe_lsdj.models.decoders import GrooveDecoder
 from pe_lsdj.embedding.song import SongBanks
-from pe_lsdj.constants import NUM_NOTES
+from pe_lsdj.constants import NUM_CHROMA, NUM_OCTAVES
 
 
 KEY = jr.PRNGKey(0)
@@ -199,11 +199,10 @@ class TestHardTargetsAndLoss:
         targets = hard_targets(tokens)
         assert set(targets.keys()) == set(TOKEN_HEADS.keys())
 
-    def test_hard_targets_one_hot(self):
-        tokens = jnp.array([5] + [0] * 20, dtype=jnp.int32)
+    def test_hard_targets_no_note(self):
+        tokens = jnp.zeros(21, dtype=jnp.int32)
         targets = hard_targets(tokens)
-        assert targets['note'][5] == 1.0
-        assert targets['note'].sum() == 1.0
+        assert 'note' not in targets
 
     def test_token_loss_finite(self):
         heads = OutputHeads(D_MODEL, ENTITY_DIM, ENTITY_DIM, ENTITY_DIM, KEY)
@@ -334,12 +333,14 @@ class TestLSDJTransformer:
         model = LSDJTransformer(jr.PRNGKey(42), d_model=D_MODEL, num_heads_t=2,
                                 num_heads_c=1, num_blocks=1)
         out = model(jnp.zeros((4, 4, 21)), SongBanks.default())
-        assert out['note'].shape == (4, 4, NUM_NOTES)
+        assert out['note_chroma'].shape == (4, 4, NUM_CHROMA)
+        assert out['note_oct'].shape    == (4, 4, NUM_OCTAVES)
 
     def test_with_banks_no_crash(self, model, banks):
         """Runtime banks: model call with banks should produce correct output shape."""
         out = model(jnp.zeros((4, 4, 21)), banks)
-        assert out['note'].shape == (4, 4, NUM_NOTES)
+        assert out['note_chroma'].shape == (4, 4, NUM_CHROMA)
+        assert out['note_oct'].shape    == (4, 4, NUM_OCTAVES)
 
     def test_encode_shape(self, model, banks):
         hiddens = model.encode(jnp.zeros((8, 4, 21)), banks)

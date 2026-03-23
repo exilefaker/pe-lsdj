@@ -16,7 +16,6 @@ from pe_lsdj.constants import *
 FX_VAL_GROUPS = ('byte_fx', 'small_enum_fx', 'nibble_fx')
 
 LOGIT_GROUPS = {
-    'note':          [('note',             0, NUM_NOTES)],
     'fx_cmd':        [('fx_cmd',           2, 19)],
     'byte_fx':       [('hop_fx',           5, 257),
                       ('volume_fx',       15, 257),
@@ -462,7 +461,7 @@ class OutputHeads(eqx.Module):
     instr_to_table_proj: eqx.nn.Linear
 
     def __init__(self, d_model, instr_entity_dim, table_entity_dim, softsynth_entity_dim, key):
-        keys = jr.split(key, 8)
+        keys = jr.split(key, 10)
 
         # Logit-group heads
         weights = {}
@@ -470,6 +469,9 @@ class OutputHeads(eqx.Module):
             n     = len(members)
             vocab = members[0][2]
             weights[group_name] = jr.normal(keys[0], (n, vocab, d_model)) / jnp.sqrt(d_model)
+        # Factorized note heads: chroma (0=NULL, 1-12=C..B) and octave (0=NULL, 1-13=oct3..octF)
+        weights['note_chroma'] = jr.normal(keys[8], (1, NUM_CHROMA,  d_model)) / jnp.sqrt(d_model)
+        weights['note_oct']    = jr.normal(keys[9], (1, NUM_OCTAVES, d_model)) / jnp.sqrt(d_model)
         self.weights = weights
 
         # FX command conditioning: Linear(19, d_model) used as one_hot(fx_cmd) @ weight
@@ -519,6 +521,10 @@ class OutputHeads(eqx.Module):
             # Teacher forcing: hard one-hot on the known target cmd
             fx_cmd_signal = jax.nn.one_hot(jnp.int32(fx_cmd_token), 19)
         x_cond = x + self.fx_cmd_cond(fx_cmd_signal)
+
+        # Factorized note heads (plain x, not fx-conditioned)
+        result['note_chroma'] = (self.weights['note_chroma'] @ x)[0]
+        result['note_oct']    = (self.weights['note_oct']    @ x)[0]
 
         # Token heads: fx_val groups conditioned on fx_cmd; all others use plain x
         for group_name, members in LOGIT_GROUPS.items():
@@ -578,6 +584,10 @@ class OutputHeads(eqx.Module):
         fx_val logits are NOT included here — call conditioned_fx_val_logits after sampling fx_cmd.
         """
         logits = {}
+
+        # Factorized note heads
+        logits['note_chroma'] = (self.weights['note_chroma'] @ x)[0]
+        logits['note_oct']    = (self.weights['note_oct']    @ x)[0]
 
         for group_name, members in LOGIT_GROUPS.items():
             if group_name in FX_VAL_GROUPS:

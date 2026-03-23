@@ -10,6 +10,7 @@ from pe_lsdj.constants import SOFTSYNTH_WIDTH
 from pe_lsdj.models.decoders import (
     # Public specs / constants
     LOGIT_GROUPS, TOKEN_HEADS, FX_VAL_GROUPS, FX_VAL_HEAD_NAMES, ENTITY_HEADS, WAVEFRAME_DIM,
+    NUM_CHROMA, NUM_OCTAVES,
     INSTR_FIELD_SPECS, TABLE_FIELD_SPECS, GROOVE_FIELD_SPECS, SOFTSYNTH_FIELD_SPECS,
     INSTR_SCALAR_SPECS, INSTR_SCALAR_COL_INDICES,
     TABLE_SCALAR_SPECS, TABLE_SCALAR_COL_INDICES,
@@ -79,6 +80,22 @@ def _mse_loss(raw, row, cont_cols_array, max_vals_array):
     pred    = jax.nn.sigmoid(raw)
     targets = row[cont_cols_array].astype(jnp.float32) / max_vals_array
     return jnp.mean((pred - targets) ** 2)
+
+
+def note_token_loss(note_chroma_logits, note_oct_logits, note_token):
+    """
+    Factorized chroma × octave note loss.
+
+    note_token : scalar int, 0=NULL, 1-156 = notes C3..BF
+    Chroma head: NUM_CHROMA-way CE (0=NULL, 1-12 = C..B), always supervised.
+    Octave head: NUM_OCTAVES-way CE (0=NULL, 1-13 = oct3..octF), masked when note_token=0.
+    """
+    note_token    = jnp.int32(note_token)
+    chroma_target = jnp.where(note_token == 0, 0, (note_token - 1) % 12 + 1)
+    oct_target    = jnp.where(note_token == 0, 0, (note_token - 1) // 12 + 1)
+    chroma_loss   = -jax.nn.log_softmax(note_chroma_logits)[chroma_target]
+    oct_loss      = -jax.nn.log_softmax(note_oct_logits)[oct_target]
+    return chroma_loss + jnp.where(note_token > 0, oct_loss, jnp.float32(0.0))
 
 
 def table_loss(prediction, target):

@@ -745,6 +745,17 @@ def resolve_step(
         #    the generative intent of the model).
         next_chan_tokens = jnp.zeros(21, dtype=jnp.uint16)
 
+        # Sample note: factorized chroma × octave (pos 0)
+        # chroma=0 or octave=0 → NULL note (either = 0 rule)
+        chroma_val = jr.categorical(jr.fold_in(ch_key, 0),   ch_logits['note_chroma'])
+        oct_val    = jr.categorical(jr.fold_in(ch_key, 201), ch_logits['note_oct'])
+        note_val   = jnp.where(
+            (chroma_val == 0) | (oct_val == 0),
+            jnp.int32(0),
+            (oct_val - 1) * 12 + chroma_val,
+        )
+        next_chan_tokens = next_chan_tokens.at[0].set(note_val.astype(jnp.uint16))
+
         # Sample fx_cmd first (pos 2); ch_logits['fx_cmd'] is unconditioned
         fx_cmd_val = jr.categorical(jr.fold_in(ch_key, 2), ch_logits['fx_cmd'])
         next_chan_tokens = next_chan_tokens.at[2].set(fx_cmd_val.astype(jnp.uint16))
