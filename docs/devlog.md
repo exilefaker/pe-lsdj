@@ -12,6 +12,11 @@
 - [2/26/2026] Model v3-v4
 - [2/27/2026] Model v5
 - [3/3/2026] First generation pipeline
+- [3/6/2026] Training improvements
+- [3/11/2026] Model v7
+- [3/12/2026] Model v8
+- [3/13/2026] Data augmentation
+- [3/23/2026] Model v13
 
 ## Model version history
 
@@ -30,9 +35,9 @@
 |   v9    | LSDJTransformer | Replace MSE loss with Gaussian energy loss for continuous outputs | ❌ (training unstable) |
 |   v9.1* | LSDJTransformer | Switch to Beta-NLL loss | ✅ |
 |   v10   | LSDJTransformer | Helix encoding for note values | ✅ |
-|   v11   | LSDJTransformer | Conditional FX value generation | ? |
+|   v11   | LSDJTransformer | Conditional FX value generation | ✅ |
 |   v12   | LSDJTransformer | Helix encoding, MSE loss | ✅ |
-|   v13   | LSDJTransformer | Chroma/Octave decoder for notes | ? |
+|   v13   | LSDJTransformer | Chroma/Octave decoder for notes (rolls in conditional FX val) | ✅ |
 
 
 \* current model

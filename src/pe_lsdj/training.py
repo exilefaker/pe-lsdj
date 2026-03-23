@@ -161,9 +161,9 @@ def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key,
         song_lengths: (B,) int — full length of each selected song
 
     transpose_range: if > 0, each crop may be shifted by a non-zero number of
-        semitones drawn from [-transpose_range, +transpose_range] \ {0}. Only
-        note tokens (position 0) are affected; null notes and other fields
-        unchanged. Default 0 = no augmentation.
+        semitones drawn from [-transpose_range, +transpose_range]. Only note 
+        tokens (position 0) are affected; null notes and other fields unchanged. 
+        Default 0 = no augmentation.
     p_transpose: probability of applying any transposition. The remaining
         (1 - p_transpose) mass is placed on zero (no shift). Non-zero offsets
         share p_transpose equally. Default 0.2. Ignored when transpose_range=0.
