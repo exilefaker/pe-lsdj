@@ -107,6 +107,43 @@ appears to actively hurt note prediction.
 before training a new helix model. NULL note handling and valid-octave masking design
 discussed in conversation history.
 
+### Inference-time null note penalty (deferred)
+
+Channels can fall into a "null attractor" during generation: once a channel generates
+null notes for a few steps, the autoregressive context reinforces further null prediction,
+causing the channel to go silent for the rest of the song. This is stochastic (seed-
+dependent) and more likely when the prompt has no activity in that channel.
+
+**Proposed fix (inference-time only, no retraining):** apply a progress-dependent negative
+bias to the null logit (index 0) of the chroma and octave heads before sampling:
+
+```python
+null_penalty = -alpha * (1.0 - progress)  # large penalty early, zero at end
+ch_logits['note_chroma'] = ch_logits['note_chroma'].at[0].add(null_penalty)
+ch_logits['note_oct']    = ch_logits['note_oct'].at[0].add(null_penalty)
+```
+
+`progress = abs_pos / song_length` is already available in the generation loop.
+`alpha` is a tunable parameter (try 2–4). This uses the song progress signal — already
+learned as a meaningful cue — to reinforce that channels should stay active early in the
+track. Deferred; not the most pressing generation quality issue.
+
+### ±1 semitone chroma errors (ongoing, v10 → v13)
+
+The factorized chroma×octave output head (introduced in v13) changes the character of
+pitch errors. Instead of occasional large pitch errors (wrong octave, several semitones
+off), errors are now small and consistent: the model samples chroma=N instead of chroma=N±1.
+Neighbouring chromas share adjacent positions in the helix ring and thus have similar
+embeddings and logits, making 1-semitone errors more probable than errors of other sizes.
+
+Observed concretely in RAWK1 (v13 generation from rawk-final.lsdsng): G3 (chroma=8)
+appears at multiple steps where F#3 (chroma=7) is the correct note, making the melody
+sound "slightly out of tune" rather than "clearly wrong." RAWK0 (same model, different
+seed) is pitch-correct throughout. The ±1 error is stochastic and seed-dependent.
+
+No fix proposed yet. Possible directions: temperature annealing on the chroma head,
+scale-aware logit biasing at inference, or a better-calibrated chroma head during training.
+
 ### Robustness to sparsity and prompt dropout (deferred)
 
 Two related problems:

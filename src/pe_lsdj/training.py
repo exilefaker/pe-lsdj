@@ -415,6 +415,11 @@ def train(
                     "batch_size": batch_size,
                     "lr": lr,
                     "key": key.tolist(),
+                    "transpose_range": transpose_range,
+                    "p_transpose": p_transpose,
+                    "swap_pulse": swap_pulse,
+                    "label_smoothing": label_smoothing,
+                    "weight_decay": weight_decay,
                 }))
 
         resuming = resume_from_checkpoint and start_step > 0
