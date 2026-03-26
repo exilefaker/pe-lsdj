@@ -388,8 +388,10 @@ class TestKVCachedGenerate:
 
     def test_cached_matches_uncached(self, model, seed_tokens):
         """_generate_cached must produce the same tokens as _generate."""
-        tokens_ref, _ = _generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS)
-        tokens_cached, _ = _generate_cached(model, seed_tokens, KEY, num_steps=self.NUM_STEPS)
+        tokens_ref, _ = _generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS,
+                                   temperature=0.0)
+        tokens_cached, _ = _generate_cached(model, seed_tokens, KEY, num_steps=self.NUM_STEPS,
+                                             temperature=0.0)
         assert jnp.array_equal(tokens_ref, tokens_cached)
 
     def test_cached_shape(self, model, seed_tokens):
@@ -403,9 +405,9 @@ class TestKVCachedGenerate:
     def test_cached_and_uncached_consistent_via_generate(self, model, seed_tokens):
         """generate(use_kv_cache=True/False) must produce the same tokens."""
         t_cached, _ = generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS,
-                                num_samples=1, use_kv_cache=True)
+                                num_samples=1, use_kv_cache=True, temperature=0.0)
         t_plain,  _ = generate(model, seed_tokens, KEY, num_steps=self.NUM_STEPS,
-                                num_samples=1, use_kv_cache=False)
+                                num_samples=1, use_kv_cache=False, temperature=0.0)
         assert jnp.array_equal(t_cached[0], t_plain[0])
 
 
