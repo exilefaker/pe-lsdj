@@ -321,8 +321,10 @@ class TestBatchGenerate:
     def test_single_sample_consistent_with_generate(self, model, seed_tokens):
         """num_samples=1 should match _generate called with the same derived key."""
         sample_key = jr.split(KEY, 1)[0]
-        tokens_batch, _ = generate(model, seed_tokens, KEY, num_samples=1, num_steps=self.NUM_STEPS)
-        tokens_single, _ = _generate(model, seed_tokens, sample_key, num_steps=self.NUM_STEPS)
+        tokens_batch, _ = generate(model, seed_tokens, KEY, num_samples=1,
+                                    num_steps=self.NUM_STEPS, temperature=0.0)
+        tokens_single, _ = _generate(model, seed_tokens, sample_key,
+                                      num_steps=self.NUM_STEPS, temperature=0.0)
         assert jnp.array_equal(tokens_batch[0], tokens_single)
 
     def test_jit_smoke(self, model, seed_tokens):
