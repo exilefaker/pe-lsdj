@@ -495,20 +495,15 @@ def train(
         key, k_crop, k_noise = jr.split(key, 3)
 
         # Compute annealed augmentation parameters
-        if anneal_aug_steps > 0:
-            t = min(step / anneal_aug_steps, 1.0)
-            current_transpose_range = round(transpose_range * (1.0 - t))
-            current_p_transpose = p_transpose * (1.0 - t)
-            current_swap_pulse = swap_pulse and (t < 0.5)
-        else:
-            current_transpose_range = transpose_range
-            current_p_transpose = p_transpose
-            current_swap_pulse = swap_pulse
+        current_td, current_tu, current_p_transpose, current_swap_pulse = _annealed_aug_params(
+            step, anneal_aug_steps, max_transpose_down, max_transpose_up, p_transpose, swap_pulse,
+        )
 
         # Sample multi-song batch
         inputs, targets, banks, batch_idxs, crop_starts, song_lengths = make_multi_track_batch(
             songs, all_banks, batch_size, crop_len, k_crop,
-            current_transpose_range, current_swap_pulse, current_p_transpose,
+            max_transpose_down=current_td, max_transpose_up=current_tu,
+            swap_pulse=current_swap_pulse, p_transpose=current_p_transpose,
         )
 
         # Gradient step (k_noise is split per-item inside train_step)
