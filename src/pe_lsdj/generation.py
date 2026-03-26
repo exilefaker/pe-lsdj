@@ -98,6 +98,13 @@ def _score_table_traces(banks, heads, table_h):
     )      
 
 
+def _sample_cat(key, logits, temperature: float):
+    """Sample from categorical logits; argmax (greedy) when temperature == 0."""
+    if temperature == 0.0:
+        return jnp.argmax(logits)
+    return jr.categorical(key, logits / temperature)
+
+
 def _sample_cont(raw, max_vals, temperature, key):
     """Decode continuous values from MSE head output.
 
@@ -710,6 +717,7 @@ def resolve_step(
     table_match_threshold: float,
     groove_match_threshold: float,
     synth_match_threshold: float,
+    temperature: float = 0.0,
 ) -> tuple[Array, SongBanks]:
     """
     Resolve one generation step across all 4 channels.
@@ -747,8 +755,8 @@ def resolve_step(
 
         # Sample note: factorized chroma × octave (pos 0)
         # chroma=0 or octave=0 → NULL note (either = 0 rule)
-        chroma_val = jr.categorical(jr.fold_in(ch_key, 0),   ch_logits['note_chroma'])
-        oct_val    = jr.categorical(jr.fold_in(ch_key, 201), ch_logits['note_oct'])
+        chroma_val = _sample_cat(jr.fold_in(ch_key, 0),   ch_logits['note_chroma'], temperature)
+        oct_val    = _sample_cat(jr.fold_in(ch_key, 201), ch_logits['note_oct'],    temperature)
         note_val   = jnp.where(
             (chroma_val == 0) | (oct_val == 0),
             jnp.int32(0),
@@ -757,7 +765,7 @@ def resolve_step(
         next_chan_tokens = next_chan_tokens.at[0].set(note_val.astype(jnp.uint16))
 
         # Sample fx_cmd first (pos 2); ch_logits['fx_cmd'] is unconditioned
-        fx_cmd_val = jr.categorical(jr.fold_in(ch_key, 2), ch_logits['fx_cmd'])
+        fx_cmd_val = _sample_cat(jr.fold_in(ch_key, 2), ch_logits['fx_cmd'], temperature)
         next_chan_tokens = next_chan_tokens.at[2].set(fx_cmd_val.astype(jnp.uint16))
 
         # Get fx_val logits conditioned on the sampled fx_cmd
@@ -767,7 +775,7 @@ def resolve_step(
             if name == 'fx_cmd':
                 continue  # already done
             src_logits = cond_fx_logits[name] if name in FX_VAL_HEAD_NAMES else ch_logits[name]
-            val = jr.categorical(jr.fold_in(ch_key, pos), src_logits)
+            val = _sample_cat(jr.fold_in(ch_key, pos), src_logits, temperature)
             next_chan_tokens = next_chan_tokens.at[pos].set(val.astype(jnp.uint16))
 
         # 2. Instrument → col 1.
@@ -827,6 +835,7 @@ def generate_step(
     table_match_threshold: float,
     groove_match_threshold: float,
     softsynth_match_threshold: float,
+    temperature: float = 0.0,
 ) -> tuple[Array, SongBanks]:
     """
     `carry` contains
@@ -860,6 +869,7 @@ def generate_step(
         table_match_threshold,
         groove_match_threshold,
         softsynth_match_threshold,
+        temperature,
     )
 
     # Slide the context window one step forward (fixed carry shape for lax.scan)
@@ -880,6 +890,7 @@ def generate_step_cached(
     table_match_threshold: float,
     groove_match_threshold: float,
     softsynth_match_threshold: float,
+    temperature: float = 0.0,
 ) -> tuple:
     """
     One KV-cached autoregressive generation step.
@@ -912,6 +923,7 @@ def generate_step_cached(
         model.output_heads, banks_in, key, logits_dict, latents,
         instr_match_threshold, table_match_threshold,
         groove_match_threshold, softsynth_match_threshold,
+        temperature,
     )
 
     # Embed the new token at its absolute position (for phrase position + progress encoding)
@@ -938,6 +950,7 @@ def _generate_cached(
     table_match_threshold: float = 0.05,
     softsynth_match_threshold: float = 0.05,
     window_len: int | None = None,
+    temperature: float = 0.0,
 ) -> tuple[Array, SongBanks]:
     """
     KV-cached generation. Equivalent to _generate but ~W× faster per step,
@@ -983,6 +996,7 @@ def _generate_cached(
         table_match_threshold=table_match_threshold,
         groove_match_threshold=groove_match_threshold,
         softsynth_match_threshold=softsynth_match_threshold,
+        temperature=temperature,
     )
     (_, final_banks, _, _), new_tokens = jax.lax.scan(
         step_fn, (last_hidden, banks, k_cache, v_cache),
@@ -1002,6 +1016,7 @@ def _generate(
     table_match_threshold: float = 0.05,
     softsynth_match_threshold: float = 0.05,
     window_len: int | None = None,
+    temperature: float = 0.0,
 ) -> tuple[Array, SongBanks]:
     """
     Generate a (num_steps, NUM_CHANNELS=4, feature_dim) sample conditioned on `input_tokens`.
@@ -1042,6 +1057,7 @@ def _generate(
         table_match_threshold=table_match_threshold,
         groove_match_threshold=groove_match_threshold,
         softsynth_match_threshold=softsynth_match_threshold,
+        temperature=temperature,
     )
 
     (_, final_banks), new_tokens = jax.lax.scan(
@@ -1063,6 +1079,7 @@ def generate(
     softsynth_match_threshold: float = 0.05,
     window_len: int | None = None,
     use_kv_cache: bool = True,
+    temperature: float = 1.0,
 ) -> tuple[Array, SongBanks]:
     """
     Generate `num_samples` independent samples from the same seed.
@@ -1091,7 +1108,7 @@ def generate(
             model, input_tokens, k, banks, num_steps,
             instr_match_threshold, groove_match_threshold,
             table_match_threshold, softsynth_match_threshold,
-            window_len=window_len,
+            window_len=window_len, temperature=temperature,
         )
 
     return jax.vmap(_one_sample)(sample_keys)

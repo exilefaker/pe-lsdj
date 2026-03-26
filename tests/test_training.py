@@ -10,8 +10,10 @@ from pe_lsdj.training import (
     batch_loss,
     train_step,
     get_validate_sequences,
+    make_multi_track_batch,
     _transpose,
     _swap_pulse,
+    _annealed_aug_params,
 )
 from pe_lsdj.constants import NUM_NOTES
 from pe_lsdj.models.transformer import LSDJTransformer
@@ -226,6 +228,89 @@ class TestGetValidateSequences:
         val_losses = [sequence_loss(model, inp, tgt, bnk, None, start, slen)
                       for inp, tgt, bnk, start, slen in seqs]
         assert all(jnp.isfinite(l) for l in val_losses)
+
+
+class TestAnnealedAugParams:
+
+    def test_no_anneal_returns_unchanged(self):
+        assert _annealed_aug_params(500, 0, 2, 4, 0.5, True) == (2, 4, 0.5, True)
+
+    def test_at_step_zero_returns_full(self):
+        assert _annealed_aug_params(0, 1000, 2, 4, 0.5, True) == (2, 4, 0.5, True)
+
+    def test_at_anneal_end_returns_zero(self):
+        td, tu, p, sp = _annealed_aug_params(1000, 1000, 2, 4, 0.5, True)
+        assert td == 0
+        assert tu == 0
+        assert p == 0.0
+        assert sp is False
+
+    def test_beyond_anneal_end_clamps(self):
+        td, tu, p, sp = _annealed_aug_params(9999, 1000, 2, 4, 0.5, True)
+        assert td == 0
+        assert tu == 0
+        assert p == 0.0
+
+    def test_midpoint_halves_transpose(self):
+        td, tu, p, sp = _annealed_aug_params(500, 1000, 2, 4, 0.4, True)
+        assert td == 1   # round(2 * 0.5)
+        assert tu == 2   # round(4 * 0.5)
+        assert abs(p - 0.2) < 1e-6
+
+    def test_swap_pulse_off_at_midpoint(self):
+        _, _, _, sp = _annealed_aug_params(500, 1000, 2, 4, 0.5, True)
+        assert sp is False
+
+    def test_swap_pulse_on_before_midpoint(self):
+        _, _, _, sp = _annealed_aug_params(499, 1000, 2, 4, 0.5, True)
+        assert sp is True
+
+    def test_swap_pulse_false_stays_false(self):
+        _, _, _, sp = _annealed_aug_params(0, 1000, 2, 4, 0.5, False)
+        assert sp is False
+
+
+class FakeSongAug:
+    """Minimal SongFile stub with name attribute for make_multi_track_batch."""
+    def __init__(self, tokens):
+        self.song_tokens = tokens
+        self.name = "fake"
+
+
+class TestAsymmetricTranspose:
+
+    def _make_songs(self, n=4):
+        return [
+            FakeSongAug(jr.randint(jr.PRNGKey(i), (64, 4, 21), 1, 10).astype(jnp.uint16))
+            for i in range(n)
+        ]
+
+    def test_symmetric_range_no_crash(self):
+        songs = self._make_songs()
+        banks = [SongBanks.default()] * len(songs)
+        make_multi_track_batch(songs, banks, 4, 16, KEY,
+                               max_transpose_down=2, max_transpose_up=2,
+                               p_transpose=1.0)
+
+    def test_asymmetric_range_no_crash(self):
+        songs = self._make_songs()
+        banks = [SongBanks.default()] * len(songs)
+        make_multi_track_batch(songs, banks, 4, 16, KEY,
+                               max_transpose_down=2, max_transpose_up=4,
+                               p_transpose=1.0)
+
+    def test_output_shapes(self):
+        songs = self._make_songs(4)
+        banks = [SongBanks.default()] * len(songs)
+        inputs, targets, _, idxs, crop_starts, song_lengths = make_multi_track_batch(
+            songs, banks, 4, 16, KEY,
+            max_transpose_down=2, max_transpose_up=4,
+            p_transpose=0.5,
+        )
+        assert inputs.shape == (4, 16, 4, 21)
+        assert targets.shape == (4, 16, 4, 21)
+        assert crop_starts.shape == (4,)
+        assert song_lengths.shape == (4,)
 
 
 class TestTrainStep:
