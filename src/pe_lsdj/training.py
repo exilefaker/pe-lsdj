@@ -152,7 +152,8 @@ def _swap_pulse(tokens: Array) -> Array:
 
 
 def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key,
-                           transpose_range: int = 0,
+                           max_transpose_down: int = 0,
+                           max_transpose_up: int = 0,
                            swap_pulse: bool = False,
                            p_transpose: float = 0.2):
     """Sample one crop per batch item, each from a randomly chosen song.
@@ -160,13 +161,14 @@ def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key,
         crop_starts:  (B,) int — absolute position of each crop within its song
         song_lengths: (B,) int — full length of each selected song
 
-    transpose_range: if > 0, each crop may be shifted by a non-zero number of
-        semitones drawn from [-transpose_range, +transpose_range]. Only note 
-        tokens (position 0) are affected; null notes and other fields unchanged. 
-        Default 0 = no augmentation.
-    p_transpose: probability of applying any transposition. The remaining
-        (1 - p_transpose) mass is placed on zero (no shift). Non-zero offsets
-        share p_transpose equally. Default 0.2. Ignored when transpose_range=0.
+    max_transpose_down: maximum downward semitone shift (non-negative int). Default 0.
+    max_transpose_up:   maximum upward semitone shift (non-negative int). Default 0.
+        If both are 0, no transposition is applied.
+        Offsets are drawn uniformly from the non-zero values in
+        [-max_transpose_down, +max_transpose_up] with probability p_transpose,
+        and zero (no shift) with probability (1 - p_transpose).
+    p_transpose: probability of applying any transposition. Default 0.2.
+        Ignored when max_transpose_down == max_transpose_up == 0.
     swap_pulse: if True, each crop independently has a 50% chance of swapping
         PU1 and PU2 channels (all 21 token fields). Default False.
     """
@@ -178,9 +180,11 @@ def make_multi_track_batch(songs, all_banks, batch_size, crop_len, key,
         for j, i in enumerate(idxs)
     ]
 
-    if transpose_range > 0:
-        n_shifts = 2 * transpose_range
-        offsets = np.concatenate([[0], np.arange(-transpose_range, transpose_range + 1)[np.arange(-transpose_range, transpose_range + 1) != 0]])
+    if max_transpose_down > 0 or max_transpose_up > 0:
+        all_offsets = np.arange(-max_transpose_down, max_transpose_up + 1)
+        nonzero_offsets = all_offsets[all_offsets != 0]
+        n_shifts = len(nonzero_offsets)
+        offsets = np.concatenate([[0], nonzero_offsets])
         weights = np.array([1 - p_transpose] + [p_transpose / n_shifts] * n_shifts, dtype=np.float32)
         jax_offsets = jnp.array(offsets, dtype=jnp.int32)
         jax_weights = jnp.array(weights)
@@ -339,6 +343,23 @@ def get_validate_sequences(val_songs, val_banks, crop_len):
     return results
 
 
+def _annealed_aug_params(step, anneal_aug_steps, max_transpose_down, max_transpose_up,
+                         p_transpose, swap_pulse):
+    """Return (max_transpose_down, max_transpose_up, p_transpose, swap_pulse) for the
+    given step, linearly annealed toward zero over anneal_aug_steps.
+    If anneal_aug_steps == 0, params are returned unchanged.
+    """
+    if anneal_aug_steps <= 0:
+        return max_transpose_down, max_transpose_up, p_transpose, swap_pulse
+    t = min(step / anneal_aug_steps, 1.0)
+    return (
+        round(max_transpose_down * (1.0 - t)),
+        round(max_transpose_up * (1.0 - t)),
+        p_transpose * (1.0 - t),
+        swap_pulse and (t < 0.5),
+    )
+
+
 def train(
     model,
     songs: list[SongFile],
@@ -352,9 +373,11 @@ def train(
     log_every: int = 50,
     checkpoint_path: str | None = None,
     resume_from_checkpoint: bool = False,
-    transpose_range: int = 0,
+    max_transpose_down: int = 0,
+    max_transpose_up: int = 0,
     p_transpose: float = 0.2,
     swap_pulse: bool = False,
+    anneal_aug_steps: int = 0,
     label_smoothing: float = 0.0,
     weight_decay: float = 0.0,
 ):
@@ -367,6 +390,12 @@ def train(
     If resume_from_checkpoint=True and checkpoint_path is set, the most
     recent session and step are loaded automatically. Logs are appended to
     the existing session folder rather than creating a new one.
+
+    anneal_aug_steps: if > 0, linearly anneal augmentation strength from full
+        to zero over this many absolute steps. max_transpose_down, max_transpose_up,
+        and p_transpose are scaled by (1 - t) where
+        t = min(step / anneal_aug_steps, 1.0). swap_pulse is disabled at
+        t >= 0.5. Set to 0 to disable annealing.
     """
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
@@ -415,9 +444,11 @@ def train(
                     "batch_size": batch_size,
                     "lr": lr,
                     "key": key.tolist(),
-                    "transpose_range": transpose_range,
+                    "max_transpose_down": max_transpose_down,
+                    "max_transpose_up": max_transpose_up,
                     "p_transpose": p_transpose,
                     "swap_pulse": swap_pulse,
+                    "anneal_aug_steps": anneal_aug_steps,
                     "label_smoothing": label_smoothing,
                     "weight_decay": weight_decay,
                 }))
@@ -463,10 +494,21 @@ def train(
     for step in range(start_step, num_steps):
         key, k_crop, k_noise = jr.split(key, 3)
 
+        # Compute annealed augmentation parameters
+        if anneal_aug_steps > 0:
+            t = min(step / anneal_aug_steps, 1.0)
+            current_transpose_range = round(transpose_range * (1.0 - t))
+            current_p_transpose = p_transpose * (1.0 - t)
+            current_swap_pulse = swap_pulse and (t < 0.5)
+        else:
+            current_transpose_range = transpose_range
+            current_p_transpose = p_transpose
+            current_swap_pulse = swap_pulse
+
         # Sample multi-song batch
         inputs, targets, banks, batch_idxs, crop_starts, song_lengths = make_multi_track_batch(
             songs, all_banks, batch_size, crop_len, k_crop,
-            transpose_range, swap_pulse, p_transpose,
+            current_transpose_range, current_swap_pulse, current_p_transpose,
         )
 
         # Gradient step (k_noise is split per-item inside train_step)
