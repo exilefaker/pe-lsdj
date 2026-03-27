@@ -57,6 +57,7 @@ def _generate_song(model, song_path, gen_key, args, base_name=None):
         banks=banks,
         num_steps=args.num_steps,
         num_samples=args.num_samples,
+        temperature=args.temperature,
         instr_match_threshold=args.instr_threshold,
         groove_match_threshold=args.groove_threshold,
         table_match_threshold=args.table_threshold,
@@ -108,14 +109,17 @@ def main():
                         help="Number of independent samples to generate. (default: 1)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed. (default: 42)")
-    parser.add_argument("--instr-threshold", type=float, default=0.05,
-                        help="Instrument match threshold. (default: 0.05)")
-    parser.add_argument("--groove-threshold", type=float, default=0.05,
-                        help="Groove match threshold. (default: 0.05)")
-    parser.add_argument("--table-threshold", type=float, default=0.05,
-                        help="Table match threshold. (default: 0.05)")
-    parser.add_argument("--softsynth-threshold", type=float, default=0.05,
-                        help="Softsynth match threshold. (default: 0.05)")
+    parser.add_argument("--instr-threshold", type=float, default=0.5,
+                        help="Instrument match threshold. (default: 0.5)")
+    parser.add_argument("--groove-threshold", type=float, default=0.1,
+                        help="Groove match threshold. (default: 0.1)")
+    parser.add_argument("--table-threshold", type=float, default=0.5,
+                        help="Table match threshold. (default: 0.5)")
+    parser.add_argument("--softsynth-threshold", type=float, default=0.5,
+                        help="Softsynth match threshold. (default: 0.5)")
+    parser.add_argument("--temperature", type=float, default=1.0,
+                        help="Sampling temperature for categorical distributions. "
+                             "< 1.0 = more conservative, > 1.0 = more random. (default: 1.0)")
     parser.add_argument("--no-kv-cache", action="store_true",
                         help="Disable KV-cache (slower, useful for debugging).")
 
