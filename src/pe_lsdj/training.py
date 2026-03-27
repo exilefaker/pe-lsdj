@@ -16,7 +16,7 @@ from pe_lsdj import SongFile
 from pe_lsdj.constants import NUM_NOTES
 from pe_lsdj.embedding.song import SongBanks
 from pe_lsdj.models.transformer import (
-    TOKEN_HEADS, hard_targets, entity_loss, conditional_entity_loss, note_token_loss,
+    TOKEN_HEADS, FX_VAL_HEAD_NAMES, hard_targets, entity_loss, conditional_entity_loss, note_token_loss,
 )
 
 
@@ -269,6 +269,52 @@ def sequence_loss(model, input_tokens: Array, target_tokens: Array, banks: SongB
     return (token_ce + scalar_ce + cond_ce) / (L * 4)
 
 
+def sequence_loss_breakdown(model, input_tokens: Array, target_tokens: Array, banks: SongBanks,
+                             crop_start=None, song_length=None):
+    """Like sequence_loss but returns a dict of named loss components (no label smoothing).
+    Intended for diagnostic logging at validation time only — not used in training.
+    Returns dict with keys: 'fx_cmd', 'fx_vals', 'note', 'transpose', 'entity', 'cond', 'total'.
+    All values are per-(channel × timestep) means.
+    """
+    L = input_tokens.shape[0]
+    positions = jnp.arange(L) if crop_start is None else jnp.arange(L) + crop_start
+    hiddens = model.encode(input_tokens, banks, key=None,
+                           positions=positions, song_length=song_length)
+    target_fx_cmd = target_tokens[:, :, 2]
+    logits = jax.vmap(jax.vmap(model.output_heads))(hiddens, target_fx_cmd)
+    targets = jax.vmap(jax.vmap(hard_targets))(target_tokens)
+
+    def _ce(name):
+        log_probs = jax.nn.log_softmax(logits[name], axis=-1)
+        return -jnp.sum(targets[name] * log_probs)
+
+    fx_cmd_ce    = _ce('fx_cmd')
+    fx_vals_ce   = sum(_ce(name) for name in FX_VAL_HEAD_NAMES)
+    transpose_ce = _ce('transpose')
+    note_ce = jnp.sum(jax.vmap(jax.vmap(note_token_loss))(
+        logits['note_chroma'], logits['note_oct'], jnp.int32(target_tokens[:, :, 0]),
+    ))
+    entity_preds = {k: logits[k] for k in ('instr', 'table', 'groove')}
+    _per_step_channel = jax.vmap(
+        jax.vmap(entity_loss, in_axes=(0, None, 0)),
+        in_axes=(0, None, 0),
+    )
+    scalar_ce = jnp.sum(_per_step_channel(entity_preds, banks, target_tokens))
+    cond_ce   = conditional_entity_loss(model.output_heads, hiddens, target_tokens, banks)
+
+    norm = L * 4
+    total = (fx_cmd_ce + fx_vals_ce + transpose_ce + note_ce + scalar_ce + cond_ce) / norm
+    return {
+        'fx_cmd':    fx_cmd_ce    / norm,
+        'fx_vals':   fx_vals_ce   / norm,
+        'note':      note_ce      / norm,
+        'transpose': transpose_ce / norm,
+        'entity':    scalar_ce    / norm,
+        'cond':      cond_ce      / norm,
+        'total':     total,
+    }
+
+
 # NOTE: Legacy (assumes single-song batches) - keeping around in case
 def batch_loss(model, input_batch: Array, target_batch: Array, banks: SongBanks):
     """Mean loss over a batch of sequences."""
@@ -473,7 +519,7 @@ def train(
         if not resuming:
             header_str = "step,song,loss"
             if validation_songs is not None:
-                header_str += ",val"
+                header_str += ",val,fx_cmd,fx_vals,note,transpose,entity,cond"
             header_str += "\n"
             g.write(header_str)
 
@@ -526,6 +572,11 @@ def train(
                 validation_loss = jnp.mean(jnp.stack(val_losses))
                 loss_str += f" | val {validation_loss:.4f}"
 
+                # Loss breakdown over first val sequence (cheap diagnostic)
+                inp0, tgt0, bnk0, start0, slen0 = val_sequences[0]
+                bd = sequence_loss_breakdown(model, inp0, tgt0, bnk0, start0, slen0)
+                loss_str += f" | fx_cmd {bd['fx_cmd']:.4f}"
+
             print(loss_str)
 
             # Save checkpoint + logs
@@ -535,7 +586,10 @@ def train(
 
                 loss_log_str = f"{step:5d},{names_str},{loss:.4f}"
                 if validation_songs is not None:
-                    loss_log_str += f",{validation_loss:.4f}"
+                    loss_log_str += (f",{validation_loss:.4f}"
+                                     f",{bd['fx_cmd']:.4f},{bd['fx_vals']:.4f}"
+                                     f",{bd['note']:.4f},{bd['transpose']:.4f}"
+                                     f",{bd['entity']:.4f},{bd['cond']:.4f}")
                 loss_log_str += "\n"
                 g.write(loss_log_str)
                 g.flush()
