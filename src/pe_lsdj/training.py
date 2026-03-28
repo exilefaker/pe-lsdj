@@ -534,6 +534,7 @@ def train(
     # Set up validation sequences, if applicable
     if validation_songs is not None:
         _val_seq_loss = eqx.filter_jit(sequence_loss)
+        _val_breakdown = eqx.filter_jit(sequence_loss_breakdown)
         validation_banks = [SongBanks.from_songfile(vs) for vs in validation_songs]
         val_sequences = get_validate_sequences(validation_songs, validation_banks, crop_len)
 
@@ -572,9 +573,10 @@ def train(
                 validation_loss = jnp.mean(jnp.stack(val_losses))
                 loss_str += f" | val {validation_loss:.4f}"
 
-                # Loss breakdown over first val sequence (cheap diagnostic)
-                inp0, tgt0, bnk0, start0, slen0 = val_sequences[0]
-                bd = sequence_loss_breakdown(model, inp0, tgt0, bnk0, start0, slen0)
+                # Loss breakdown averaged over all val sequences
+                bd_all = [_val_breakdown(model, inp, tgt, bnk, start, slen)
+                          for inp, tgt, bnk, start, slen in val_sequences]
+                bd = jax.tree.map(lambda *xs: jnp.mean(jnp.stack(xs)), *bd_all)
                 loss_str += f" | fx_cmd {bd['fx_cmd']:.4f}"
 
             print(loss_str)
