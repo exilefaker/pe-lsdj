@@ -31,15 +31,55 @@ from pe_lsdj.models import LSDJTransformer
 
 
 def _infer_params_path(weights_path: str) -> str:
-    return os.path.join(os.path.dirname(weights_path), "model_hyperparams.json")
+    base = weights_path if os.path.isdir(weights_path) else os.path.dirname(weights_path)
+    return os.path.join(base, "model_hyperparams.json")
 
 
 def _load_model(key, weights_path: str, params_path: str) -> eqx.Module:
     with open(params_path) as f:
         params = json.load(f)
     ref_model = LSDJTransformer(key, **params)
-    model = eqx.tree_deserialise_leaves(weights_path, like=ref_model)
-    return model
+    return eqx.tree_deserialise_leaves(weights_path, like=ref_model)
+
+
+def _load_swa_model(key, weights_dir: str, params_path: str,
+                    swa_start: int, swa_stop: int | None, swa_step: int) -> eqx.Module:
+    with open(params_path) as f:
+        params = json.load(f)
+    ref_model = LSDJTransformer(key, **params)
+
+    all_ckpts = sorted(glob.glob(os.path.join(weights_dir, "step_*.eqx")))
+    def _step(p):
+        return int(os.path.basename(p).removeprefix("step_").removesuffix(".eqx"))
+    ckpt_paths = [
+        p for p in all_ckpts
+        if _step(p) >= swa_start
+        and (swa_stop is None or _step(p) <= swa_stop)
+        and (_step(p) - swa_start) % swa_step == 0
+    ]
+    if not ckpt_paths:
+        stop_str = str(swa_stop) if swa_stop is not None else "end"
+        print(f"Error: no checkpoints found in {weights_dir} "
+              f"for steps {swa_start}..{stop_str} (stride {swa_step})", file=sys.stderr)
+        sys.exit(1)
+
+    steps = [_step(p) for p in ckpt_paths]
+    print(f"SWA: averaging {len(ckpt_paths)} checkpoints "
+          f"(steps {steps[0]}..{steps[-1]}, stride {swa_step}) ...")
+    checkpoints = [eqx.tree_deserialise_leaves(p, like=ref_model) for p in ckpt_paths]
+
+    dynamic_list, static = [], None
+    for ckpt in checkpoints:
+        dyn, stat = eqx.partition(ckpt, eqx.is_array)
+        dynamic_list.append(dyn)
+        if static is None:
+            static = stat
+
+    avg_dynamic = jax.tree.map(
+        lambda *arrs: jnp.mean(jnp.stack(arrs), axis=0),
+        *dynamic_list,
+    )
+    return eqx.combine(avg_dynamic, static)
 
 
 def _generate_song(model, song_path, gen_key, args, base_name=None):
@@ -85,10 +125,17 @@ def main():
     parser = argparse.ArgumentParser(description="Generate LSDJ songs from a trained model.")
 
     parser.add_argument("--weights", "-w", required=True,
-                        help="Path to .eqx checkpoint file.")
+                        help="Path to .eqx checkpoint file, or a weights folder when using --swa-start/stop.")
     parser.add_argument("--params", "-p", default=None,
                         help="Path to model_hyperparams.json. "
                              "Defaults to model_hyperparams.json in the same directory as --weights.")
+    parser.add_argument("--swa-start", type=int, default=None,
+                        help="Enable SWA: first checkpoint step to average. "
+                             "--weights must be a folder. Steps are selected by stride --swa-step.")
+    parser.add_argument("--swa-stop", type=int, default=None,
+                        help="Last checkpoint step for SWA. If omitted, uses all available from --swa-start.")
+    parser.add_argument("--swa-step", type=int, default=50,
+                        help="Stride between SWA checkpoints. (default: 50)")
 
     song_group = parser.add_mutually_exclusive_group(required=True)
     song_group.add_argument("--song", "-s",
@@ -135,8 +182,12 @@ def main():
     key = jr.PRNGKey(args.seed)
     model_key, gen_key = jr.split(key)
 
-    print(f"Loading model from {args.weights} ...")
-    model = _load_model(model_key, args.weights, params_path)
+    if args.swa_start is not None:
+        model = _load_swa_model(model_key, args.weights, params_path,
+                                args.swa_start, args.swa_stop, args.swa_step)
+    else:
+        print(f"Loading model from {args.weights} ...")
+        model = _load_model(model_key, args.weights, params_path)
     print("Model loaded.")
 
     if args.song:
