@@ -48,7 +48,7 @@ def _load_swa_model(key, weights_dir: str, params_path: str,
         params = json.load(f)
     ref_model = LSDJTransformer(key, **params)
 
-    all_ckpts = sorted(glob.glob(os.path.join(weights_dir, "step_*.eqx")))
+    all_ckpts = sorted(glob.glob(os.path.join(glob.escape(weights_dir), "step_*.eqx")))
     def _step(p):
         return int(os.path.basename(p).removeprefix("step_").removesuffix(".eqx"))
     ckpt_paths = [
