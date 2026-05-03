@@ -28,6 +28,7 @@ from . import utils
 # Alex: Add constants
 from .bread_spec import (
     FRAMES_PER_WAVE,
+    FX_COMMANDS,
     NOTES,
     NUM_CHAINS,
     NUM_GROOVES, 

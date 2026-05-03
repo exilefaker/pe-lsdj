@@ -326,6 +326,61 @@ def repack_fx_values(tokens_dict: dict[str, Array], fx_command_IDs: Array) -> li
     return data_bytes.tolist()
 
 
+def phrase_step_bytes(ch_tokens) -> tuple[int, int, int, int]:
+    """
+    Convert a single channel's 21-element token vector to raw LSDJ bytes.
+
+    Returns (note_raw, instr_raw, fx_cmd_raw, fxval_raw) — all ints ready
+    to write directly to SRAM.  Pure Python; no JAX required.
+
+    Token layout: note(0) instr_id(1) fx_cmd(2) fx_vals[17](3..19) transpose(20)
+
+    Encoding rules (mirrors parse_fx_values / parse_notes / songfile.py):
+      note    — raw 0 = '---'; token IS the raw byte (no +1 offset)
+      instr   — token 0 → EMPTY (0xFF); token k → raw k-1
+      fx_cmd  — native LSDJ value; no offset
+      fx_vals — all fields use +1 offset; decode = max(0, token-1)
+                 nibble-packed commands (C,E,R,V,Z) reconstruct from two tokens
+
+    FX_VALUE_KEYS indices used below:
+      0=TABLE(A)  1=GROOVE(G)  2=HOP(H)   3=PAN(O)   4/5=CHORD(C)
+      6/7=ENV(E)  8/9=RETRIG(R)  10/11=VIB(V)
+      12=VOLUME(M)  13=WAVE(W)  14/15=RANDOM(Z)  16=CONTINUOUS(D,F,K,L,P,S,T)
+    """
+    note   = int(ch_tokens[0])
+    instr  = int(ch_tokens[1])
+    fx_cmd = int(ch_tokens[2])
+    fx     = ch_tokens[3:3 + FX_VALUES_FEATURE_DIM]
+
+    instr_raw = EMPTY if instr == 0 else instr - 1
+
+    def dec(i):        return max(0, int(fx[i]) - 1)
+    def nib(hi, lo):   return (dec(hi) & 0xF) << 4 | (dec(lo) & 0xF)
+
+    if   fx_cmd == CMD_NULL: fxval_raw = 0
+    elif fx_cmd == CMD_A:    fxval_raw = dec(0)
+    elif fx_cmd == CMD_C:    fxval_raw = nib(4, 5)
+    elif fx_cmd == CMD_D:    fxval_raw = dec(16)
+    elif fx_cmd == CMD_E:    fxval_raw = nib(6, 7)
+    elif fx_cmd == CMD_F:    fxval_raw = dec(16)
+    elif fx_cmd == CMD_G:    fxval_raw = dec(1)
+    elif fx_cmd == CMD_H:    fxval_raw = dec(2)
+    elif fx_cmd == CMD_K:    fxval_raw = dec(16)
+    elif fx_cmd == CMD_L:    fxval_raw = dec(16)
+    elif fx_cmd == CMD_M:    fxval_raw = dec(12)
+    elif fx_cmd == CMD_O:    fxval_raw = dec(3)
+    elif fx_cmd == CMD_P:    fxval_raw = dec(16)
+    elif fx_cmd == CMD_R:    fxval_raw = nib(8, 9)
+    elif fx_cmd == CMD_S:    fxval_raw = dec(16)
+    elif fx_cmd == CMD_T:    fxval_raw = dec(16)
+    elif fx_cmd == CMD_V:    fxval_raw = nib(10, 11)
+    elif fx_cmd == CMD_W:    fxval_raw = dec(13)
+    elif fx_cmd == CMD_Z:    fxval_raw = nib(14, 15)
+    else:                    fxval_raw = 0
+
+    return note, instr_raw, fx_cmd, fxval_raw
+
+
 def repack_tables(tokens_dict: dict[str, Array]) -> dict[str, list]:
     """
     Reverse of parse_tables. Returns dict of byte lists, one per memory region:

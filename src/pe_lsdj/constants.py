@@ -12,6 +12,7 @@ Constants:
 from pylsdj import (
     FRAMES_PER_WAVE,
     NOTES,
+    FX_COMMANDS,
     NUM_CHAINS,
     NUM_GROOVES, 
     NUM_INSTRUMENTS,
