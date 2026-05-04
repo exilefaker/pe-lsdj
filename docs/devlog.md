@@ -17,6 +17,7 @@
 - [3/12/2026] Model v8
 - [3/13/2026] Data augmentation
 - [3/23/2026] Model v13
+- [5/4/2026] Live streaming pipeline working in emu
 
 ## Model version history
 
@@ -33,11 +34,12 @@
 |   v7    | LSDJTransformer | Use Rotary Position Embeddings (RoPE) | ✅ |
 |   v8    | LSDJTransformer | Add global position scalar; jax.nn attention kernel | ✅ |
 |   v9    | LSDJTransformer | Replace MSE loss with Gaussian energy loss for continuous outputs | ❌ (training unstable) |
-|   v9.1* | LSDJTransformer | Switch to Beta-NLL loss | ✅ |
+|   v9.1  | LSDJTransformer | Switch to Beta-NLL loss | ✅ |
 |   v10   | LSDJTransformer | Helix encoding for note values | ✅ |
 |   v11   | LSDJTransformer | Conditional FX value generation | ✅ |
 |   v12   | LSDJTransformer | Helix encoding, MSE loss | ✅ |
 |   v13   | LSDJTransformer | Chroma/Octave decoder for notes (rolls in conditional FX val) | ✅ |
+|v13_1024*| LSDJTransformer | Larger-scale model, same arch; current workhorse for tests | ✅ |
 
 
 \* current model
