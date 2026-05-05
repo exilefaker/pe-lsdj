@@ -45,8 +45,8 @@ def main():
     parser.add_argument("--weights", "-w", required=True, help="Model weights (.eqx)")
     parser.add_argument("--params",  "-p", default=None,  help="model_hyperparams.json (default: weights dir)")
 
-    parser.add_argument("--write-ahead", type=int, default=8,
-                        help="Target rows ahead of slowest playhead (default: 8)")
+    parser.add_argument("--write-ahead-phrases", type=int, default=2,
+                        help="Target phrases ahead of step-clock (default: 2, ≈1–2 s)")
     parser.add_argument("--max-rows", type=int, default=None,
                         help="Rolling buffer depth (default: auto from alloc headroom)")
     parser.add_argument("--num-phrases-per-chain", type=int, default=4,
@@ -136,11 +136,6 @@ def main():
                   f"({safe_max_rows} safe); clamping.")
         max_rows = min(args.max_rows, safe_max_rows)
 
-    write_ahead = args.write_ahead
-    if write_ahead >= max_rows:
-        write_ahead = max(1, max_rows - 1)
-        print(f"Warning: write_ahead clamped to {write_ahead} (max_rows={max_rows})")
-
     first_row = find_first_empty_row(pyboy)
     print(f"Streaming from song row 0x{first_row:02X} ({first_row})")
 
@@ -164,7 +159,7 @@ def main():
         v_cache          = v_cache,
         W                = W,
         song_length      = song_length,
-        write_ahead      = write_ahead,
+        write_ahead_phrases = args.write_ahead_phrases,
         seed             = args.seed + 1,
         window           = args.window,
         instr_threshold  = args.instr_threshold,

@@ -5,6 +5,13 @@ Generator thread owns all JAX state; produces tokens into a queue.
 Main thread ticks PyBoy at steady 60 fps and drains tokens into StreamingBuffer.
 JAX releases the Python GIL during C++ computation, so both threads make
 progress concurrently without audio stalls.
+
+Write-ahead is measured in *phrases* using a self-calibrating conversion of the
+raw 0xC74B counter.  We do not assume a fixed relationship between 0xC74B ticks
+and musical phrases; instead we measure empirically how many ticks elapse each
+time the slowest playhead advances by one song row, then divide by
+num_phrases_per_chain to get c74b_per_phrase.  Intra-row phrase progress is
+interpolated from ticks elapsed since the last row-advance event.
 """
 
 from __future__ import annotations
@@ -19,7 +26,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 
-from pe_lsdj.constants import EMPTY, NUM_CHANNELS, SONG_CHAINS_ADDR
+from pe_lsdj.constants import EMPTY, NUM_CHANNELS, SONG_CHAINS_ADDR, STEPS_PER_PHRASE
 from pe_lsdj.embedding import SongBanks
 from pe_lsdj.generation import generate_step_cached
 
@@ -27,8 +34,15 @@ from .alloc import AllocationManager
 from .buffer import StreamingBuffer
 from .sram import read_sram
 
-# Per-channel WRAM playhead addresses (0=PU1, 1=PU2, 2=WAV, 3=NOI)
+# Per-channel WRAM song-row playhead addresses (0=PU1, 1=PU2, 2=WAV, 3=NOI)
 _PLAYHEAD_ADDRS = [0xC39F, 0xC3A0, 0xC3A1, 0xC3A2]
+
+# Address used as a monotonic clock for phrase-progress calibration.
+# Its exact semantics (step? phrase? frame?) are BPM-dependent; we treat it
+# as an opaque ticker and calibrate its rate against the playhead at runtime.
+# Found via scripts/find_phrase_cursor.py + probe_phrase_cursor.py.
+_PHRASE_CURSOR_ADDR = 0xC74B
+
 _FRAME_DURATION = 1.0 / 60.0  # null-mode rate cap
 
 _jit_step = eqx.filter_jit(generate_step_cached)
@@ -64,7 +78,8 @@ class StreamingSession:
         k_cache, v_cache: Prefilled KV caches.
         W:            Number of prompt steps used in the prefill.
         song_length:  Song-length hint passed to the model.
-        write_ahead:  Target rows ahead of the playhead to maintain.
+        write_ahead_phrases: Target phrases of content to keep ahead of the
+                      global step-clock (default 2, ≈1–2 s depending on BPM).
         seed:         RNG seed for generation.
         window:       True if running SDL2 (skips null-mode rate cap).
         instr/table/groove/softsynth_threshold: Entity prediction thresholds.
@@ -83,7 +98,7 @@ class StreamingSession:
         v_cache,
         W: int,
         song_length: int,
-        write_ahead: int,
+        write_ahead_phrases: int = 2,
         seed: int = 43,
         window: bool = False,
         instr_threshold: float = 0.5,
@@ -92,12 +107,12 @@ class StreamingSession:
         softsynth_threshold: float = 0.5,
         temp: float = 0.9,
     ):
-        self.pyboy       = pyboy
-        self.model       = model
-        self.alloc       = alloc
-        self.buf         = buf
-        self.write_ahead = write_ahead
-        self.window      = window
+        self.pyboy               = pyboy
+        self.model               = model
+        self.alloc               = alloc
+        self.buf                 = buf
+        self.write_ahead_phrases = write_ahead_phrases
+        self.window              = window
 
         self._W           = W
         self._song_length = song_length
@@ -121,8 +136,8 @@ class StreamingSession:
     # ── public ────────────────────────────────────────────────────────────────
 
     def run(self) -> None:
-        """Pre-generate write_ahead rows, start the generator thread, then
-        tick PyBoy until Ctrl-C."""
+        """Pre-generate one full row, start the generator thread,
+        then tick PyBoy until Ctrl-C."""
         self._pregen()
         self._start_generator_thread()
 
@@ -130,8 +145,22 @@ class StreamingSession:
         self.pyboy.button("start")
         self.pyboy.tick(render=self.window)
 
+        # ── 0xC74B calibration state ──────────────────────────────────────────
+        # We accumulate raw ticks and measure how many occur per song-row advance
+        # of the slowest playhead.  After the first row advance we have a
+        # c74b_per_row conversion and switch to phrase-level interpolation.
+        prev_cursor       = self.pyboy.memory[_PHRASE_CURSOR_ADDR]
+        cursor_total      = 0          # cumulative ticks since playback start
+
+        playheads         = read_playheads(self.pyboy)
+        initial_min_ph    = min(playheads)
+        prev_min_ph       = initial_min_ph
+        cursor_at_row_adv = 0          # cursor_total at the last row-advance
+
+        _c74b_samples: list[float] = []
+        _c74b_per_row: float | None = None
+
         rows_committed = self.buf.committed_rows
-        log_every      = max(1, self.write_ahead // 2)
 
         try:
             while True:
@@ -140,12 +169,49 @@ class StreamingSession:
                 # No JAX here — main thread ticks PyBoy at steady 60 fps.
                 self.pyboy.tick(render=self.window)
 
-                playheads = read_playheads(self.pyboy)
-                ahead     = self.buf.rows_ahead_of(playheads)
+                # Accumulate raw 0xC74B ticks.
+                curr  = self.pyboy.memory[_PHRASE_CURSOR_ADDR]
+                delta = (curr - prev_cursor) % 256
+                if delta:
+                    cursor_total += delta
+                    prev_cursor   = curr
+
+                # Detect playhead advance; update calibration.
+                playheads  = read_playheads(self.pyboy)
+                cur_min_ph = min(playheads)
+                row_delta  = (cur_min_ph - prev_min_ph) % 256
+                if row_delta > 0:
+                    ticks_this = cursor_total - cursor_at_row_adv
+                    if ticks_this > 0:
+                        _c74b_samples.append(ticks_this / row_delta)
+                        # Rolling average over the last 8 samples.
+                        _c74b_per_row = sum(_c74b_samples[-8:]) / len(_c74b_samples[-8:])
+                    cursor_at_row_adv = cursor_total
+                    prev_min_ph       = cur_min_ph
+                    c74b_str = f"{_c74b_per_row:.1f}" if _c74b_per_row is not None else "?"
+                    print(
+                        f"[row+{row_delta}] ph={cur_min_ph:#04x}  "
+                        f"c74b/row={c74b_str}  "
+                        f"rows_in_buf={self.buf.committed_rows}  "
+                        f"playhead={[f'0x{p:02X}' for p in playheads]}"
+                    )
+
+                # Compute phrases_consumed: coarse row count + intra-row interpolation.
+                rows_advanced = (cur_min_ph - initial_min_ph) % 256
+                if _c74b_per_row:
+                    intra_frac = min(
+                        (cursor_total - cursor_at_row_adv) / _c74b_per_row, 1.0
+                    )
+                else:
+                    intra_frac = 0.0
+                phrases_consumed = (rows_advanced + intra_frac) * self.buf.num_phrases_per_chain
+
+                phrases_ahead = self.buf.phrases_committed - phrases_consumed
 
                 # Drain pre-generated tokens from the queue into SRAM.
-                # SRAM writes are µs-level; draining a full row costs <1 ms.
-                while ahead < self.write_ahead:
+                # SRAM writes are µs-level; the inner loop runs until we're
+                # sufficiently ahead or the queue runs dry.
+                while phrases_ahead < self.write_ahead_phrases:
                     try:
                         next_token = self._step_queue.get_nowait()
                     except stdlib_queue.Empty:
@@ -153,17 +219,17 @@ class StreamingSession:
                     committed = self.buf.push_step(next_token)
                     if committed is not None:
                         rows_committed += 1
-                        if rows_committed % log_every == 0:
-                            ph_str = " ".join(f"{p:02X}" for p in playheads)
-                            print(
-                                f"row 0x{committed.song_row:02X} committed  "
-                                f"total={rows_committed}  "
-                                f"playhead=[{ph_str}]  "
-                                f"ahead={self.buf.rows_ahead_of(playheads)}  "
-                                f"free={self.alloc.free_phrase_count}ph/"
-                                f"{self.alloc.free_chain_count}ch"
-                            )
-                    ahead = self.buf.rows_ahead_of(playheads)
+                        ph_str = " ".join(f"{p:02X}" for p in playheads)
+                        print(
+                            f"row 0x{committed.song_row:02X} committed  "
+                            f"total={rows_committed}  "
+                            f"playhead=[{ph_str}]  "
+                            f"rows_ahead={self.buf.rows_ahead_of(playheads)}  "
+                            f"phrases_ahead={phrases_ahead:.1f}  "
+                            f"free={self.alloc.free_phrase_count}ph/"
+                            f"{self.alloc.free_chain_count}ch"
+                        )
+                    phrases_ahead = self.buf.phrases_committed - phrases_consumed
 
                 if not self.window:
                     elapsed   = time.perf_counter() - frame_start
@@ -197,12 +263,22 @@ class StreamingSession:
         return np.array(next_token)
 
     def _pregen(self) -> None:
-        """Fill write_ahead rows synchronously before playback starts."""
+        """Fill rows synchronously before playback starts.
+
+        We need one row for the bootstrap period (the first row plays before the
+        first row-advance event gives us calibration data) plus enough additional
+        rows to satisfy write_ahead_phrases.  Formula:
+            write_ahead_rows = 1 + ceil(write_ahead_phrases / num_phrases_per_chain)
+        For the default (write_ahead_phrases=2, num_phrases_per_chain=4) this is 2 rows.
+        """
+        npp = self.buf.num_phrases_per_chain
+        write_ahead_rows = 1 + (self.write_ahead_phrases + npp - 1) // npp
+        steps_needed     = write_ahead_rows * self.buf.steps_per_row
         print(
-            f"Pre-generating {self.write_ahead} rows "
-            f"({self.write_ahead * self.buf.steps_per_row} steps) ..."
+            f"Pre-generating {write_ahead_rows} row(s) "
+            f"({steps_needed} steps) ..."
         )
-        while self.buf.committed_rows < self.write_ahead:
+        for _ in range(steps_needed):
             token     = self._gen_step()
             committed = self.buf.push_step(token)
             if committed is not None:
@@ -221,7 +297,7 @@ class StreamingSession:
                     continue
 
     def _start_generator_thread(self) -> None:
-        queue_depth      = self.write_ahead * self.buf.steps_per_row * 2
+        queue_depth      = self.write_ahead_phrases * STEPS_PER_PHRASE * 2
         self._step_queue = stdlib_queue.Queue(maxsize=queue_depth)
         self._stop_gen   = threading.Event()
         self._gen_thread = threading.Thread(

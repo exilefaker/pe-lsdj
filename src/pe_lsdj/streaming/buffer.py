@@ -107,6 +107,7 @@ class StreamingBuffer:
         self._next_row             = next_song_row % 256
         self._buf: deque[RowEntry] = deque()
         self._building: Optional[_BuildingChain] = None
+        self._total_phrases_committed: int = 0
 
     # ── public interface ──────────────────────────────────────────────────────
 
@@ -117,6 +118,12 @@ class StreamingBuffer:
     @property
     def committed_rows(self) -> int:
         return len(self._buf)
+
+    @property
+    def phrases_committed(self) -> int:
+        """Monotonically-increasing count of phrases fully written to SRAM.
+        Unaffected by recycling — safe to diff against phrases_consumed."""
+        return self._total_phrases_committed
 
     @property
     def next_song_row(self) -> int:
@@ -144,6 +151,9 @@ class StreamingBuffer:
         b = self._building
         self._write_step(b, tokens)
         b.step_cursor += 1
+
+        if b.step_cursor % STEPS_PER_PHRASE == 0:
+            self._total_phrases_committed += 1
 
         if b.step_cursor == self.steps_per_row:
             return self._commit()
