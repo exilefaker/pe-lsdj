@@ -47,10 +47,39 @@ from pe_lsdj.constants import (
     EMPTY,
 )
 from pe_lsdj.tokenizer.detokenize import phrase_step_bytes
-from .sram import write_sram, write_sram_range
+from .sram import read_sram, write_sram, write_sram_range
 from .alloc import AllocationManager
 
 _CHAIN_PHRASE_SLOTS = 16
+
+# ── Song-screen display caches (discovered via find_song_display.py) ──────────
+# LSDJ maintains two WRAM caches for the song grid, both updated on screen init:
+#
+#   0xC2EC  raw chain-ID cache   — layout: base + song_row*4 + ch
+#   0xD800  tile-index cache     — layout: base + ((2+song_row)%32)*32 + (3+ch*3)
+#                                  (mirrors the BG tile map at 0x9800)
+#
+# The rendering loop copies the tile-index cache → VRAM (0x9800) every frame,
+# so VRAM writes alone last only one frame.  We must write all three.
+_WRAM_CHAIN_CACHE = 0xC2EC   # raw chain IDs; stride = NUM_CHANNELS
+_WRAM_TILE_CACHE  = 0xD800   # tile indices;  mirrors BG map layout
+_BG_MAP_BASE      = 0x9800   # VRAM BG tile map
+_FONT_BASE        = 0x04     # tile 0x04='0', 0x05='1', ... 0x13='F'
+_GRID_HEADER_ROWS = 2
+_GRID_CHAN_COL0   = 3
+_GRID_CHAN_STRIDE = 3
+
+
+def _grid_tile_offset(song_row: int, ch: int) -> int:
+    """BG-map / tile-cache offset for the first hex digit of (song_row, ch)."""
+    tile_row = (_GRID_HEADER_ROWS + song_row) % 32
+    return tile_row * 32 + _GRID_CHAN_COL0 + ch * _GRID_CHAN_STRIDE
+
+
+def _chain_tile_pair(chain_id: int, empty_tile: int) -> tuple[int, int]:
+    if chain_id == EMPTY:
+        return empty_tile, empty_tile
+    return _FONT_BASE + ((chain_id >> 4) & 0xF), _FONT_BASE + (chain_id & 0xF)
 
 
 @dataclass
@@ -108,6 +137,7 @@ class StreamingBuffer:
         self._buf: deque[RowEntry] = deque()
         self._building: Optional[_BuildingChain] = None
         self._total_phrases_committed: int = 0
+        self._empty_tile: int = self._read_empty_tile()
 
     # ── public interface ──────────────────────────────────────────────────────
 
@@ -172,6 +202,38 @@ class StreamingBuffer:
 
     # ── internal ─────────────────────────────────────────────────────────────
 
+    def _read_empty_tile(self) -> int:
+        """Read the tile LSDJ uses for '--' (empty chain slot) from VRAM.
+
+        next_song_row is always an SRAM-empty row at init time (lsdj_stream.py
+        calls find_first_empty_row before constructing the buffer), so reading
+        its BG tile position gives the '--' tile directly.  Falls back to
+        scanning other SRAM-empty slots if needed.
+        """
+        for row in range(256):
+            for ch in range(NUM_CHANNELS):
+                val = read_sram(self.pyboy,
+                                SONG_CHAINS_ADDR.start + row * NUM_CHANNELS + ch)
+                if val == EMPTY:
+                    offset = _grid_tile_offset(row, ch)
+                    tile = self.pyboy.memory[_BG_MAP_BASE + offset]
+                    if not (_FONT_BASE <= tile <= _FONT_BASE + 15):
+                        return tile
+        return 0x01  # safe fallback
+
+    def _write_chain_display(self, song_row: int, ch: int, chain_id: int) -> None:
+        """Keep all three display caches in sync with an SRAM chain write."""
+        hi, lo  = _chain_tile_pair(chain_id, self._empty_tile)
+        offset  = _grid_tile_offset(song_row, ch)
+        # Raw chain-ID cache (LSDJ UI logic)
+        self.pyboy.memory[_WRAM_CHAIN_CACHE + song_row * NUM_CHANNELS + ch] = chain_id
+        # Tile-index cache (LSDJ renders from this to VRAM every frame)
+        self.pyboy.memory[_WRAM_TILE_CACHE + offset]     = hi
+        self.pyboy.memory[_WRAM_TILE_CACHE + offset + 1] = lo
+        # VRAM directly (gets the current frame right, before the next render tick)
+        self.pyboy.memory[_BG_MAP_BASE + offset]     = hi
+        self.pyboy.memory[_BG_MAP_BASE + offset + 1] = lo
+
     def _start_chain(self) -> Optional[_BuildingChain]:
         """Allocate chains + phrases for the next row; recycle if buffer full."""
         if len(self._buf) >= self.max_rows:
@@ -210,12 +272,12 @@ class StreamingBuffer:
         song_row = self._next_row
         self._next_row = (self._next_row + 1) % 256
 
-        # Wire song row → chains
+        # Wire song row → chains (SRAM + VRAM for immediate display refresh)
         for ch in range(NUM_CHANNELS):
             write_sram(self.pyboy,
                        SONG_CHAINS_ADDR.start + song_row * 4 + ch,
                        chain_ids[ch])
-
+            self._write_chain_display(song_row, ch, chain_ids[ch])
         return _BuildingChain(song_row, chain_ids, phrase_ids)
 
     def _commit(self) -> RowEntry:
@@ -272,3 +334,4 @@ class StreamingBuffer:
             write_sram(self.pyboy,
                        SONG_CHAINS_ADDR.start + entry.song_row * 4 + ch,
                        EMPTY)
+            self._write_chain_display(entry.song_row, ch, EMPTY)
