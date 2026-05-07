@@ -34,6 +34,7 @@ from typing import Optional
 import numpy as np
 
 from pe_lsdj.constants import (
+    CMD_H,
     SONG_CHAINS_ADDR,
     CHAIN_PHRASES_ADDR,
     CHAIN_TRANSPOSES_ADDR,
@@ -61,7 +62,7 @@ _CHAIN_PHRASE_SLOTS = 16
 #
 # The rendering loop copies the tile-index cache → VRAM (0x9800) every frame,
 # so VRAM writes alone last only one frame.  We must write all three.
-_WRAM_CHAIN_CACHE = 0xC2EC   # raw chain IDs; stride = NUM_CHANNELS
+_WRAM_CHAIN_CACHE = 0xC2EC   # raw chain IDs; circular 32-row buffer, stride = NUM_CHANNELS
 _WRAM_TILE_CACHE  = 0xD800   # tile indices;  mirrors BG map layout
 _BG_MAP_BASE      = 0x9800   # VRAM BG tile map
 _FONT_BASE        = 0x04     # tile 0x04='0', 0x05='1', ... 0x13='F'
@@ -225,8 +226,8 @@ class StreamingBuffer:
         """Keep all three display caches in sync with an SRAM chain write."""
         hi, lo  = _chain_tile_pair(chain_id, self._empty_tile)
         offset  = _grid_tile_offset(song_row, ch)
-        # Raw chain-ID cache (LSDJ UI logic)
-        self.pyboy.memory[_WRAM_CHAIN_CACHE + song_row * NUM_CHANNELS + ch] = chain_id
+        # Raw chain-ID cache — circular 32-row buffer matching the BG tile-map height
+        self.pyboy.memory[_WRAM_CHAIN_CACHE + (song_row % 32) * NUM_CHANNELS + ch] = chain_id
         # Tile-index cache (LSDJ renders from this to VRAM every frame)
         self.pyboy.memory[_WRAM_TILE_CACHE + offset]     = hi
         self.pyboy.memory[_WRAM_TILE_CACHE + offset + 1] = lo
@@ -300,6 +301,8 @@ class StreamingBuffer:
         self, pid: int, step: int, ch_tokens: np.ndarray
     ) -> None:
         note, instr, fx_cmd, fxval = phrase_step_bytes(ch_tokens)
+        # if fx_cmd == CMD_H:
+        #     print(f"[HOP] ph={pid:#04x} step={step:02d}  H {fxval:02X}", flush=True)
         write_sram(self.pyboy, PHRASE_NOTES_ADDR.start  + pid * STEPS_PER_PHRASE + step, note)
         write_sram(self.pyboy, PHRASE_INSTR_ADDR.start  + pid * STEPS_PER_PHRASE + step, instr)
         write_sram(self.pyboy, PHRASE_FX_ADDR.start     + pid * STEPS_PER_PHRASE + step, fx_cmd)
