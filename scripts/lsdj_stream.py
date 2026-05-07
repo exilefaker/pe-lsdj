@@ -55,6 +55,10 @@ def main():
                         help="Steps of the .lsdsng to use as prompt (default: 64)")
     parser.add_argument("--song-length", type=int, default=None,
                         help="Song-length hint for progress embedding (default: prompt + 1024)")
+    parser.add_argument("--lock-progress", type=float, default=None,
+                        help="Pin progress fraction for continuous generation "
+                             "(e.g. 0.4 = always ~40%% done). "
+                             "Toggle live with Space (SDL2) or p (terminal).")
     parser.add_argument("--temp", type=float, default=0.9,
                         help="Sampling temperature (default: 0.9)")
     parser.add_argument("--instr-threshold",     type=float, default=0.5)
@@ -96,7 +100,7 @@ def main():
     banks  = SongBanks.from_songfile(sf)
     tokens = jnp.asarray(sf.song_tokens[:args.prompt_steps], dtype=jnp.uint16)
     W      = tokens.shape[0]
-    song_length = args.song_length or (W + 1024)
+    song_length = args.song_length or (W + 2048)
     print(f"Prompt: {W} steps from {os.path.basename(args.song)}  |  song_length={song_length}")
 
     print("Pre-filling KV cache ...")
@@ -162,6 +166,7 @@ def main():
         write_ahead_phrases = args.write_ahead_phrases,
         seed             = args.seed + 1,
         window           = args.window,
+        loop_progress    = args.lock_progress,
         instr_threshold  = args.instr_threshold,
         table_threshold  = args.table_threshold,
         groove_threshold = args.groove_threshold,

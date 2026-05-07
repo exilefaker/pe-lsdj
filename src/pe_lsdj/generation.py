@@ -98,11 +98,12 @@ def _score_table_traces(banks, heads, table_h):
     )      
 
 
-def _sample_cat(key, logits, temperature: float):
+def _sample_cat(key, logits, temperature):
     """Sample from categorical logits; argmax (greedy) when temperature == 0."""
-    if temperature == 0.0:
-        return jnp.argmax(logits)
-    return jr.categorical(key, logits / temperature)
+    # Guard division so both branches are NaN-free when temperature is traced.
+    safe_temp = jnp.where(temperature == 0.0, 1.0, temperature)
+    sampled   = jr.categorical(key, logits / safe_temp)
+    return jnp.where(temperature == 0.0, jnp.argmax(logits), sampled)
 
 
 def _sample_cont(raw, max_vals, temperature, key):

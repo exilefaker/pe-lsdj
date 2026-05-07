@@ -17,8 +17,12 @@ interpolated from ticks elapsed since the last row-advance event.
 from __future__ import annotations
 
 import queue as stdlib_queue
+import select
+import sys
+import termios
 import threading
 import time
+import tty
 from typing import Optional
 
 import equinox as eqx
@@ -101,6 +105,7 @@ class StreamingSession:
         write_ahead_phrases: int = 2,
         seed: int = 43,
         window: bool = False,
+        loop_progress: float | None = None,
         instr_threshold: float = 0.5,
         table_threshold: float = 0.5,
         groove_threshold: float = 0.1,
@@ -118,7 +123,8 @@ class StreamingSession:
         self._song_length = song_length
         self._thresholds  = (instr_threshold, table_threshold,
                              groove_threshold, softsynth_threshold)
-        self._temp        = temp
+        self._temp          = temp
+        self._loop_progress = loop_progress
 
         # Mutable JAX state. Owned exclusively by the generator thread after
         # run() is called; mutated directly by the main thread during pre-generation.
@@ -130,8 +136,10 @@ class StreamingSession:
         self._step_idx    = 0
 
         self._step_queue: Optional[stdlib_queue.Queue] = None
+        self._ctrl_queue: Optional[stdlib_queue.Queue] = None
         self._stop_gen:   Optional[threading.Event]    = None
         self._gen_thread: Optional[threading.Thread]   = None
+        self._ctrl_thread: Optional[threading.Thread]  = None
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -141,7 +149,12 @@ class StreamingSession:
         self._pregen()
         self._start_generator_thread()
 
-        print("\nStarting LSDJ playback — Ctrl-C to stop.\n")
+        self._start_control_thread()
+        print("\nStarting LSDJ playback — Ctrl-C to stop.")
+        mode_str = f"locked @ {self._loop_progress:.0%}" if self._loop_progress is not None else "advancing"
+        print(f"Progress mode : {mode_str}  (p = toggle,  < / > = nudge ±5%)")
+        print(f"Temperature   : {self._temp:.2f}  ([ / ] = ±0.25)")
+        print("(focus terminal window to use controls)\n")
         self.pyboy.button("start")
         self.pyboy.tick(render=self.window)
 
@@ -189,11 +202,16 @@ class StreamingSession:
                     cursor_at_row_adv = cursor_total
                     prev_min_ph       = cur_min_ph
                     c74b_str = f"{_c74b_per_row:.1f}" if _c74b_per_row is not None else "?"
+                    if self._loop_progress is not None:
+                        prog_str = f"{self._loop_progress:.0%} (locked)"
+                    else:
+                        frac = min(1.0, (self._W + self._step_idx) / self._song_length)
+                        prog_str = f"{frac:.0%} (advancing)"
                     print(
                         f"[row+{row_delta}] ph={cur_min_ph:#04x}  "
                         f"c74b/row={c74b_str}  "
                         f"rows_in_buf={self.buf.committed_rows}  "
-                        f"playhead={[f'0x{p:02X}' for p in playheads]}"
+                        f"progress={prog_str}"
                     )
 
                 # Compute phrases_consumed: coarse row count + intra-row interpolation.
@@ -207,6 +225,15 @@ class StreamingSession:
                 phrases_consumed = (rows_advanced + intra_frac) * self.buf.num_phrases_per_chain
 
                 phrases_ahead = self.buf.phrases_committed - phrases_consumed
+
+                # Apply live controls from terminal stdin.
+                while not self._ctrl_queue.empty():
+                    key = self._ctrl_queue.get_nowait()
+                    if   key == ']': self._nudge_temp(+0.25)
+                    elif key == '[': self._nudge_temp(-0.25)
+                    elif key == '>': self._nudge_progress(+0.05)
+                    elif key == '<': self._nudge_progress(-0.05)
+                    elif key == 'p': self._toggle_progress_lock()
 
                 # Drain pre-generated tokens from the queue into SRAM.
                 # SRAM writes are µs-level; the inner loop runs until we're
@@ -242,6 +269,8 @@ class StreamingSession:
         finally:
             self._stop_gen.set()
             self._gen_thread.join(timeout=2.0)
+            if self._ctrl_thread is not None:
+                self._ctrl_thread.join(timeout=1.0)
             print(f"Stopped after {rows_committed} rows ({self._step_idx} steps).")
             self.pyboy.stop(save=False)
 
@@ -252,11 +281,16 @@ class StreamingSession:
         self._gen_key, step_key = jr.split(self._gen_key)
         carry = (self._last_hidden, self._banks, self._k_cache, self._v_cache)
         instr_t, table_t, groove_t, softsynth_t = self._thresholds
+        if self._loop_progress is not None:
+            position    = self._W + self._step_idx
+            effective_sl = max(position + 1, round(position / self._loop_progress))
+        else:
+            effective_sl = self._song_length
         carry, next_token = _jit_step(
             carry, (step_key, jnp.int32(self._step_idx)),
-            self.model, self._W, self._song_length,
+            self.model, self._W, jnp.int32(effective_sl),
             instr_t, table_t, groove_t, softsynth_t,
-            self._temp,
+            jnp.float32(self._temp),   # dynamic array — changes never retrace
         )
         self._last_hidden, self._banks, self._k_cache, self._v_cache = carry
         self._step_idx += 1
@@ -295,6 +329,65 @@ class StreamingSession:
                     break
                 except stdlib_queue.Full:
                     continue
+
+    def _nudge_temp(self, delta: float) -> None:
+        self._temp = max(0.1, min(2.0, round(self._temp + delta, 2)))
+        print(f"[temp → {self._temp:.2f}]", flush=True)
+
+    def _nudge_progress(self, delta: float) -> None:
+        if self._loop_progress is None:
+            # Snap to current fraction before nudging
+            position = self._W + self._step_idx
+            self._loop_progress = round(
+                min(0.95, position / self._song_length), 2
+            )
+        self._loop_progress = max(0.05, min(0.95, round(self._loop_progress + delta, 2)))
+        print(f"[progress locked @ {self._loop_progress:.0%}]", flush=True)
+
+    def _toggle_progress_lock(self) -> None:
+        if self._loop_progress is not None:
+            self._loop_progress = None
+            print("[progress → advancing]", flush=True)
+        else:
+            position = self._W + self._step_idx
+            self._loop_progress = round(
+                min(0.95, position / self._song_length), 2
+            )
+            print(f"[progress locked @ {self._loop_progress:.0%}]", flush=True)
+
+    def _control_loop(self) -> None:
+        """Control thread: read keypresses from stdin and post to _ctrl_queue.
+
+        Uses cbreak mode so each keypress is delivered immediately without
+        waiting for Enter.  Terminal settings are always restored on exit.
+        Silently exits if stdin is not a TTY (headless / piped environments).
+        """
+        if not sys.stdin.isatty():
+            return
+        fd  = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            while not self._stop_gen.is_set():
+                # Short poll so we check _stop_gen regularly.
+                if not select.select([sys.stdin], [], [], 0.05)[0]:
+                    continue
+                ch = sys.stdin.read(1)
+                # Arrow keys arrive as 3-byte escape sequences: ESC [ <letter>.
+                # Consume the rest of the sequence with a tight timeout so we
+                # don't mis-interpret a bare ESC as the start of a sequence.
+                if ch == '\x1b' and select.select([sys.stdin], [], [], 0.02)[0]:
+                    ch += sys.stdin.read(2)
+                self._ctrl_queue.put_nowait(ch)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+    def _start_control_thread(self) -> None:
+        self._ctrl_queue  = stdlib_queue.Queue()
+        self._ctrl_thread = threading.Thread(
+            target=self._control_loop, daemon=True, name="pe-lsdj-ctrl"
+        )
+        self._ctrl_thread.start()
 
     def _start_generator_thread(self) -> None:
         queue_depth      = self.write_ahead_phrases * STEPS_PER_PHRASE * 2
