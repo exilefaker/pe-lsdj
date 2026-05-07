@@ -54,7 +54,8 @@ def main():
     parser.add_argument("--prompt-steps", type=int, default=64,
                         help="Steps of the .lsdsng to use as prompt (default: 64)")
     parser.add_argument("--song-length", type=int, default=None,
-                        help="Song-length hint for progress embedding (default: prompt + 1024)")
+                        help="Song-length hint for progress embedding "
+                             "(default: full length of --song file)")
     parser.add_argument("--lock-progress", type=float, default=None,
                         help="Pin progress fraction for continuous generation "
                              "(e.g. 0.4 = always ~40%% done). "
@@ -100,8 +101,9 @@ def main():
     banks  = SongBanks.from_songfile(sf)
     tokens = jnp.asarray(sf.song_tokens[:args.prompt_steps], dtype=jnp.uint16)
     W      = tokens.shape[0]
-    song_length = args.song_length or (W + 2048)
-    print(f"Prompt: {W} steps from {os.path.basename(args.song)}  |  song_length={song_length}")
+    S      = sf.song_tokens.shape[0]
+    song_length = args.song_length or S
+    print(f"Prompt: {W}/{S} steps from {os.path.basename(args.song)}  |  song_length={song_length}")
 
     print("Pre-filling KV cache ...")
     last_hidden, k_cache, v_cache = eqx.filter_jit(model.prefill)(
