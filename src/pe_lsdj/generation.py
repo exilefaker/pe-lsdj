@@ -22,6 +22,7 @@ from pe_lsdj.constants import (
     SOFTSYNTH_WIDTH,
     WAVEFRAME_DIM,
     WAV,
+    NUM_FX_COMMANDS,
 )
 from pe_lsdj.models.transformer import (
     TOKEN_HEADS,
@@ -98,12 +99,18 @@ def _score_table_traces(banks, heads, table_h):
     )      
 
 
-def _sample_cat(key, logits, temperature):
-    """Sample from categorical logits; argmax (greedy) when temperature == 0."""
-    # Guard division so both branches are NaN-free when temperature is traced.
+def _sample_cat(key, logits, temperature, bias=None):
+    """Sample from categorical logits; argmax (greedy) when temperature == 0.
+
+    bias: optional additive offset applied post-temperature so its effect is
+    temperature-invariant.  Use -jnp.inf to hard-exclude a token.
+    """
     safe_temp = jnp.where(temperature == 0.0, 1.0, temperature)
-    sampled   = jr.categorical(key, logits / safe_temp)
-    return jnp.where(temperature == 0.0, jnp.argmax(logits), sampled)
+    scaled = logits / safe_temp
+    if bias is not None:
+        scaled = scaled + bias
+    sampled = jr.categorical(key, scaled)
+    return jnp.where(temperature == 0.0, jnp.argmax(scaled), sampled)
 
 
 def _sample_cont(raw, max_vals, temperature, key):
@@ -719,6 +726,7 @@ def resolve_step(
     groove_match_threshold: float,
     synth_match_threshold: float,
     temperature: float = 0.0,
+    logit_biases: dict | None = None,
 ) -> tuple[Array, SongBanks]:
     """
     Resolve one generation step across all 4 channels.
@@ -739,6 +747,7 @@ def resolve_step(
     Returns (next_tokens, banks_out) where next_tokens has shape (NUM_CHANNELS, 21).
     """
     ch_keys = jr.split(key, NUM_CHANNELS)  # (NUM_CHANNELS, 2)
+    _bias = logit_biases or {}  # trace-time dict; values are JAX arrays or absent
 
     def resolve_channel(banks, inputs):
         ch_key, ch_logits, ch_latents = inputs
@@ -756,8 +765,10 @@ def resolve_step(
 
         # Sample note: factorized chroma × octave (pos 0)
         # chroma=0 or octave=0 → NULL note (either = 0 rule)
-        chroma_val = _sample_cat(jr.fold_in(ch_key, 0),   ch_logits['note_chroma'], temperature)
-        oct_val    = _sample_cat(jr.fold_in(ch_key, 201), ch_logits['note_oct'],    temperature)
+        chroma_val = _sample_cat(jr.fold_in(ch_key, 0),   ch_logits['note_chroma'], temperature,
+                                 _bias.get('note_chroma'))
+        oct_val    = _sample_cat(jr.fold_in(ch_key, 201), ch_logits['note_oct'],    temperature,
+                                 _bias.get('note_oct'))
         note_val   = jnp.where(
             (chroma_val == 0) | (oct_val == 0),
             jnp.int32(0),
@@ -766,7 +777,8 @@ def resolve_step(
         next_chan_tokens = next_chan_tokens.at[0].set(note_val.astype(jnp.uint16))
 
         # Sample fx_cmd first (pos 2); ch_logits['fx_cmd'] is unconditioned
-        fx_cmd_val = _sample_cat(jr.fold_in(ch_key, 2), ch_logits['fx_cmd'], temperature)
+        fx_cmd_val = _sample_cat(jr.fold_in(ch_key, 2), ch_logits['fx_cmd'], temperature,
+                                 _bias.get('fx_cmd'))
         next_chan_tokens = next_chan_tokens.at[2].set(fx_cmd_val.astype(jnp.uint16))
 
         # Get fx_val logits conditioned on the sampled fx_cmd
@@ -776,7 +788,7 @@ def resolve_step(
             if name == 'fx_cmd':
                 continue  # already done
             src_logits = cond_fx_logits[name] if name in FX_VAL_HEAD_NAMES else ch_logits[name]
-            val = _sample_cat(jr.fold_in(ch_key, pos), src_logits, temperature)
+            val = _sample_cat(jr.fold_in(ch_key, pos), src_logits, temperature, _bias.get(name))
             next_chan_tokens = next_chan_tokens.at[pos].set(val.astype(jnp.uint16))
 
         # 2. Instrument → col 1.
@@ -892,6 +904,7 @@ def generate_step_cached(
     groove_match_threshold: float,
     softsynth_match_threshold: float,
     temperature: float = 0.0,
+    logit_biases: dict | None = None,
 ) -> tuple:
     """
     One KV-cached autoregressive generation step.
@@ -924,7 +937,7 @@ def generate_step_cached(
         model.output_heads, banks_in, key, logits_dict, latents,
         instr_match_threshold, table_match_threshold,
         groove_match_threshold, softsynth_match_threshold,
-        temperature,
+        temperature, logit_biases,
     )
 
     # Embed the new token at its absolute position (for phrase position + progress encoding)

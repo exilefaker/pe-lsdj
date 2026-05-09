@@ -26,7 +26,7 @@ import jax.random as jr
 from pyboy import PyBoy
 
 from pe_lsdj import SongFile
-from pe_lsdj.constants import NUM_CHANNELS
+from pe_lsdj.constants import NUM_CHANNELS, NUM_FX_COMMANDS, CMD_H, CMD_M, CMD_T
 from pe_lsdj.embedding import SongBanks
 from pe_lsdj.models import LSDJTransformer
 from pe_lsdj.streaming import AllocationManager, StreamingBuffer, StreamingSession
@@ -62,6 +62,9 @@ def main():
                              "Toggle live with Space (SDL2) or p (terminal).")
     parser.add_argument("--temp", type=float, default=0.9,
                         help="Sampling temperature (default: 0.9)")
+    parser.add_argument("--exclude-fx", type=str, default="",
+                        help="Comma-separated FX commands to hard-exclude, e.g. 'H,M,T'. "
+                             "Bias applied post-temperature so effect is T-invariant.")
     parser.add_argument("--instr-threshold",     type=float, default=0.5)
     parser.add_argument("--table-threshold",     type=float, default=0.5)
     parser.add_argument("--groove-threshold",    type=float, default=0.1)
@@ -83,6 +86,23 @@ def main():
         ch_names = ["PU1", "PU2", "WAV", "NOI"]
         frozen = [ch_names[i] for i, m in enumerate(channel_mask) if m]
         print(f"Frozen channels: {frozen}")
+
+    # ── FX logit biases ───────────────────────────────────────────────────────
+    _FX_NAME_TO_CMD = {"H": CMD_H, "M": CMD_M, "T": CMD_T}
+    logit_biases = None
+    excluded_names = [n.strip().upper() for n in args.exclude_fx.split(",") if n.strip()]
+    if excluded_names:
+        fx_bias = jnp.zeros(NUM_FX_COMMANDS)
+        valid = []
+        for name in excluded_names:
+            if name not in _FX_NAME_TO_CMD:
+                print(f"Warning: unknown FX command '{name}' (supported: {list(_FX_NAME_TO_CMD)})")
+                continue
+            fx_bias = fx_bias.at[_FX_NAME_TO_CMD[name]].set(-jnp.inf)
+            valid.append(name)
+        if valid:
+            logit_biases = {"fx_cmd": fx_bias}
+            print(f"Excluding FX commands: {', '.join(valid)}")
 
     # ── load model ────────────────────────────────────────────────────────────
     params_path = args.params or os.path.join(os.path.dirname(args.weights), "model_hyperparams.json")
@@ -174,6 +194,7 @@ def main():
         groove_threshold = args.groove_threshold,
         softsynth_threshold = args.softsynth_threshold,
         temp             = args.temp,
+        logit_biases     = logit_biases,
     )
     session.run()
 

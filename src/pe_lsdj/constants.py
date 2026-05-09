@@ -178,6 +178,7 @@ CMD_T = 15
 CMD_V = 16
 CMD_W = 17
 CMD_Z = 18
+NUM_FX_COMMANDS = CMD_Z + 1  # 19: CMD_NULL through CMD_Z
 
 TABLE_FX = "Table FX"
 GROOVE_FX = "Groove FX"

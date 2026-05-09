@@ -16,8 +16,10 @@ interpolated from ticks elapsed since the last row-advance event.
 
 from __future__ import annotations
 
+import os
 import queue as stdlib_queue
 import select
+import signal
 import sys
 import termios
 import threading
@@ -111,6 +113,7 @@ class StreamingSession:
         groove_threshold: float = 0.1,
         softsynth_threshold: float = 0.5,
         temp: float = 0.9,
+        logit_biases: dict | None = None,
     ):
         self.pyboy               = pyboy
         self.model               = model
@@ -125,6 +128,7 @@ class StreamingSession:
                              groove_threshold, softsynth_threshold)
         self._temp          = temp
         self._loop_progress = loop_progress
+        self._logit_biases  = logit_biases
 
         # Mutable JAX state. Owned exclusively by the generator thread after
         # run() is called; mutated directly by the main thread during pre-generation.
@@ -133,7 +137,8 @@ class StreamingSession:
         self._banks       = banks
         self._k_cache     = k_cache
         self._v_cache     = v_cache
-        self._step_idx    = 0
+        self._step_idx          = 0
+        self._progress_step_idx = 0  # freezes while progress is locked
 
         self._step_queue: Optional[stdlib_queue.Queue] = None
         self._ctrl_queue: Optional[stdlib_queue.Queue] = None
@@ -205,7 +210,7 @@ class StreamingSession:
                     if self._loop_progress is not None:
                         prog_str = f"{self._loop_progress:.0%} (locked)"
                     else:
-                        frac = min(1.0, (self._W + self._step_idx) / self._song_length)
+                        frac = min(1.0, (self._W + self._progress_step_idx) / self._song_length)
                         prog_str = f"{frac:.0%} (advancing)"
                     print(
                         f"[row+{row_delta}] ph={cur_min_ph:#04x}  "
@@ -281,19 +286,23 @@ class StreamingSession:
         self._gen_key, step_key = jr.split(self._gen_key)
         carry = (self._last_hidden, self._banks, self._k_cache, self._v_cache)
         instr_t, table_t, groove_t, softsynth_t = self._thresholds
+        a_pos = self._W + self._step_idx
+        p_pos = self._W + self._progress_step_idx
         if self._loop_progress is not None:
-            position    = self._W + self._step_idx
-            effective_sl = max(position + 1, round(position / self._loop_progress))
+            effective_sl = max(a_pos + 1, round(a_pos / self._loop_progress))
         else:
-            effective_sl = self._song_length
+            effective_sl = max(a_pos + 1, round(a_pos * self._song_length / max(1, p_pos)))
         carry, next_token = _jit_step(
             carry, (step_key, jnp.int32(self._step_idx)),
             self.model, self._W, jnp.int32(effective_sl),
             instr_t, table_t, groove_t, softsynth_t,
             jnp.float32(self._temp),   # dynamic array — changes never retrace
+            self._logit_biases,
         )
         self._last_hidden, self._banks, self._k_cache, self._v_cache = carry
         self._step_idx += 1
+        if self._loop_progress is None:
+            self._progress_step_idx += 1
         return np.array(next_token)
 
     def _pregen(self) -> None:
@@ -336,8 +345,8 @@ class StreamingSession:
 
     def _nudge_progress(self, delta: float) -> None:
         if self._loop_progress is None:
-            # Snap to current fraction before nudging
-            position = self._W + self._step_idx
+            # Snap to current progress fraction before nudging
+            position = self._W + self._progress_step_idx
             self._loop_progress = round(
                 min(0.95, position / self._song_length), 2
             )
@@ -349,7 +358,7 @@ class StreamingSession:
             self._loop_progress = None
             print("[progress → advancing]", flush=True)
         else:
-            position = self._W + self._step_idx
+            position = self._W + self._progress_step_idx
             self._loop_progress = round(
                 min(0.95, position / self._song_length), 2
             )
@@ -361,6 +370,12 @@ class StreamingSession:
         Uses cbreak mode so each keypress is delivered immediately without
         waiting for Enter.  Terminal settings are always restored on exit.
         Silently exits if stdin is not a TTY (headless / piped environments).
+
+        Uses os.read(fd, 1) directly to avoid TextIOWrapper/BufferedReader
+        readahead, which would block after the first byte in cbreak mode.
+        Handles \\x03 (Ctrl+C) explicitly: if ISIG was cleared (e.g. by SDL2),
+        the control character ends up in stdin instead of generating SIGINT, so
+        we send SIGINT manually and exit.
         """
         if not sys.stdin.isatty():
             return
@@ -370,17 +385,25 @@ class StreamingSession:
             tty.setcbreak(fd)
             while not self._stop_gen.is_set():
                 # Short poll so we check _stop_gen regularly.
-                if not select.select([sys.stdin], [], [], 0.05)[0]:
+                if not select.select([fd], [], [], 0.05)[0]:
                     continue
-                ch = sys.stdin.read(1)
+                raw = os.read(fd, 1)
+                if not raw:
+                    break
+                ch = raw.decode('latin-1')
+                # If ISIG was cleared (SDL2 side-effect), Ctrl+C arrives as
+                # \x03 instead of generating SIGINT — re-raise it ourselves.
+                if ch == '\x03':
+                    os.kill(os.getpid(), signal.SIGINT)
+                    break
                 # Arrow keys arrive as 3-byte escape sequences: ESC [ <letter>.
                 # Consume the rest of the sequence with a tight timeout so we
                 # don't mis-interpret a bare ESC as the start of a sequence.
-                if ch == '\x1b' and select.select([sys.stdin], [], [], 0.02)[0]:
-                    ch += sys.stdin.read(2)
+                if ch == '\x1b' and select.select([fd], [], [], 0.02)[0]:
+                    ch += os.read(fd, 2).decode('latin-1')
                 self._ctrl_queue.put_nowait(ch)
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            termios.tcsetattr(fd, termios.TCSANOW, old)
 
     def _start_control_thread(self) -> None:
         self._ctrl_queue  = stdlib_queue.Queue()
