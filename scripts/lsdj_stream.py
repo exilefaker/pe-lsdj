@@ -42,8 +42,11 @@ def main():
     parser.add_argument("--rom",     "-r", required=True, help="LSDJ .gb ROM path")
     parser.add_argument("--sav",     "-s", required=True, help=".sav file to boot from")
     parser.add_argument("--song",    "-g", required=True, help=".lsdsng prompt file")
-    parser.add_argument("--weights", "-w", required=True, help="Model weights (.eqx)")
-    parser.add_argument("--params",  "-p", default=None,  help="model_hyperparams.json (default: weights dir)")
+    parser.add_argument("--weights", "-w", required=True, nargs="+",
+                        help="Model weights (.eqx) — one file, or multiple for "
+                             "live crossfade between models ({ / } keys).")
+    parser.add_argument("--params",  "-p", default=None,
+                        help="model_hyperparams.json (default: dir of first --weights file)")
 
     parser.add_argument("--write-ahead-phrases", type=int, default=2,
                         help="Target phrases ahead of step-clock (default: 2, ≈1–2 s)")
@@ -104,17 +107,21 @@ def main():
             logit_biases = {"fx_cmd": fx_bias}
             print(f"Excluding FX commands: {', '.join(valid)}")
 
-    # ── load model ────────────────────────────────────────────────────────────
-    params_path = args.params or os.path.join(os.path.dirname(args.weights), "model_hyperparams.json")
-    print(f"Loading model from {args.weights} ...")
+    # ── load model(s) ─────────────────────────────────────────────────────────
+    params_path = args.params or os.path.join(
+        os.path.dirname(args.weights[0]), "model_hyperparams.json"
+    )
     with open(params_path) as f:
         params = json.load(f)
     key = jr.PRNGKey(args.seed)
     model_key, _ = jr.split(key)
-    ref   = LSDJTransformer(model_key, **params)
-    model = eqx.tree_deserialise_leaves(args.weights, like=ref)
-    model = eqx.nn.inference_mode(model)
-    print("Model loaded.")
+    ref = LSDJTransformer(model_key, **params)
+    models = []
+    for wpath in args.weights:
+        print(f"Loading {wpath} ...")
+        m = eqx.tree_deserialise_leaves(wpath, like=ref)
+        models.append(eqx.nn.inference_mode(m))
+    print(f"{len(models)} model(s) loaded.")
 
     # ── load prompt and prefill KV cache ─────────────────────────────────────
     sf     = SongFile(args.song)
@@ -126,7 +133,7 @@ def main():
     print(f"Prompt: {W}/{S} steps from {os.path.basename(args.song)}  |  song_length={song_length}")
 
     print("Pre-filling KV cache ...")
-    last_hidden, k_cache, v_cache = eqx.filter_jit(model.prefill)(
+    last_hidden, k_cache, v_cache = eqx.filter_jit(models[0].prefill)(
         tokens, banks, song_length=song_length
     )
     print("KV cache ready.")
@@ -176,7 +183,7 @@ def main():
     # ── run ───────────────────────────────────────────────────────────────────
     session = StreamingSession(
         pyboy            = pyboy,
-        model            = model,
+        models           = models,
         alloc            = alloc,
         buf              = buf,
         last_hidden      = last_hidden,

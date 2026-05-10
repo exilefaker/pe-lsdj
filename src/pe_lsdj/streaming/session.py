@@ -28,6 +28,7 @@ import tty
 from typing import Optional
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
@@ -70,13 +71,40 @@ def read_playheads(pyboy) -> list[int]:
     return [pyboy.memory[addr] for addr in _PLAYHEAD_ADDRS]
 
 
+MIN_TEMP  = 0.0
+MAX_TEMP  = 4.0
+MIN_XFADE  = 0.0    # per-model-list lower bound; upper = len(models) - 1
+XFADE_STEP = 0.1
+
+
+def _crossfade_models(models: list, t: float):
+    """Piecewise-linear crossfade along a list of models.
+
+    t=0 → models[0], t=1 → models[1], t=1.5 → 50% between models[1] and
+    models[2], etc.  Interpolation only touches array leaves; non-array
+    structure (layer configs, dtypes) is taken from the left model.
+    """
+    n = len(models)
+    if n == 1:
+        return models[0]
+    t = float(max(0.0, min(n - 1, t)))
+    i = min(int(t), n - 2)
+    frac = t - i
+    dyn_a, static = eqx.partition(models[i],     eqx.is_array)
+    dyn_b, _      = eqx.partition(models[i + 1], eqx.is_array)
+    interp = jax.tree.map(lambda a, b: (1.0 - frac) * a + frac * b, dyn_a, dyn_b)
+    return eqx.combine(interp, static)
+
+
 class StreamingSession:
     """
     Real-time LSDJ generation session.
 
     Args:
         pyboy:        Running PyBoy instance (LSDJ booted, not yet playing).
-        model:        LSDJTransformer in inference mode.
+        models:       One or more LSDJTransformer instances in inference mode.
+                      If multiple, xfade crossfades piecewise-linearly
+                      along the list; { / } nudge it live.
         alloc:        AllocationManager (already loaded).
         buf:          StreamingBuffer (already constructed).
         last_hidden:  Final hidden state from KV-cache prefill.
@@ -95,7 +123,7 @@ class StreamingSession:
     def __init__(
         self,
         pyboy,
-        model,
+        models: list,
         alloc: AllocationManager,
         buf: StreamingBuffer,
         last_hidden,
@@ -116,7 +144,9 @@ class StreamingSession:
         logit_biases: dict | None = None,
     ):
         self.pyboy               = pyboy
-        self.model               = model
+        self._models             = models
+        self._xfade            = 0.0
+        self._model              = _crossfade_models(models, 0.0)
         self.alloc               = alloc
         self.buf                 = buf
         self.write_ahead_phrases = write_ahead_phrases
@@ -159,6 +189,9 @@ class StreamingSession:
         mode_str = f"locked @ {self._loop_progress:.0%}" if self._loop_progress is not None else "advancing"
         print(f"Progress mode : {mode_str}  (p = toggle,  < / > = nudge ±5%)")
         print(f"Temperature   : {self._temp:.2f}  ([ / ] = ±0.25)")
+        if len(self._models) > 1:
+            print(f"Crossfade     : {self._xfade:.2f} / {len(self._models) - 1}"
+                  f"  ({{ / }} = ±{XFADE_STEP})")
         print("(focus terminal window to use controls)\n")
         self.pyboy.button("start")
         self.pyboy.tick(render=self.window)
@@ -236,6 +269,8 @@ class StreamingSession:
                     key = self._ctrl_queue.get_nowait()
                     if   key == ']': self._nudge_temp(+0.25)
                     elif key == '[': self._nudge_temp(-0.25)
+                    elif key == '}': self._nudge_xfade(+XFADE_STEP)
+                    elif key == '{': self._nudge_xfade(-XFADE_STEP)
                     elif key == '>': self._nudge_progress(+0.05)
                     elif key == '<': self._nudge_progress(-0.05)
                     elif key == 'p': self._toggle_progress_lock()
@@ -294,7 +329,7 @@ class StreamingSession:
             effective_sl = max(a_pos + 1, round(a_pos * self._song_length / max(1, p_pos)))
         carry, next_token = _jit_step(
             carry, (step_key, jnp.int32(self._step_idx)),
-            self.model, self._W, jnp.int32(effective_sl),
+            self._model, self._W, jnp.int32(effective_sl),
             instr_t, table_t, groove_t, softsynth_t,
             jnp.float32(self._temp),   # dynamic array — changes never retrace
             self._logit_biases,
@@ -339,9 +374,27 @@ class StreamingSession:
                 except stdlib_queue.Full:
                     continue
 
+
     def _nudge_temp(self, delta: float) -> None:
-        self._temp = max(0.1, min(2.0, round(self._temp + delta, 2)))
+        self._temp = max(MIN_TEMP, min(MAX_TEMP, round(self._temp + delta, 2)))
         print(f"[temp → {self._temp:.2f}]", flush=True)
+
+    def _nudge_xfade(self, delta: float) -> None:
+        if len(self._models) < 2:
+            return
+        self._xfade = max(
+            MIN_XFADE,
+            min(float(len(self._models) - 1), round(self._xfade + delta, 2)),
+        )
+        print(f"[xfade → {self._xfade:.2f}]", flush=True)
+        # Interpolate in a background thread so the generator isn't stalled
+        # while JAX dispatches elementwise ops across all parameter arrays.
+        # Reference assignment is GIL-atomic; the generator sees old or new model.
+        target = self._xfade
+        threading.Thread(
+            target=lambda: setattr(self, '_model', _crossfade_models(self._models, target)),
+            daemon=True,
+        ).start()
 
     def _nudge_progress(self, delta: float) -> None:
         if self._loop_progress is None:
