@@ -142,6 +142,8 @@ class StreamingSession:
         softsynth_threshold: float = 0.5,
         temp: float = 0.9,
         logit_biases: dict | None = None,
+        record_path: str | None = None,
+        record_config: dict | None = None,
     ):
         self.pyboy               = pyboy
         self._models             = models
@@ -176,6 +178,13 @@ class StreamingSession:
         self._gen_thread: Optional[threading.Thread]   = None
         self._ctrl_thread: Optional[threading.Thread]  = None
 
+        # Recording state (written by generator thread / main thread respectively;
+        # no cross-thread sharing, so no lock needed).
+        self._record_path   = record_path
+        self._record_config = record_config or {}
+        self._recorded_tokens: list[np.ndarray] = []   # generator thread only
+        self._recorded_events: list[dict]       = []   # main thread only
+
     # ── public ────────────────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -192,6 +201,8 @@ class StreamingSession:
         if len(self._models) > 1:
             print(f"Crossfade     : {self._xfade:.2f} / {len(self._models) - 1}"
                   f"  ({{ / }} = ±{XFADE_STEP})")
+        if self._record_path is not None:
+            print(f"Recording to  : {self._record_path}  (s = save snapshot)")
         print("(focus terminal window to use controls)\n")
         self.pyboy.button("start")
         self.pyboy.tick(render=self.window)
@@ -274,6 +285,7 @@ class StreamingSession:
                     elif key == '>': self._nudge_progress(+0.05)
                     elif key == '<': self._nudge_progress(-0.05)
                     elif key == 'p': self._toggle_progress_lock()
+                    elif key == 's': self._save_snapshot()
 
                 # Drain pre-generated tokens from the queue into SRAM.
                 # SRAM writes are µs-level; the inner loop runs until we're
@@ -312,7 +324,36 @@ class StreamingSession:
             if self._ctrl_thread is not None:
                 self._ctrl_thread.join(timeout=1.0)
             print(f"Stopped after {rows_committed} rows ({self._step_idx} steps).")
+            if self._record_path is not None:
+                # Ignore further Ctrl-C during the write so the file isn't truncated.
+                _prev = signal.signal(signal.SIGINT, signal.SIG_IGN)
+                try:
+                    self._save_recording()
+                finally:
+                    signal.signal(signal.SIGINT, _prev)
             self.pyboy.stop(save=False)
+
+    # ── recording ────────────────────────────────────────────────────────────
+
+    def _save_snapshot(self) -> None:
+        """Save current recording to disk mid-session (bound to 's' key)."""
+        if self._record_path is None:
+            print("[no --record path set]", flush=True)
+            return
+        self._save_recording()
+
+    def _save_recording(self) -> None:
+        import json
+        if not self._recorded_tokens:
+            return
+        tokens = np.stack(self._recorded_tokens)   # (N, 4, 21)
+        np.savez(
+            self._record_path,
+            tokens = tokens,
+            config = np.bytes_(json.dumps(self._record_config)),
+            events = np.bytes_(json.dumps(self._recorded_events)),
+        )
+        print(f"Recording saved → {self._record_path}  ({len(tokens)} steps)")
 
     # ── internal ─────────────────────────────────────────────────────────────
 
@@ -338,7 +379,10 @@ class StreamingSession:
         self._step_idx += 1
         if self._loop_progress is None:
             self._progress_step_idx += 1
-        return np.array(next_token)
+        token_np = np.array(next_token)
+        if self._record_path is not None:
+            self._recorded_tokens.append(token_np)
+        return token_np
 
     def _pregen(self) -> None:
         """Fill rows synchronously before playback starts.
@@ -375,9 +419,16 @@ class StreamingSession:
                     continue
 
 
+    def _record_event(self, event_type: str, value) -> None:
+        if self._record_path is not None:
+            self._recorded_events.append(
+                {"step": self._step_idx, "type": event_type, "value": value}
+            )
+
     def _nudge_temp(self, delta: float) -> None:
         self._temp = max(MIN_TEMP, min(MAX_TEMP, round(self._temp + delta, 2)))
         print(f"[temp → {self._temp:.2f}]", flush=True)
+        self._record_event("temp", self._temp)
 
     def _nudge_xfade(self, delta: float) -> None:
         if len(self._models) < 2:
@@ -387,6 +438,7 @@ class StreamingSession:
             min(float(len(self._models) - 1), round(self._xfade + delta, 2)),
         )
         print(f"[xfade → {self._xfade:.2f}]", flush=True)
+        self._record_event("xfade", self._xfade)
         # Interpolate in a background thread so the generator isn't stalled
         # while JAX dispatches elementwise ops across all parameter arrays.
         # Reference assignment is GIL-atomic; the generator sees old or new model.
@@ -405,17 +457,20 @@ class StreamingSession:
             )
         self._loop_progress = max(0.05, min(0.95, round(self._loop_progress + delta, 2)))
         print(f"[progress locked @ {self._loop_progress:.0%}]", flush=True)
+        self._record_event("progress", self._loop_progress)
 
     def _toggle_progress_lock(self) -> None:
         if self._loop_progress is not None:
             self._loop_progress = None
             print("[progress → advancing]", flush=True)
+            self._record_event("progress", None)
         else:
             position = self._W + self._progress_step_idx
             self._loop_progress = round(
                 min(0.95, position / self._song_length), 2
             )
             print(f"[progress locked @ {self._loop_progress:.0%}]", flush=True)
+            self._record_event("progress", self._loop_progress)
 
     def _control_loop(self) -> None:
         """Control thread: read keypresses from stdin and post to _ctrl_queue.

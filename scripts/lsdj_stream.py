@@ -77,6 +77,8 @@ def main():
                         help="Show SDL2 window (default: headless null)")
     parser.add_argument("--channel-mask", type=str, default="",
                         help="Comma-separated channel indices to freeze, e.g. '2,3'")
+    parser.add_argument("--record", type=str, default=None, metavar="FILE",
+                        help="Save session to a .pelsdj file for later replay.")
     args = parser.parse_args()
 
     # ── channel mask ──────────────────────────────────────────────────────────
@@ -202,6 +204,24 @@ def main():
         softsynth_threshold = args.softsynth_threshold,
         temp             = args.temp,
         logit_biases     = logit_biases,
+        record_path      = args.record,
+        record_config    = {
+            "weights":            args.weights,
+            "song":               args.song,
+            "params":             params_path,
+            "seed":               args.seed,
+            "prompt_steps":       args.prompt_steps,
+            "song_length":        song_length,
+            "num_phrases_per_chain": args.num_phrases_per_chain,
+            "initial_temp":       args.temp,
+            "initial_lock_progress": args.lock_progress,
+            "exclude_fx":         args.exclude_fx,
+            "channel_mask":       args.channel_mask,
+            "instr_threshold":    args.instr_threshold,
+            "table_threshold":    args.table_threshold,
+            "groove_threshold":   args.groove_threshold,
+            "softsynth_threshold": args.softsynth_threshold,
+        } if args.record else None,
     )
     session.run()
 
