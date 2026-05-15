@@ -13,7 +13,7 @@ Usage:
         --sav   songs.sav \\
         --song  data/gen_test/my_song.lsdsng \\
         --weights data/weights/v13/step_011950.eqx \\
-        [--write-ahead 8] [--temp 0.9] [--window]
+        [--write-ahead 8] [--temp 0.9] [--headless]
 """
 
 import argparse
@@ -74,8 +74,8 @@ def main():
     parser.add_argument("--groove-threshold",    type=float, default=0.1)
     parser.add_argument("--softsynth-threshold", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--window", action="store_true",
-                        help="Show SDL2 window (default: headless null)")
+    parser.add_argument("--headless", action="store_true",
+                        help="Run without SDL2 window (default: window on)")
     parser.add_argument("--channel-mask", type=str, default="",
                         help="Comma-separated channel indices to freeze, e.g. '2,3'")
     parser.add_argument("--record", type=str, default=None, metavar="FILE",
@@ -144,13 +144,13 @@ def main():
     print("KV cache ready.")
 
     # ── boot PyBoy ────────────────────────────────────────────────────────────
-    window_mode = "SDL2" if args.window else "null"
+    window_mode = "null" if args.headless else "SDL2"
     print(f"Booting LSDJ ({window_mode} window, {_INIT_FRAMES} init frames) ...")
     with open(args.sav, "rb") as sav_fh:
         pyboy = PyBoy(args.rom, window=window_mode, ram_file=sav_fh)
 
     for _ in range(_INIT_FRAMES):
-        pyboy.tick(render=args.window)
+        pyboy.tick(render=not args.headless)
 
     # ── initialise streaming objects ──────────────────────────────────────────
     alloc = AllocationManager(pyboy)
@@ -199,7 +199,7 @@ def main():
         song_length      = song_length,
         write_ahead_phrases = args.write_ahead_phrases,
         seed             = args.seed + 1,
-        window           = args.window,
+        window           = not args.headless,
         loop_progress    = args.lock_progress,
         instr_threshold  = args.instr_threshold,
         table_threshold  = args.table_threshold,

@@ -26,7 +26,7 @@ python3 scripts/lsdj_stream.py \
     --sav   songs.sav \
     --song  path/to/prompt.lsdsng \
     --weights path/to/weights.eqx \
-    [--window]
+    [--headless] [--web-port 8765] [--record session.pelsdj]
 ```
 
 Multiple weight files can be passed to `--weights` to enable live crossfade
@@ -41,14 +41,17 @@ between models (see below).
 | `--song-length` | prompt file length | Song-length hint for the progress embedding |
 | `--temp` | 0.9 | Initial sampling temperature |
 | `--lock-progress` | — | Pin progress fraction (e.g. `0.4` = always ~40% through) |
-| `--exclude-fx` | — | Hard-exclude FX commands (e.g. `H,M,T`) |
+| `--exclude-fx` | — | Hard-exclude FX commands, e.g. `H,M,T` (post-temperature, so effect is T-invariant) |
 | `--channel-mask` | — | Freeze channels from generation (e.g. `2,3` = WAV, NOI) |
 | `--seed` | 42 | RNG seed |
-| `--window` | headless | Show SDL2 window |
+| `--headless` | off | Run without SDL2 window (window is on by default; required for audio) |
+| `--web-port` | — | Enable browser UI on this port (e.g. `8765`) |
+| `--record` | — | Save session to a `.pelsdj` file for later replay |
 
 ## Live controls
 
-Focus the terminal window during playback:
+Controls are available in the terminal and mirrored exactly in the browser UI
+(see Web UI below).
 
 | Key | Action |
 |-----|--------|
@@ -56,6 +59,7 @@ Focus the terminal window during playback:
 | `p` | Toggle progress lock (freeze/unfreeze song position) |
 | `>` / `<` | Nudge locked progress ±5% |
 | `}` / `{` | Crossfade between models ±0.1 (when multiple `--weights` given) |
+| `s` | Save recording snapshot to disk (when `--record` is active) |
 
 ## Song progress
 
@@ -88,6 +92,57 @@ The KV cache is built from the first model (`xfade = 0`). Shifting xfade
 mid-session introduces a mild inconsistency between cached and new context,
 which in practice sounds like a gradual style shift.
 
+## Recording
+
+Passing `--record session.pelsdj` records the full token stream and all control
+events to a compressed NumPy archive (`.pelsdj.npz`). The file contains:
+
+- `tokens` — `(N, 4, 21) uint16` array of every generated step
+- `config` — JSON metadata (weights, song, seed, thresholds, etc.)
+- `events` — JSON log of every live control change (temp, progress, xfade)
+  with the step index at which it occurred
+
+Press `s` at any time to save a snapshot without stopping the session. On
+Ctrl-C, the recording is saved automatically (SIGINT is briefly suppressed
+during the write to prevent truncation).
+
+## Replay
+
+A recorded session can be played back without the model:
+
+```
+python3 scripts/lsdj_replay.py session.pelsdj \
+    --rom lsdj.gb \
+    --sav songs.sav \
+    [--window]
+```
+
+This feeds the recorded token stream directly into LSDJ's SRAM — no JAX
+required. Control events are printed inline as playback reaches the step at
+which they originally occurred (for reference only; they have no effect on the
+token stream, which already encodes their influence).
+
+## Web UI
+
+Passing `--web-port 8765` launches a browser-based control panel alongside the
+terminal. Open `http://localhost:8765` after startup.
+
+The UI provides:
+- **Live LSDJ screen** — MJPEG stream of the PyBoy framebuffer (requires
+  `--window`; audio also comes from PyBoy)
+- **Generation controls** — temperature, crossfade, progress lock/nudge,
+  with real-time state display via SSE
+- **REC indicator** — shows when a recording is active
+- **Keyboard shortcuts** — identical to the terminal, plus Game Boy controls:
+
+| Key | Game Boy button |
+|-----|----------------|
+| `↑` `↓` `←` `→` | D-pad |
+| `z` | A |
+| `x` | B |
+| `↵` | Start |
+| `⌫` | Select |
+
 ## Module layout
 
 | File | Role |
@@ -96,3 +151,4 @@ which in practice sounds like a gradual style shift.
 | `buffer.py` | `StreamingBuffer` — SRAM write-ahead ring buffer |
 | `alloc.py` | `AllocationManager` — phrase/chain allocation tracking |
 | `sram.py` | Low-level SRAM read/write helpers |
+| `webapp.py` | `StreamingWebApp` — FastAPI browser UI (MJPEG, SSE, controls) |

@@ -12,7 +12,7 @@ Usage:
     python3 scripts/lsdj_replay.py session.pelsdj \\
         --rom  lsdj.gb \\
         --sav  songs.sav \\
-        [--window]
+        [--headless]
 """
 
 import argparse
@@ -58,8 +58,8 @@ def main():
     parser.add_argument("--sav", "-s", required=True, help=".sav file to boot from.")
     parser.add_argument("--write-ahead-phrases", type=int, default=2,
                         help="Phrases to keep buffered ahead of the playhead (default: 2).")
-    parser.add_argument("--window", action="store_true",
-                        help="Show SDL2 window (default: headless null).")
+    parser.add_argument("--headless", action="store_true",
+                        help="Run without SDL2 window (default: window on).")
     args = parser.parse_args()
 
     # ── load recording ────────────────────────────────────────────────────────
@@ -94,12 +94,12 @@ def main():
             channel_mask[int(tok)] = True
 
     # ── boot PyBoy ────────────────────────────────────────────────────────────
-    window_mode = "SDL2" if args.window else "null"
+    window_mode = "null" if args.headless else "SDL2"
     print(f"Booting LSDJ ({window_mode}, {_INIT_FRAMES} init frames) ...")
     with open(args.sav, "rb") as sav_fh:
         pyboy = PyBoy(args.rom, window=window_mode, ram_file=sav_fh)
     for _ in range(_INIT_FRAMES):
-        pyboy.tick(render=args.window)
+        pyboy.tick(render=not args.headless)
 
     # ── initialise streaming objects ──────────────────────────────────────────
     alloc = AllocationManager(pyboy)
@@ -157,7 +157,7 @@ def main():
     # ── main loop ─────────────────────────────────────────────────────────────
     print(f"\nStarting LSDJ playback — {len(tokens)} steps total.  Ctrl-C to stop.\n")
     pyboy.button("start")
-    pyboy.tick(render=args.window)
+    pyboy.tick(render=not args.headless)
 
     prev_cursor       = pyboy.memory[_PHRASE_CURSOR]
     cursor_total      = 0
@@ -172,7 +172,7 @@ def main():
     try:
         while True:
             frame_start = time.perf_counter()
-            pyboy.tick(render=args.window)
+            pyboy.tick(render=not args.headless)
 
             curr  = pyboy.memory[_PHRASE_CURSOR]
             delta = (curr - prev_cursor) % 256
@@ -223,7 +223,7 @@ def main():
                     event_ptr += 1
                 phrases_ahead = buf.phrases_committed - phrases_consumed
 
-            if not args.window:
+            if args.headless:
                 elapsed   = time.perf_counter() - frame_start
                 remainder = _FRAME_DURATION - elapsed
                 if remainder > 0:

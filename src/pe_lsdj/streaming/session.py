@@ -457,21 +457,27 @@ class StreamingSession:
             # Snap to current progress fraction before nudging
             position = self._W + self._progress_step_idx
             self._loop_progress = round(
-                min(0.95, position / self._song_length), 2
+                min(1.0, position / self._song_length), 2
             )
-        self._loop_progress = max(0.05, min(0.95, round(self._loop_progress + delta, 2)))
+        self._loop_progress = max(0.05, min(1.0, round(self._loop_progress + delta, 2)))
         print(f"[progress locked @ {self._loop_progress:.0%}]", flush=True)
         self._record_event("progress", self._loop_progress)
 
     def _toggle_progress_lock(self) -> None:
         if self._loop_progress is not None:
+            # Seed _progress_step_idx to match the locked fraction so the
+            # display resumes smoothly from there rather than snapping back
+            # to wherever the counter was frozen when locking started.
+            self._progress_step_idx = max(
+                0, round(self._loop_progress * self._song_length) - self._W
+            )
             self._loop_progress = None
             print("[progress → advancing]", flush=True)
             self._record_event("progress", None)
         else:
             position = self._W + self._progress_step_idx
             self._loop_progress = round(
-                min(0.95, position / self._song_length), 2
+                min(1.0, position / self._song_length), 2
             )
             print(f"[progress locked @ {self._loop_progress:.0%}]", flush=True)
             self._record_event("progress", self._loop_progress)

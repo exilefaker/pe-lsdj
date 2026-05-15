@@ -14,15 +14,19 @@
 
 # Introduction
 
-This is a set of tools for training machine learning models on Little Sound DJ (LSDJ) song file (.lsdsng) data.
+This is a set of tools for training, exploring, and live-performing with machine learning models using Little Sound DJ (LSDJ) song file (.lsdsng) data.
 It consists of:
 
 - A tokenization pipeline, converts raw .lsdsng data into a mix of discrete tokens and continuous input signals
 - A hand-designed hierarchical embedding scheme
 - A multi-channel transformer-based baseline model with axial attention
 - Tools for training and generation
+- Tools for streaming generation into a playing LSDJ file with live tuning of gen parameters + recording sessions
 
-## Usage
+# Usage
+
+
+## Tokenization
 
 Import/tokenize an `.lsdsng` file, do stuff, and render back to bytes:
 
@@ -36,6 +40,8 @@ sf = SongFile("data/chiptune.lsdsng")
 sf.to_lsdsng("output.lsdsng")
 
 ```
+
+## Training
 
 Train the default model (too large for most CPUs -- see Colab notebook):
 
@@ -62,9 +68,32 @@ model, opt_state = train(
 )
 ```
 
-## Credits
+## Generation
 
-Credit where due to the AI.
+### Streaming generation
+
+Start a live-generation session (see `streaming/README.md` for further documentation):
+
+```bash
+python3 -m scripts.lsdj_stream --rom lsdj.gb --sav lsdj.sav --song data/tohou-final.lsdsng --weights data/weights/step_011950.eqx data/weights/step_000700.eqx --web-port 8765 --record session.npz  
+```
+
+### Play back a recorded session
+
+```bash
+python3 -m scripts.lsdj_replay session.npz --rom lsdj.gb --sav lsdj.sav
+```
+
+### Static generation
+
+Generate 2 x 1024 sequencer steps based on a 64-step prompt from an existing track, using a specific model + temperature setting
+
+```bash
+python3 generate.py --weights data/weights/step110190.eqx --song data/songs/tohou-final.lsdsng --output data/gen_output --num=steps 1024 --prompt-steps 64 --num-samples 2 --temperature 1.5
+```
+
+
+# Credits
 
 Code by Alex Kiefer / exileFaker and Claude Opus/Sonnet.
 
