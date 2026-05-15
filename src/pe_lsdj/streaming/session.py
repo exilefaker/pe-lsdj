@@ -144,6 +144,7 @@ class StreamingSession:
         logit_biases: dict | None = None,
         record_path: str | None = None,
         record_config: dict | None = None,
+        webapp=None,
     ):
         self.pyboy               = pyboy
         self._models             = models
@@ -180,6 +181,7 @@ class StreamingSession:
 
         # Recording state (written by generator thread / main thread respectively;
         # no cross-thread sharing, so no lock needed).
+        self._webapp        = webapp
         self._record_path   = record_path
         self._record_config = record_config or {}
         self._recorded_tokens: list[np.ndarray] = []   # generator thread only
@@ -230,6 +232,8 @@ class StreamingSession:
 
                 # No JAX here — main thread ticks PyBoy at steady 60 fps.
                 self.pyboy.tick(render=self.window)
+                if self._webapp is not None:
+                    self._webapp.update_frame()
 
                 # Accumulate raw 0xC74B ticks.
                 curr  = self.pyboy.memory[_PHRASE_CURSOR_ADDR]

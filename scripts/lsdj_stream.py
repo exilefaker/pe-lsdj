@@ -31,6 +31,7 @@ from pe_lsdj.embedding import SongBanks
 from pe_lsdj.models import LSDJTransformer
 from pe_lsdj.streaming import AllocationManager, StreamingBuffer, StreamingSession
 from pe_lsdj.streaming.session import find_first_empty_row
+from pe_lsdj.streaming.webapp import StreamingWebApp
 
 _INIT_FRAMES = 180  # ~3 s at 60 fps; lets LSDJ finish initialisation
 
@@ -79,6 +80,8 @@ def main():
                         help="Comma-separated channel indices to freeze, e.g. '2,3'")
     parser.add_argument("--record", type=str, default=None, metavar="FILE",
                         help="Save session to a .pelsdj file for later replay.")
+    parser.add_argument("--web-port", type=int, default=None, metavar="PORT",
+                        help="Enable web UI on this port (e.g. 8765). Off by default.")
     args = parser.parse_args()
 
     # ── channel mask ──────────────────────────────────────────────────────────
@@ -223,6 +226,10 @@ def main():
             "softsynth_threshold": args.softsynth_threshold,
         } if args.record else None,
     )
+    if args.web_port is not None:
+        webapp = StreamingWebApp(session, pyboy, port=args.web_port)
+        webapp.start()
+        session._webapp = webapp
     session.run()
 
 
