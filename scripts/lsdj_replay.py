@@ -25,13 +25,41 @@ import time
 import numpy as np
 from pyboy import PyBoy
 
-from pe_lsdj.constants import NUM_CHANNELS
+from pe_lsdj.constants import (
+    NUM_CHANNELS,
+    GROOVES_ADDR, INSTR_ALLOC_TABLE_ADDR, INSTRUMENTS_ADDR,
+    STEPS_PER_GROOVE, STEPS_PER_TABLE,
+    TABLE_ALLOC_TABLE_ADDR,
+    TABLE_ENVELOPES_ADDR, TABLE_TRANSPOSES_ADDR,
+    TABLE_FX_ADDR, TABLE_FX_VAL_ADDR,
+    TABLE_FX_2_ADDR, TABLE_FX_2_VAL_ADDR,
+)
 from pe_lsdj.streaming import AllocationManager, StreamingBuffer
 from pe_lsdj.streaming.session import find_first_empty_row, read_playheads
+from pe_lsdj.streaming.sram import write_sram, write_sram_range
 
 _INIT_FRAMES    = 180
 _PHRASE_CURSOR  = 0xC74B
 _FRAME_DURATION = 1.0 / 60.0
+
+
+def _apply_entity(pyboy, ent: dict) -> None:
+    """Write a single entity delta (from the recording) into LSDJ SRAM."""
+    k, row = ent["id"], ent["id"] - 1
+    t = ent["type"]
+    if t == "instr":
+        write_sram_range(pyboy, INSTRUMENTS_ADDR.start + row * 16, ent["bytes"])
+        write_sram(pyboy, INSTR_ALLOC_TABLE_ADDR.start + row, 1)
+    elif t == "groove":
+        write_sram_range(pyboy, GROOVES_ADDR.start + row * STEPS_PER_GROOVE, ent["bytes"])
+    elif t == "table":
+        write_sram_range(pyboy, TABLE_ENVELOPES_ADDR.start  + row * STEPS_PER_TABLE, ent["envelopes"])
+        write_sram_range(pyboy, TABLE_TRANSPOSES_ADDR.start + row * STEPS_PER_TABLE, ent["transposes"])
+        write_sram_range(pyboy, TABLE_FX_ADDR.start         + row * STEPS_PER_TABLE, ent["fx_cmd_1"])
+        write_sram_range(pyboy, TABLE_FX_VAL_ADDR.start     + row * STEPS_PER_TABLE, ent["fx_val_1"])
+        write_sram_range(pyboy, TABLE_FX_2_ADDR.start       + row * STEPS_PER_TABLE, ent["fx_cmd_2"])
+        write_sram_range(pyboy, TABLE_FX_2_VAL_ADDR.start   + row * STEPS_PER_TABLE, ent["fx_val_2"])
+        write_sram(pyboy, TABLE_ALLOC_TABLE_ADDR.start + row, 1)
 
 
 def _feed_tokens(tokens, queue: stdlib_queue.Queue, stop: threading.Event) -> None:
@@ -66,10 +94,11 @@ def main():
     path = args.recording
     if not os.path.exists(path) and not path.endswith(".npz"):
         path = path + ".npz"
-    data   = np.load(path, allow_pickle=False)
-    tokens = data["tokens"]                              # (N, 4, 21) uint16
-    config = json.loads(bytes(data["config"]).decode())
-    events = json.loads(bytes(data["events"]).decode())
+    data     = np.load(path, allow_pickle=False)
+    tokens   = data["tokens"]                              # (N, 4, 21) uint16
+    config   = json.loads(bytes(data["config"]).decode())
+    events   = json.loads(bytes(data["events"]).decode())
+    entities = json.loads(bytes(data["entities"]).decode()) if "entities" in data.files else []
 
     print(f"Recording : {path}")
     print(f"Steps     : {len(tokens)}")
@@ -82,6 +111,11 @@ def main():
         print(f"Events    : {len(events)}")
         for ev in events:
             print(f"  step {ev['step']:>6}  {ev['type']} → {ev['value']}")
+    if entities:
+        print(f"Entities  : {len(entities)} deltas  "
+              f"({sum(1 for e in entities if e['type']=='instr')} instr, "
+              f"{sum(1 for e in entities if e['type']=='table')} table, "
+              f"{sum(1 for e in entities if e['type']=='groove')} groove)")
     print()
 
     num_phrases_per_chain = config.get("num_phrases_per_chain", 4)
@@ -100,6 +134,13 @@ def main():
         pyboy = PyBoy(args.rom, window=window_mode, ram_file=sav_fh)
     for _ in range(_INIT_FRAMES):
         pyboy.tick(render=not args.headless)
+
+    # ── apply entity deltas (generated instruments/tables/grooves) ────────────
+    if entities:
+        print(f"Applying {len(entities)} entity delta(s) to SRAM ...")
+        for ent in entities:
+            _apply_entity(pyboy, ent)
+            print(f"  {ent['type']} {ent['id']} (from step {ent['step']})")
 
     # ── initialise streaming objects ──────────────────────────────────────────
     alloc = AllocationManager(pyboy)

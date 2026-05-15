@@ -33,13 +33,26 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 
-from pe_lsdj.constants import EMPTY, NUM_CHANNELS, SONG_CHAINS_ADDR, STEPS_PER_PHRASE
+from pe_lsdj.constants import (
+    EMPTY, NUM_CHANNELS, SONG_CHAINS_ADDR, STEPS_PER_PHRASE,
+    NUM_GROOVES, NUM_INSTRUMENTS, NUM_TABLES,
+    STEPS_PER_GROOVE, STEPS_PER_TABLE,
+    GROOVES_ADDR,
+    INSTR_ALLOC_TABLE_ADDR, INSTRUMENTS_ADDR,
+    TABLE_ALLOC_TABLE_ADDR,
+    TABLE_ENVELOPES_ADDR, TABLE_TRANSPOSES_ADDR,
+    TABLE_FX_ADDR, TABLE_FX_VAL_ADDR,
+    TABLE_FX_2_ADDR, TABLE_FX_2_VAL_ADDR,
+)
 from pe_lsdj.embedding import SongBanks
 from pe_lsdj.generation import generate_step_cached
+from pe_lsdj.tokenizer.detokenize import repack_grooves, repack_instruments, repack_tables
+from pe_lsdj.tokenizer.tokenize import INSTRUMENT_FIELDS
+from pe_lsdj.tokenizer.songfile import _arr_to_tables_dict
 
 from .alloc import AllocationManager
 from .buffer import StreamingBuffer
-from .sram import read_sram
+from .sram import read_sram, write_sram, write_sram_range
 
 # Per-channel WRAM song-row playhead addresses (0=PU1, 1=PU2, 2=WAV, 3=NOI)
 _PLAYHEAD_ADDRS = [0xC39F, 0xC3A0, 0xC3A1, 0xC3A2]
@@ -173,6 +186,15 @@ class StreamingSession:
         self._step_idx          = 0
         self._progress_step_idx = 0  # freezes while progress is locked
 
+        # Entity IDs already present in SRAM from the prompt .sav; newly generated
+        # entities beyond these are written to SRAM by _write_new_entities().
+        _iocc = np.array(banks.instrs_occupied)
+        self._written_instr_ids:  set[int] = {k for k in range(1, NUM_INSTRUMENTS + 1) if _iocc[k]}
+        _gocc = np.array(banks.grooves_occupied)
+        self._written_groove_ids: set[int] = {k for k in range(1, NUM_GROOVES + 1) if _gocc[k]}
+        _tocc = np.array(banks.tables_occupied)
+        self._written_table_ids:  set[int] = {k for k in range(1, NUM_TABLES + 1) if _tocc[k]}
+
         self._step_queue: Optional[stdlib_queue.Queue] = None
         self._ctrl_queue: Optional[stdlib_queue.Queue] = None
         self._stop_gen:   Optional[threading.Event]    = None
@@ -184,8 +206,9 @@ class StreamingSession:
         self._webapp        = webapp
         self._record_path   = record_path
         self._record_config = record_config or {}
-        self._recorded_tokens: list[np.ndarray] = []   # generator thread only
-        self._recorded_events: list[dict]       = []   # main thread only
+        self._recorded_tokens:   list[np.ndarray] = []  # generator thread only
+        self._recorded_events:   list[dict]       = []  # main thread only
+        self._recorded_entities: list[dict]       = []  # main thread only
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -314,6 +337,8 @@ class StreamingSession:
                         )
                     phrases_ahead = self.buf.phrases_committed - phrases_consumed
 
+                self._write_new_entities()
+
                 if not self.window:
                     elapsed   = time.perf_counter() - frame_start
                     remainder = _FRAME_DURATION - elapsed
@@ -353,11 +378,13 @@ class StreamingSession:
         tokens = np.stack(self._recorded_tokens)   # (N, 4, 21)
         np.savez(
             self._record_path,
-            tokens = tokens,
-            config = np.bytes_(json.dumps(self._record_config)),
-            events = np.bytes_(json.dumps(self._recorded_events)),
+            tokens   = tokens,
+            config   = np.bytes_(json.dumps(self._record_config)),
+            events   = np.bytes_(json.dumps(self._recorded_events)),
+            entities = np.bytes_(json.dumps(self._recorded_entities)),
         )
-        print(f"Recording saved → {self._record_path}  ({len(tokens)} steps)")
+        print(f"Recording saved → {self._record_path}  "
+              f"({len(tokens)} steps, {len(self._recorded_entities)} entity deltas)")
 
     # ── internal ─────────────────────────────────────────────────────────────
 
@@ -409,6 +436,79 @@ class StreamingSession:
             committed = self.buf.push_step(token)
             if committed is not None:
                 print(f"  pre-gen row 0x{committed.song_row:02X}")
+        self._write_new_entities()
+
+    def _write_new_entities(self) -> None:
+        """Write any newly occupied entity slots from self._banks to LSDJ SRAM.
+
+        Called on the main thread (PyBoy is not thread-safe).  self._banks is
+        updated atomically by the generator thread; since entities are only ever
+        added, reading a "slightly ahead" snapshot is safe.
+        """
+        banks = self._banks  # GIL-atomic snapshot
+
+        # ── Instruments ───────────────────────────────────────────────────────
+        occupied = np.array(banks.instrs_occupied)
+        new_instrs = [k for k in range(1, NUM_INSTRUMENTS + 1)
+                      if occupied[k] and k not in self._written_instr_ids]
+        if new_instrs:
+            instr_dict = {name: banks.instruments[1:, i]
+                          for i, name in enumerate(INSTRUMENT_FIELDS)}
+            instr_bytes = repack_instruments(instr_dict)  # flat list, NUM_INSTRUMENTS * 16
+            for k in new_instrs:
+                row = k - 1
+                slot_bytes = instr_bytes[row * 16:(row + 1) * 16]
+                write_sram_range(self.pyboy, INSTRUMENTS_ADDR.start + row * 16, slot_bytes)
+                write_sram(self.pyboy, INSTR_ALLOC_TABLE_ADDR.start + row, 1)
+                self._written_instr_ids.add(k)
+                if self._record_path is not None:
+                    self._recorded_entities.append(
+                        {"step": self._step_idx, "type": "instr", "id": k, "bytes": slot_bytes}
+                    )
+                print(f"[entity] instrument {k} → SRAM", flush=True)
+
+        # ── Grooves ───────────────────────────────────────────────────────────
+        occupied = np.array(banks.grooves_occupied)
+        new_grooves = [k for k in range(1, NUM_GROOVES + 1)
+                       if occupied[k] and k not in self._written_groove_ids]
+        if new_grooves:
+            groove_arr = banks.grooves[1:].reshape(NUM_GROOVES, STEPS_PER_GROOVE, 2)
+            groove_bytes = repack_grooves(groove_arr)  # flat list, NUM_GROOVES * STEPS_PER_GROOVE
+            for k in new_grooves:
+                row = k - 1
+                slot_bytes = groove_bytes[row * STEPS_PER_GROOVE:(row + 1) * STEPS_PER_GROOVE]
+                write_sram_range(self.pyboy, GROOVES_ADDR.start + row * STEPS_PER_GROOVE, slot_bytes)
+                self._written_groove_ids.add(k)
+                if self._record_path is not None:
+                    self._recorded_entities.append(
+                        {"step": self._step_idx, "type": "groove", "id": k, "bytes": slot_bytes}
+                    )
+                print(f"[entity] groove {k} → SRAM", flush=True)
+
+        # ── Tables ────────────────────────────────────────────────────────────
+        occupied = np.array(banks.tables_occupied)
+        new_tables = [k for k in range(1, NUM_TABLES + 1)
+                      if occupied[k] and k not in self._written_table_ids]
+        if new_tables:
+            table_dict = _arr_to_tables_dict(banks.tables[1:])
+            regions = repack_tables(table_dict)
+            for k in new_tables:
+                row = k - 1
+                s, e = row * STEPS_PER_TABLE, (row + 1) * STEPS_PER_TABLE
+                r = {key: regions[key][s:e] for key in regions}
+                write_sram_range(self.pyboy, TABLE_ENVELOPES_ADDR.start  + row * STEPS_PER_TABLE, r["envelopes"])
+                write_sram_range(self.pyboy, TABLE_TRANSPOSES_ADDR.start + row * STEPS_PER_TABLE, r["transposes"])
+                write_sram_range(self.pyboy, TABLE_FX_ADDR.start         + row * STEPS_PER_TABLE, r["fx_cmd_1"])
+                write_sram_range(self.pyboy, TABLE_FX_VAL_ADDR.start     + row * STEPS_PER_TABLE, r["fx_val_1"])
+                write_sram_range(self.pyboy, TABLE_FX_2_ADDR.start       + row * STEPS_PER_TABLE, r["fx_cmd_2"])
+                write_sram_range(self.pyboy, TABLE_FX_2_VAL_ADDR.start   + row * STEPS_PER_TABLE, r["fx_val_2"])
+                write_sram(self.pyboy, TABLE_ALLOC_TABLE_ADDR.start + row, 1)
+                self._written_table_ids.add(k)
+                if self._record_path is not None:
+                    self._recorded_entities.append(
+                        {"step": self._step_idx, "type": "table", "id": k, **r}
+                    )
+                print(f"[entity] table {k} → SRAM", flush=True)
 
     def _generator_loop(self) -> None:
         """Generator thread body: produce tokens into _step_queue indefinitely."""
