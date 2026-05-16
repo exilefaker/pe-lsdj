@@ -22,6 +22,16 @@ dependencies = [
 testing = [
     "coverage==7.3.2",
     "pytest>=8.0",
+    "pyboy>=2.0.0",
+]
+
+streaming = [
+    "pyboy>=2.0.0",
+]
+
+web-ui = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
 ]
 
 examples = [
