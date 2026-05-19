@@ -426,6 +426,8 @@ def train(
     anneal_aug_steps: int = 0,
     label_smoothing: float = 0.0,
     weight_decay: float = 0.0,
+    sam: bool = False,
+    rho: float = 0.05,
 ):
     """
     Multi-song batching training loop.
@@ -458,11 +460,25 @@ def train(
             is_leaf=lambda x: x is None,
         )
 
-    optimizer = optax.chain(
+    _base_optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
         optax.adamw(schedule, weight_decay=weight_decay, mask=_wd_mask),
     )
+    if sam:
+        _adv_optimizer = optax.chain(optax.contrib.normalize(), optax.sgd(rho))
+        optimizer = optax.contrib.sam(_base_optimizer, _adv_optimizer, sync_period=2)
+        if log_every % 2 != 0:
+            print(f"Warning: SAM is enabled with log_every={log_every} (odd). "
+                  f"Checkpoints will alternate between sync and adversarial params. "
+                  f"Use an even log_every to ensure checkpoints are always at true weights.")
+    else:
+        optimizer = _base_optimizer
+
     opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
+    if sam:
+        # Start in sync mode so even steps align with log_every checkpoints.
+        # (Default sss=0 makes even steps adversarial; sss=1 flips the parity.)
+        opt_state = opt_state._replace(steps_since_sync=jnp.array(1, dtype=jnp.int32))
     start_step = 0
 
     # Resume from checkpoint if requested
@@ -474,6 +490,12 @@ def train(
             )
             if loaded_opt_state is not None:
                 opt_state = loaded_opt_state
+            if sam:
+                # Re-establish parity: even steps must be sync steps.
+                sss = 1 if start_step % 2 == 0 else 0
+                opt_state = opt_state._replace(
+                    steps_since_sync=jnp.array(sss, dtype=jnp.int32)
+                )
             print(f"Resumed from {ckpt_file} (step {start_step})")
         else:
             print("resume_from_checkpoint=True but no checkpoint found; starting fresh.")

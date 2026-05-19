@@ -19,6 +19,7 @@
 - [3/23/2026] Model v13
 - [5/4/2026] Live streaming pipeline working in emu
 - [5/15/2026] Full temperature / "model crossfade" controls + web UI
+- [5/19/2026] Add SAM (model v14)
 
 ## Model version history
 
@@ -44,6 +45,12 @@
 
 
 \* current model
+
+## Sharpness-Aware Minimization (SAM)
+
+A complementary loss that explicitly encourages flat minima by alternating between normal SDG and an "adversarial" step:
+
+[https://arxiv.org/abs/2010.01412](https://arxiv.org/abs/2010.01412)
 
 ## Training methodology notes
 
